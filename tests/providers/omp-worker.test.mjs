@@ -1,5 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -7,6 +16,7 @@ import test from "node:test";
 
 import {
   mapOmpUsage,
+  OMP_WORKER_ALLOWED_TOOLS,
   OMP_WORKER_DEFAULT_MODEL,
   OMP_WORKER_RESULT_SENTINEL,
   parseOmpModelSelector,
@@ -20,6 +30,8 @@ import {
   createOmpWorkerProvider,
   createOmpWorkerRunner,
 } from "../../packages/providers/src/omp-worker-provider.ts";
+import { findOmpInstall, resolveBunExecutable } from "../../packages/providers/src/omp-install.ts";
+import { createOmpWorkspaceTools } from "../../packages/providers/src/omp-workspace-tools.ts";
 
 const REASONING_MEDIUM = {
   effort: "medium",
@@ -83,6 +95,7 @@ function fakeOmpRuntime(input = {}) {
         "retry.modelFallback": false,
         "retry.usageAwareFallback": false,
         "retry.fallbackChains": {},
+        "tools.approvalMode": "write",
       };
       return {
         cwd,
@@ -90,6 +103,9 @@ function fakeOmpRuntime(input = {}) {
           return values[path];
         },
       };
+    },
+    async createWorkspaceTools(cwd) {
+      return createOmpWorkspaceTools(cwd, (definition) => definition);
     },
     async createAgentSession(options) {
       calls.sessionOptions.push(options);
@@ -125,7 +141,7 @@ function fakeOmpRuntime(input = {}) {
 function workerRequest(overrides = {}) {
   return {
     prompt: "ship the feature",
-    cwd: "/tmp/workspace",
+    cwd: process.cwd(),
     model: OMP_WORKER_DEFAULT_MODEL,
     reasoning: "medium",
     ...overrides,
@@ -137,7 +153,7 @@ test("parseOmpWorkerRequest accepts the shared worker request shape", () => {
     parseOmpWorkerRequest(JSON.stringify(workerRequest())),
     {
       prompt: "ship the feature",
-      cwd: "/tmp/workspace",
+      cwd: process.cwd(),
       model: "kimi-code/k3",
       reasoning: "medium",
     },
@@ -323,26 +339,214 @@ test("runOmpWorkerMain returns the final assistant text with summed cache usage"
   assert.equal(runtime.calls.authClosed, 1);
 });
 
-test("runOmpWorkerMain drives OMP's own tool loop with an isolated in-memory session", async () => {
+test("runOmpWorkerMain restricts the isolated OMP loop to workspace file tools", async () => {
   const runtime = fakeOmpRuntime();
   await runOmpWorkerMain({
-    stdin: JSON.stringify(workerRequest({ cwd: "/tmp/repo", reasoning: "max" })),
+    stdin: JSON.stringify(workerRequest({ reasoning: "max" })),
     loadRuntime: async () => runtime,
   });
 
   const options = runtime.calls.sessionOptions[0];
-  assert.equal(options.cwd, "/tmp/repo");
+  assert.equal(options.cwd, process.cwd());
   assert.equal(options.enableMCP, false);
   assert.equal(options.disableExtensionDiscovery, true);
-  assert.equal(options.autoApprove, true);
+  assert.equal(options.autoApprove, false);
+  assert.equal(options.restrictToolNames, true);
+  assert.equal(options.allowRestrictedCustomTools, true);
+  assert.deepEqual(options.toolNames, [...OMP_WORKER_ALLOWED_TOOLS]);
+  assert.deepEqual(options.customTools.map((tool) => tool.name), [
+    ...OMP_WORKER_ALLOWED_TOOLS,
+    "find",
+  ]);
+  assert.equal(options.toolNames.includes("bash"), false);
+  assert.equal(options.toolNames.includes("task"), false);
+  assert.equal(options.toolNames.includes("web_search"), false);
   assert.deepEqual(options.skills, []);
   assert.equal(options.thinkingLevel, "max");
-  assert.deepEqual(options.sessionManager, { cwd: "/tmp/repo" });
+  assert.deepEqual(options.sessionManager, { cwd: process.cwd() });
   assert.deepEqual(runtime.calls.prompts, ["ship the feature"]);
-  assert.deepEqual(runtime.calls.settingsCwds, ["/tmp/repo"]);
+  assert.deepEqual(runtime.calls.settingsCwds, [process.cwd()]);
   assert.equal(options.settings.get("retry.modelFallback"), false);
   assert.equal(options.settings.get("retry.usageAwareFallback"), false);
   assert.deepEqual(options.settings.get("retry.fallbackChains"), {});
+  assert.equal(options.settings.get("tools.approvalMode"), "write");
+});
+
+test("Node contract execution fails closed instead of reopening OMP workspace paths", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "unclecode-omp-tools-"));
+  try {
+    mkdirSync(path.join(workspace, "src"));
+    writeFileSync(path.join(workspace, "src", "one.txt"), "alpha\nbeta\n");
+    const tools = new Map(createOmpWorkspaceTools(realpathSync(workspace), (definition) => definition)
+      .map((tool) => [tool.name, tool]));
+
+    for (const operation of [
+      () => tools.get("read").execute("read-1", { path: "src/one.txt" }),
+      () => tools.get("grep").execute("grep-1", { path: "src", pattern: "beta" }),
+      () => tools.get("glob").execute("glob-1", { path: "src/**/*.txt" }),
+      () => tools.get("write").execute("write-1", { path: "src/two.txt", content: "needle\n" }),
+    ]) await assert.rejects(operation, /secure anchored workspace/i);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("Bun-side OMP file tools stay functional and reject deterministic read/write parent races", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "unclecode-omp-openat-"));
+  try {
+    const fixture = path.join(
+      process.cwd(),
+      "tests",
+      "providers",
+      "fixtures",
+      "omp-workspace-tools-boundary.mts",
+    );
+    const run = spawnSync(resolveBunExecutable(process.env), [fixture, root], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    assert.equal(run.status, 0, run.stderr || run.stdout);
+    assert.deepEqual(JSON.parse(run.stdout), {
+      read: "alpha\nbeta\n",
+      list: "one.txt",
+      grep: "src/one.txt:2:beta",
+      glob: "src/one.txt",
+      wrote: "changed\n",
+      raceHookCalls: 1,
+      raceRejected: true,
+      outside: "outside-owner-data\n",
+      original: "inside\n",
+      readRaceHookCalls: 1,
+      readRaceResult: "rejected",
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Windows OMP read, write, and edit route through the hardened Rust ACI boundary", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "unclecode-omp-windows-"));
+  try {
+    writeFileSync(path.join(workspace, "target.txt"), "needle\n");
+    const calls = [];
+    const runRustAci = async (args, cwd, stdin) => {
+      calls.push({ args, cwd, stdin });
+      return args[2] === "read-bounded-no-symlinks" ? "needle\n" : "Wrote target.txt\n";
+    };
+    const tools = new Map(createOmpWorkspaceTools(
+      realpathSync(workspace),
+      (definition) => definition,
+      { platform: "win32", runRustAci },
+    ).map((tool) => [tool.name, tool]));
+
+    assert.equal(
+      (await tools.get("read").execute("read", { path: "target.txt" })).content[0].text,
+      "needle\n",
+    );
+    await tools.get("write").execute("write", { path: "target.txt", content: "written\n" });
+    await tools.get("edit").execute("edit", {
+      path: "target.txt",
+      old_string: "needle",
+      new_string: "changed",
+    });
+    await assert.rejects(
+      tools.get("grep").execute("grep", { path: ".", pattern: "needle" }),
+      /secure Windows workspace search is unavailable/i,
+    );
+
+    assert.deepEqual(calls.map((call) => [call.args[2], call.args[3], call.stdin]), [
+      ["read-bounded-no-symlinks", "target.txt", undefined],
+      ["write-atomic-no-symlinks", "target.txt", "written\n"],
+      ["read-bounded-no-symlinks", "target.txt", undefined],
+      ["write-atomic-no-symlinks", "target.txt", "changed\n"],
+    ]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("every OMP workspace tool rejects absolute, home-relative, and parent-traversal paths", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "unclecode-omp-paths-"));
+  try {
+    writeFileSync(path.join(workspace, "inside.txt"), "inside\n");
+    const tools = new Map(createOmpWorkspaceTools(realpathSync(workspace), (definition) => definition)
+      .map((tool) => [tool.name, tool]));
+    const calls = {
+      read: (pathValue) => tools.get("read").execute("read", { path: pathValue }),
+      write: (pathValue) => tools.get("write").execute("write", { path: pathValue, content: "x" }),
+      edit: (pathValue) => tools.get("edit").execute("edit", { path: pathValue, old_string: "x", new_string: "y" }),
+      grep: (pathValue) => tools.get("grep").execute("grep", { path: pathValue, pattern: "x" }),
+      glob: (pathValue) => tools.get("glob").execute("glob", { path: pathValue }),
+      find: (pathValue) => tools.get("find").execute("find", { path: pathValue }),
+    };
+
+    for (const [toolName, invoke] of Object.entries(calls)) {
+      for (const rejectedPath of ["../outside.txt", "/etc/passwd", "~/.ssh/id_rsa", "src/../../outside"]) {
+        await assert.rejects(invoke(rejectedPath), /not allowed|outside|relative|traversal/i, `${toolName}: ${rejectedPath}`);
+      }
+    }
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("OMP workspace tools reject symlink paths that escape the canonical workspace", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "unclecode-omp-symlink-"));
+  const workspace = path.join(root, "workspace");
+  const outside = path.join(root, "outside");
+  try {
+    mkdirSync(workspace);
+    mkdirSync(outside);
+    writeFileSync(path.join(outside, "secret.txt"), "owner-token-secret\n");
+    symlinkSync(outside, path.join(workspace, "escape"));
+    const tools = new Map(createOmpWorkspaceTools(realpathSync(workspace), (definition) => definition)
+      .map((tool) => [tool.name, tool]));
+
+    await assert.rejects(tools.get("read").execute("read", { path: "escape/secret.txt" }), /outside|symbolic/i);
+    await assert.rejects(tools.get("write").execute("write", { path: "escape/new.txt", content: "x" }), /outside|symbolic/i);
+    await assert.rejects(tools.get("edit").execute("edit", {
+      path: "escape/secret.txt",
+      old_string: "secret",
+      new_string: "changed",
+    }), /outside|symbolic/i);
+    await assert.rejects(tools.get("grep").execute("grep", { path: "escape", pattern: "secret" }), /outside|symbolic/i);
+    await assert.rejects(tools.get("glob").execute("glob", { path: "escape/**/*.txt" }), /outside|symbolic/i);
+    await assert.rejects(tools.get("find").execute("find", { path: "escape/**/*.txt" }), /outside|symbolic/i);
+    assert.equal(readFileSync(path.join(outside, "secret.txt"), "utf8"), "owner-token-secret\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the installed OMP runtime accepts UncleCode's contained tool replacements", {
+  skip: !findOmpInstall(process.env),
+}, () => {
+  const install = findOmpInstall(process.env);
+  assert.ok(install);
+  const workspace = mkdtempSync(path.join(tmpdir(), "unclecode-real-omp-boundary-"));
+  try {
+    const fixture = path.join(process.cwd(), "tests", "providers", "fixtures", "omp-installed-boundary.mts");
+    const run = spawnSync(resolveBunExecutable(process.env), [fixture, workspace], {
+      cwd: process.cwd(),
+      // Source-tree tests may have stale ignored JS siblings. Point the Bun
+      // fixture at OMP's package entry so its locator takes the package walk.
+      env: { ...process.env, UNCLECODE_OMP_BIN: path.join(install.packageRoot, "dist", "cli.js") },
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    assert.equal(run.status, 0, run.stderr || run.stdout);
+    assert.deepEqual(JSON.parse(run.stdout), {
+      names: ["read", "write", "edit", "grep", "glob", "find"],
+      activeNames: ["read", "write", "edit", "grep", "glob"],
+      enabledNames: ["read", "write", "edit", "grep", "glob"],
+      builtInNames: [],
+      wrote: "contained\n",
+      escapeRejected: true,
+    });
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
 });
 
 test("runOmpWorkerMain reports a missing OMP install as OMP_UNAVAILABLE", async () => {

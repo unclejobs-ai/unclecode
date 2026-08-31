@@ -1,16 +1,7 @@
-# React + Vite
+# UncleCode Web
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+The web control room is a read-model and control client for the persistent UncleCode runtime. It does not run a second harness or SCC process, open a browser, or embed external social content.
 
-Currently, two official plugins are available:
+Configure the non-secret `VITE_UNCLECODE_SERVER_URL`, then run `npm run dev`. Supply the bearer token at runtime through `window.__UNCLECODE_CONFIG__ = { baseUrl, token }` before `src/main.jsx` loads, or enter it into the in-memory connection form. The token is not accepted from a Vite build-time variable, URL, local storage, or session storage.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+The client only sends credentials to an HTTP(S) loopback origin. All mutations pass through the server's typed runtime controls and canonical policy boundary.

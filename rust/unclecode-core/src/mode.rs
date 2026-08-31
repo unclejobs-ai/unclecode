@@ -105,8 +105,24 @@ pub fn persist_project_mode(workspace_root: &Path, mode: &str) -> Result<PathBuf
 }
 
 pub fn mode_label(mode: &str) -> String {
+    mode_label_for_locale(mode, "en")
+}
+
+pub fn mode_label_for_locale(mode: &str, locale: &str) -> String {
     let normalized = mode.trim().to_ascii_lowercase();
     if is_mode_profile_id(&normalized) {
+        if locale == "ko" {
+            return match normalized.as_str() {
+                "ultrawork" => "집중 작업 모드",
+                "search" => "탐색 모드",
+                "analyze" => "분석 모드",
+                "yolo" => "YOLO 모드",
+                "plan" => "계획 모드",
+                "build" => "구현 모드",
+                _ => "작업 모드",
+            }
+            .to_string();
+        }
         return mode_profile(&normalized).label.to_string();
     }
     format!("{normalized} mode")
@@ -116,7 +132,7 @@ pub fn mode_profile(mode: &str) -> ModeProfile {
     match mode {
         "ultrawork" => ModeProfile {
             id: "ultrawork",
-            label: "집중 작업 모드",
+            label: "Focus mode",
             editing: "allowed",
             search_depth: "deep",
             background_tasks: "preferred",
@@ -124,7 +140,7 @@ pub fn mode_profile(mode: &str) -> ModeProfile {
         },
         "search" => ModeProfile {
             id: "search",
-            label: "탐색 모드",
+            label: "Search mode",
             editing: "forbidden",
             search_depth: "deep",
             background_tasks: "preferred",
@@ -132,7 +148,7 @@ pub fn mode_profile(mode: &str) -> ModeProfile {
         },
         "analyze" => ModeProfile {
             id: "analyze",
-            label: "분석 모드",
+            label: "Analyze mode",
             editing: "reviewed",
             search_depth: "balanced",
             background_tasks: "allowed",
@@ -140,7 +156,7 @@ pub fn mode_profile(mode: &str) -> ModeProfile {
         },
         "yolo" => ModeProfile {
             id: "yolo",
-            label: "YOLO 모드",
+            label: "YOLO mode",
             editing: "allowed",
             search_depth: "balanced",
             background_tasks: "preferred",
@@ -148,7 +164,7 @@ pub fn mode_profile(mode: &str) -> ModeProfile {
         },
         "plan" => ModeProfile {
             id: "plan",
-            label: "계획 모드",
+            label: "Plan mode",
             editing: "forbidden",
             search_depth: "deep",
             background_tasks: "forbidden",
@@ -156,7 +172,7 @@ pub fn mode_profile(mode: &str) -> ModeProfile {
         },
         "build" => ModeProfile {
             id: "build",
-            label: "구현 모드",
+            label: "Build mode",
             editing: "allowed",
             search_depth: "balanced",
             background_tasks: "allowed",
@@ -164,7 +180,7 @@ pub fn mode_profile(mode: &str) -> ModeProfile {
         },
         _ => ModeProfile {
             id: "default",
-            label: "작업 모드",
+            label: "Work mode",
             editing: "allowed",
             search_depth: "balanced",
             background_tasks: "allowed",
@@ -210,7 +226,7 @@ mod tests {
 
         assert_eq!(config_path, root.join(".unclecode/config.json"));
         assert_eq!(status.profile.id, "yolo");
-        assert_eq!(status.profile.label, "YOLO 모드");
+        assert_eq!(status.profile.label, "YOLO mode");
         assert_eq!(status.source_label, "project config");
         let raw = fs::read_to_string(config_path).expect("config raw");
         assert!(raw.contains("\"mode\": \"yolo\""));
@@ -218,14 +234,16 @@ mod tests {
     }
 
     #[test]
-    fn mode_profiles_use_korean_operator_labels() {
-        assert_eq!(mode_label("default"), "작업 모드");
-        assert_eq!(mode_label("yolo"), "YOLO 모드");
-        assert_eq!(mode_label("ultrawork"), "집중 작업 모드");
-        assert_eq!(mode_label("search"), "탐색 모드");
-        assert_eq!(mode_label("analyze"), "분석 모드");
-        assert_eq!(mode_label("plan"), "계획 모드");
-        assert_eq!(mode_label("build"), "구현 모드");
+    fn mode_profiles_follow_explicit_operator_locale() {
+        assert_eq!(mode_label("default"), "Work mode");
+        assert_eq!(mode_label("yolo"), "YOLO mode");
+        assert_eq!(mode_label_for_locale("default", "ko"), "작업 모드");
+        assert_eq!(mode_label_for_locale("yolo", "ko"), "YOLO 모드");
+        assert_eq!(mode_label_for_locale("ultrawork", "ko"), "집중 작업 모드");
+        assert_eq!(mode_label_for_locale("search", "ko"), "탐색 모드");
+        assert_eq!(mode_label_for_locale("analyze", "ko"), "분석 모드");
+        assert_eq!(mode_label_for_locale("plan", "ko"), "계획 모드");
+        assert_eq!(mode_label_for_locale("build", "ko"), "구현 모드");
     }
 
     #[test]

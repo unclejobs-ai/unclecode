@@ -21,6 +21,8 @@ use unclecode_core::ux_text::format_work_shell_error_message;
 
 const OPENAI_DEFAULT_MODEL: &str = "gpt-5.5";
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+const DEEPSEEK_DEFAULT_MODEL: &str = "deepseek-chat";
+const DEEPSEEK_DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
 const ANTHROPIC_DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 const ANTHROPIC_DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
 const GEMINI_DEFAULT_MODEL: &str = "gemini-2.5-pro";
@@ -74,6 +76,21 @@ pub fn work_args_are_interactive_promptless(args: &[OsString]) -> bool {
             .prompt
             .as_deref()
             .is_none_or(|value| value.trim().is_empty())
+}
+
+pub fn work_args_have_prompt(args: &[OsString]) -> bool {
+    parse_work_args(args, PathBuf::from("."))
+        .prompt
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+pub fn work_args_request_metadata(args: &[OsString]) -> bool {
+    let parsed = parse_work_args(args, PathBuf::from("."));
+    parsed.show_help || parsed.show_tools
+}
+
+pub fn work_args_request_native_engine(args: &[OsString]) -> bool {
+    parse_work_args(args, PathBuf::from(".")).engine.as_deref() == Some("native")
 }
 
 pub fn run_top_level_work_command(args: &[OsString]) -> Result<u8, String> {
@@ -145,7 +162,7 @@ fn parse_work_args(args: &[OsString], caller_cwd: PathBuf) -> ParsedWorkArgs {
             }
             "--provider" => {
                 if let Some(next) = string_args.get(index + 1).map(String::as_str) {
-                    if matches!(next, "anthropic" | "gemini" | "openai") {
+                    if matches!(next, "anthropic" | "gemini" | "openai" | "deepseek") {
                         provider = Some(next.to_string());
                     }
                 }
@@ -778,11 +795,14 @@ fn drain_queue(
 
 fn resolve_provider(flag: Option<&str>, cwd: &Path) -> Result<String, String> {
     if let Some(provider) = flag {
-        return Ok(provider.to_string());
+        return match provider {
+            "anthropic" | "gemini" | "openai" | "deepseek" => Ok(provider.to_string()),
+            other => Err(format!("Unsupported runtime provider: {other}")),
+        };
     }
     let provider = env_value("LLM_PROVIDER", cwd).unwrap_or_else(|| "openai".to_string());
     match provider.as_str() {
-        "anthropic" | "gemini" | "openai" => Ok(provider),
+        "anthropic" | "gemini" | "openai" | "deepseek" => Ok(provider),
         other => Err(format!("Unsupported runtime provider: {other}")),
     }
 }
@@ -794,6 +814,7 @@ fn resolve_model(provider: &str, flag: Option<&str>, cwd: &Path) -> String {
     let (env_name, default_model) = match provider {
         "anthropic" => ("ANTHROPIC_MODEL", ANTHROPIC_DEFAULT_MODEL),
         "gemini" => ("GEMINI_MODEL", GEMINI_DEFAULT_MODEL),
+        "deepseek" => ("DEEPSEEK_MODEL", DEEPSEEK_DEFAULT_MODEL),
         _ => ("OPENAI_MODEL", OPENAI_DEFAULT_MODEL),
     };
     env_value(env_name, cwd).unwrap_or_else(|| default_model.to_string())
@@ -822,6 +843,8 @@ fn resolve_api_key(provider: &str, cwd: &Path) -> Result<String, String> {
             .ok_or_else(|| "ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic".to_string()),
         "gemini" => env_value("GEMINI_API_KEY", cwd)
             .ok_or_else(|| "GEMINI_API_KEY is required when LLM_PROVIDER=gemini".to_string()),
+        "deepseek" => env_value("DEEPSEEK_API_KEY", cwd)
+            .ok_or_else(|| "DEEPSEEK_API_KEY is required when LLM_PROVIDER=deepseek".to_string()),
         other => Err(format!("Unsupported runtime provider: {other}")),
     }
 }
@@ -836,15 +859,25 @@ fn resolve_base_url(provider: &str, cwd: &Path) -> String {
             &["GEMINI_BASE_URL", "GEMINI_API_BASE_URL"],
             GEMINI_DEFAULT_BASE_URL,
         ),
+        "deepseek" => (&["DEEPSEEK_BASE_URL"], DEEPSEEK_DEFAULT_BASE_URL),
         _ => (
             &["OPENAI_BASE_URL", "OPENAI_API_BASE_URL"],
             OPENAI_DEFAULT_BASE_URL,
         ),
     };
-    env_value_any(env_names, cwd)
+    let resolved = env_value_any(env_names, cwd)
         .map(|value| value.trim_end_matches('/').to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| default_url.to_string())
+        .unwrap_or_else(|| default_url.to_string());
+    if provider == "deepseek" {
+        resolved
+            .strip_suffix("/chat/completions")
+            .unwrap_or(&resolved)
+            .trim_end_matches('/')
+            .to_string()
+    } else {
+        resolved
+    }
 }
 
 fn resolve_reasoning(provider: &str, model: &str, override_effort: Option<&str>) -> Option<String> {
@@ -978,7 +1011,7 @@ fn print_work_help() {
     println!("  --help   Show this help text");
     println!("  --tools  List available local tools");
     println!("  --cwd    Set the workspace root");
-    println!("  --provider  Choose openai, anthropic, or gemini");
+    println!("  --provider  Choose openai, anthropic, gemini, or deepseek");
     println!("  --model  Override the model for the chosen provider");
     println!("  --reasoning  Override reasoning effort: low, medium, high");
     println!("  --session-id  Resume a persisted work session id");
@@ -998,7 +1031,7 @@ fn print_interactive_help() {
     println!("/auth status      Show OpenAI auth source, type, expiry, and scope state");
     println!("/model            Show current model");
     println!("/model <id>       Switch model and auto-route provider by model family");
-    println!("/provider <name>  Switch provider: openai, anthropic, or gemini");
+    println!("/provider <name>  Switch provider: openai, anthropic, gemini, or deepseek");
     println!("/tools            Show available local tools");
     println!("/queue [text]     Show queue or enqueue a follow-up");
     println!("/drain            Run queued follow-ups in order");
@@ -1205,6 +1238,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_deepseek_provider_for_the_native_work_entrypoint() {
+        let parsed = parse_work_args(
+            &[
+                OsString::from("--provider"),
+                OsString::from("deepseek"),
+                OsString::from("--model"),
+                OsString::from("deepseek-reasoner"),
+                OsString::from("review"),
+            ],
+            PathBuf::from("/tmp"),
+        );
+
+        assert_eq!(parsed.provider.as_deref(), Some("deepseek"));
+        assert_eq!(parsed.model.as_deref(), Some("deepseek-reasoner"));
+        assert_eq!(parsed.prompt.as_deref(), Some("review"));
+    }
+
+    #[test]
     fn shell_reentry_is_not_treated_as_a_model_prompt() {
         assert!(handle_shell_reentry("unclecode"));
         assert!(handle_shell_reentry("unclecode auth status"));
@@ -1306,9 +1357,41 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         let stub = dir.join("descendant.mjs");
+        let descendant = dir.join("descendant-child.mjs");
+        let outcome = dir.join("descendant-outcome.txt");
+        fs::write(
+            &descendant,
+            r#"import {writeFileSync} from "node:fs";
+const outcome = process.argv[2];
+process.on("SIGTERM", () => {
+  writeFileSync(outcome, "sigterm");
+  process.exit(0);
+});
+process.send?.("ready");
+setTimeout(() => {
+  writeFileSync(outcome, "fallback");
+  process.exit(0);
+}, 10000);"#,
+        )
+        .unwrap();
         fs::write(
             &stub,
-            "import {spawn} from \"node:child_process\";let input=\"\";process.stdin.on(\"data\",(d)=>input+=d).on(\"end\",()=>{JSON.parse(input);const child=spawn(process.execPath,[\"-e\",\"setTimeout(()=>{},2000)\"],{stdio:[\"ignore\",\"inherit\",\"inherit\"]});child.unref();process.stdout.write(JSON.stringify({status:\"ok\",text:\"done\",steps:1,costUsd:0}))});",
+            r#"import {spawn} from "node:child_process";
+import {fileURLToPath} from "node:url";
+let input = "";
+process.stdin.on("data", (data) => input += data).on("end", () => {
+  JSON.parse(input);
+  const child = spawn(process.execPath, [
+    fileURLToPath(new URL("./descendant-child.mjs", import.meta.url)),
+    fileURLToPath(new URL("./descendant-outcome.txt", import.meta.url)),
+  ], {stdio: ["ignore", "inherit", "inherit", "ipc"]});
+  child.once("message", (message) => {
+    if (message !== "ready") process.exit(2);
+    child.disconnect();
+    child.unref();
+    process.stdout.write(JSON.stringify({status: "ok", text: "done", steps: 1, costUsd: 0}));
+  });
+});"#,
         )
         .unwrap();
         let config = WorkRuntimeConfig {
@@ -1322,17 +1405,21 @@ mod tests {
             allow_run_shell: false,
             engine: "pi".to_string(),
         };
-        let started = std::time::Instant::now();
         let result = run_pi_bridge_turn_with_entry_timeout(
             &config,
             "hello",
             &stub,
             std::time::Duration::from_secs(3),
         );
+        let descendant_outcome = fs::read_to_string(&outcome);
         fs::remove_dir_all(&dir).ok();
 
         assert_eq!(result.unwrap().submission, "done");
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(
+            descendant_outcome.unwrap(),
+            "sigterm",
+            "descendant should be terminated with the helper process group before its fallback"
+        );
     }
 
     #[cfg(unix)]

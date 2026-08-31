@@ -30,10 +30,14 @@ export function getReasoningSupport(providerId: ProviderId, modelId: string): Re
   return UNSUPPORTED_REASONING;
 }
 
-export function detectProviderForModel(modelId: string): Extract<ProviderId, "openai" | "anthropic" | "gemini"> {
+export function detectProviderForModel(
+  modelId: string,
+): Extract<ProviderId, "openai" | "anthropic" | "gemini" | "deepseek"> {
   const stdout = runRustCommandSync(["rust", "model", "detect-provider", modelId], process.cwd());
   const provider = parseRustKeyValueLines(stdout).get("provider");
-  return provider === "anthropic" || provider === "gemini" ? provider : "openai";
+  return provider === "anthropic" || provider === "gemini" || provider === "deepseek"
+    ? provider
+    : "openai";
 }
 
 export type ProviderRoute = {

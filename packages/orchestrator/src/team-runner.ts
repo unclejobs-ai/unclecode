@@ -29,6 +29,7 @@ import {
 import { TeamBinding } from "./team-binding.js";
 import { sweepStaleLocks } from "./disk-ownership-registry.js";
 import { runRustCommandSync } from "./rust-command.js";
+import { createOwnedProcessGroupController } from "./process-group-settlement.js";
 
 export function buildWindowsTreeKillArgs(pid: number): readonly string[] {
   if (!Number.isSafeInteger(pid) || pid <= 0) {
@@ -37,23 +38,44 @@ export function buildWindowsTreeKillArgs(pid: number): readonly string[] {
   return ["/PID", String(pid), "/T", "/F"];
 }
 
+export type WindowsTreeKillSpawner = (
+  command: string,
+  args: readonly string[],
+) => ChildProcess;
+
+export async function waitForWindowsTreeKill(
+  pid: number,
+  spawnTreeKill: WindowsTreeKillSpawner = (command, args) => spawn(command, args as string[], {
+    stdio: "ignore",
+    windowsHide: true,
+  }),
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const taskkill = spawnTreeKill("taskkill", buildWindowsTreeKillArgs(pid));
+    taskkill.once("error", reject);
+    taskkill.once("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`taskkill exited with code ${code ?? "unknown"}`));
+    });
+  });
+}
+
 function killWorkerProcessTree(
   child: ChildProcess,
   signal: NodeJS.Signals,
-): void {
+): Promise<void> {
   if (child.pid === undefined) {
     child.kill(signal);
-    return;
+    return Promise.resolve();
   }
   if (process.platform === "win32") {
-    const taskkill = spawn("taskkill", buildWindowsTreeKillArgs(child.pid), {
-      stdio: "ignore",
-      windowsHide: true,
+    return waitForWindowsTreeKill(child.pid).catch(() => {
+      try {
+        child.kill(signal);
+      } catch {
+        // The direct child may already have exited after taskkill failed.
+      }
     });
-    taskkill.once("error", () => {
-      child.kill(signal);
-    });
-    return;
   }
   try {
     process.kill(-child.pid, signal);
@@ -67,6 +89,7 @@ function killWorkerProcessTree(
       child.kill(signal);
     }
   }
+  return Promise.resolve();
 }
 
 export type TeamRunnerOptions = {
@@ -418,12 +441,19 @@ function runWorker(input: {
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
     });
+    const processGroup = createOwnedProcessGroupController({
+      child,
+      label: `team worker ${input.spec.workerId}`,
+      forceKillDelayMs: 500,
+      signal: (signal) => killWorkerProcessTree(child, signal),
+    });
 
     const stdoutBuf = createCappedBuffer(WORKER_STREAM_CAP_BYTES);
     const stderrBuf = createCappedBuffer(WORKER_STREAM_CAP_BYTES);
     const stdoutTail = { pending: "" };
     const stderrTail = { pending: "" };
     let killedByTimeout = false;
+    let spawnError: Error | undefined;
     let timer: NodeJS.Timeout | null = null;
 
     const emitLines = (
@@ -459,7 +489,7 @@ function runWorker(input: {
     if (input.timeoutMs && input.timeoutMs > 0) {
       timer = setTimeout(() => {
         killedByTimeout = true;
-        killWorkerProcessTree(child, "SIGKILL");
+        void processGroup.terminate().catch(() => undefined);
       }, input.timeoutMs);
       if (typeof timer.unref === "function") timer.unref();
     }
@@ -485,9 +515,19 @@ function runWorker(input: {
     };
 
     child.on("error", (error) => {
-      finish("failed", -1, null, error instanceof Error ? error.message : String(error));
+      spawnError = error instanceof Error ? error : new Error(String(error));
     });
-    child.on("close", (code, signal) => {
+    child.on("close", async (code, signal) => {
+      try {
+        await (killedByTimeout ? processGroup.terminate() : processGroup.settle());
+      } catch (error) {
+        finish("failed", -1, signal, error instanceof Error ? error.message : String(error));
+        return;
+      }
+      if (spawnError) {
+        finish("failed", -1, signal, spawnError.message);
+        return;
+      }
       const outcome = resolveWorkerCloseOutcome({ killedByTimeout, code, signal });
       finish(outcome.status, outcome.exitCode, outcome.signal);
     });

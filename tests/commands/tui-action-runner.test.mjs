@@ -98,7 +98,7 @@ test("runTuiSessionCenterAction executes doctor inline", async () => {
 test("formatModeSetReport uses the Rust operator label", () => {
   assert.match(
     formatModeSetReport("ultrawork", "/tmp/unclecode-config.json"),
-    /Label: 집중 작업 모드/,
+    /Label: Focus mode/,
   );
 });
 
@@ -133,14 +133,14 @@ test("runTuiSessionCenterAction can cycle and persist the next mode inline", asy
     });
 
     assert.match(lines.join("\n"), /Active mode saved: ultrawork/);
-    assert.match(lines.join("\n"), /Label:\s+집중 작업 모드/);
+    assert.match(lines.join("\n"), /Label:\s+Focus mode/);
 
     const homeState = await buildTuiHomeState({
       workspaceRoot: cwd,
       env: process.env,
     });
 
-    assert.equal(homeState.modeLabel, "집중 작업 모드");
+    assert.equal(homeState.modeLabel, "Focus mode");
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -157,13 +157,13 @@ test("runWorkShellInlineAction supports explicit mode set commands", async () =>
     });
 
     assert.match(lines.join("\n"), /Active mode saved: search/);
-    assert.match(lines.join("\n"), /Label:\s+탐색 모드/);
+    assert.match(lines.join("\n"), /Label:\s+Search mode/);
 
     const homeState = await buildTuiHomeState({
       workspaceRoot: cwd,
       env: process.env,
     });
-    assert.equal(homeState.modeLabel, "탐색 모드");
+    assert.equal(homeState.modeLabel, "Search mode");
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -302,10 +302,11 @@ test("runTuiSessionCenterAction auth logout reports remaining env auth honestly"
   }
 });
 
-test("runTuiSessionCenterAction completes browser login inline and writes credentials", async () => {
+test("runTuiSessionCenterAction prints the browser login URL and writes credentials", async () => {
   const cwd = makeTempWorkspace();
   const credentialsPath = path.join(cwd, "openai.json");
   const progress = [];
+  let authorizationUrl;
 
   try {
     const lines = await runTuiSessionCenterAction({
@@ -326,13 +327,17 @@ test("runTuiSessionCenterAction completes browser login inline and writes creden
           };
         },
       }),
-      waitForBrowserCallback: async ({ url }) => `${url}&code=browser-code`,
-      openExternalUrl: async () => undefined,
+      waitForBrowserCallback: async ({ url }) => {
+        authorizationUrl = url;
+        return `${url}&code=browser-code`;
+      },
       onProgress: (line) => progress.push(line),
     });
 
+    assert.match(authorizationUrl, /^https:\/\/auth\.openai\.com\/oauth\/authorize\?/);
     assert.deepEqual(progress, [
-      "Opening browser…",
+      "Open this URL in your browser:",
+      authorizationUrl,
       "Waiting for callback…",
       "Saving auth…",
       "Auth ready.",

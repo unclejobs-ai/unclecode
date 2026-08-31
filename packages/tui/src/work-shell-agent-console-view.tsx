@@ -1,5 +1,6 @@
 import type { AgentConsoleSnapshot } from "@unclecode/contracts";
 import {
+  getWorkShellMessages,
   resolveAgentConsoleSelection,
   type AgentConsoleViewState,
 } from "@unclecode/orchestrator";
@@ -7,17 +8,17 @@ import { Box, Text } from "ink";
 import React from "react";
 
 import type { ContextInspectorPalette } from "./work-shell-context-inspector-model.js";
+import { selectRecordedEvolutionProposalLines } from "./evolution-proposal-lines.js";
 import { getDisplayWidth, truncateForDisplayWidth } from "./text-width.js";
 import {
   agentConsoleStatusGlyph,
-  formatCount,
   type AgentConsoleRowTone,
 } from "./work-shell-agent-console-format.js";
 import {
   formatAgentConsoleTotalCost,
-  selectActiveAgentHudRows,
   selectAgentConsoleInspector,
   selectAgentConsoleRows,
+  selectQualityReviewLines,
   selectWorkGraphHudRows,
   type AgentConsoleInspector,
   type AgentConsoleRow,
@@ -31,7 +32,7 @@ import {
  */
 
 /** Two panes need this much room before the roster stops being a column. */
-const CONSOLE_TWO_PANE_MIN_WIDTH = 84;
+const CONSOLE_TWO_PANE_MIN_WIDTH = 100;
 /** Fraction of the console body the roster takes when both panes fit. */
 const CONSOLE_ROSTER_FRACTION = 0.38;
 /** Visible roster window; a long session scrolls rather than growing the frame. */
@@ -40,19 +41,20 @@ const CONSOLE_ROSTER_WINDOW = 10;
 const CONSOLE_KEY_HINTS = "j/k move · Tab pane · s steer · x cancel · r continue · Esc close";
 
 /** `  ◐ body` — the leading glyph is the only part that carries colour. */
-const HUD_ROW_RE = /^ {2}([◐○●▲✕⊘]) (.*)$/;
+const HUD_ROW_RE = /^ {2}([✓●○×◆◐▲✕⊘]) (.*)$/;
 
 export function WorkShellAgentConsoleHud(props: {
   readonly snapshot: AgentConsoleSnapshot;
   readonly width: number;
   readonly palette: ContextInspectorPalette;
   readonly now?: number;
+  readonly uiLocale?: "en" | "ko";
 }): React.ReactNode {
-  const now = props.now ?? Date.now();
-  const rows = [
-    ...selectWorkGraphHudRows(props.snapshot, props.width),
-    ...selectActiveAgentHudRows(props.snapshot, now, props.width),
-  ];
+  const rows = selectWorkGraphHudRows(
+    props.snapshot,
+    props.width,
+    { uiLocale: props.uiLocale ?? "en" },
+  );
   if (rows.length === 0) {
     return null;
   }
@@ -75,13 +77,31 @@ export function WorkShellAgentConsoleOverlay(props: {
   readonly borderColor: string;
   readonly palette: ContextInspectorPalette;
   readonly now?: number;
+  readonly uiLocale?: "en" | "ko";
 }): React.ReactNode {
+  const uiLocale = props.uiLocale ?? "en";
+  const m = getWorkShellMessages(uiLocale);
   const now = props.now ?? Date.now();
   const body = Math.max(24, props.width - 4);
-  const rows = selectAgentConsoleRows(props.snapshot, props.view.tab);
+  const rows = selectAgentConsoleRows(props.snapshot, props.view.tab, uiLocale);
+  const qualityReview = props.view.tab === "quality"
+    ? selectQualityReviewLines(props.snapshot, body, uiLocale)
+    : [];
+  // Quality has no row-level inspector until the engine records a review
+  // event. Keep the idle/active-no-history state focused on the SCC action
+  // instead of showing a dead roster and a generic "Select a row" pane.
+  if (props.view.tab === "quality" && rows.length === 0) {
+    return renderEmptyQualityCockpit({
+      lines: qualityReview,
+      width: props.width,
+      palette: props.palette,
+      uiLocale,
+    });
+  }
   // The breakpoint is a promise about the operator's terminal. Measuring the
   // console's own inner width instead silently moved it four columns out.
-  const twoPane = props.terminalColumns >= CONSOLE_TWO_PANE_MIN_WIDTH;
+  const twoPane = props.terminalColumns >= CONSOLE_TWO_PANE_MIN_WIDTH
+    && (props.view.tab !== "quality" || props.view.inspectorVisible);
   const rosterWidth = twoPane ? Math.max(18, Math.trunc(body * CONSOLE_ROSTER_FRACTION)) : body;
   // The inspector column owns the divider as a left rule plus one column of
   // padding, so the panes are separated by exactly one line of chrome.
@@ -91,12 +111,13 @@ export function WorkShellAgentConsoleOverlay(props: {
     resolveAgentConsoleSelection(props.view, props.snapshot),
     now,
     twoPane ? Math.max(16, inspectorWidth - 2) : body,
+    uiLocale,
   );
 
   const roster = (
     <Box width={twoPane ? rosterWidth : body} flexDirection="column">
       {rows.length === 0
-        ? <Text color={props.palette.textMuted}>{emptyRosterLabel(props.view.tab)}</Text>
+        ? <Text color={props.palette.textMuted}>{emptyRosterLabel(props.view.tab, uiLocale)}</Text>
         : rosterWindow(rows, props.view.cursor).map(({ row, index }) => (
           <AgentConsoleRosterLine
             key={row.id}
@@ -108,7 +129,9 @@ export function WorkShellAgentConsoleOverlay(props: {
         ))}
       {rows.length > CONSOLE_ROSTER_WINDOW ? (
         <Text color={props.palette.textDim}>
-          {`  … ${rows.length - CONSOLE_ROSTER_WINDOW} more off screen`}
+          {uiLocale === "ko"
+            ? `  … 화면 밖 ${rows.length - CONSOLE_ROSTER_WINDOW}개 더 있음`
+            : `  … ${rows.length - CONSOLE_ROSTER_WINDOW} more off screen`}
         </Text>
       ) : null}
     </Box>
@@ -130,12 +153,15 @@ export function WorkShellAgentConsoleOverlay(props: {
         : {})}
     >
       {inspector === undefined
-        ? <Text color={props.palette.textMuted}>Select a row to inspect.</Text>
-        : renderInspector(inspector, props.palette)}
+        ? <Text color={props.palette.textMuted}>{uiLocale === "ko" ? "검토할 행을 선택하세요." : "Select a row to inspect."}</Text>
+        : renderInspector(inspector, props.palette, uiLocale)}
     </Box>
   );
 
   const totalCost = formatAgentConsoleTotalCost(props.snapshot);
+  const recordedEvolution = props.view.tab === "quality" && props.view.inspectorVisible
+    ? selectRecordedEvolutionProposalLines(props.snapshot.evolutionProposals?.at(-1), body)
+    : [];
 
   return (
     <Box
@@ -147,51 +173,125 @@ export function WorkShellAgentConsoleOverlay(props: {
       width={props.width}
     >
       <Text>
-        <Text color={props.palette.assistant} bold>▤ Agent Console</Text>
-        <Text color={props.palette.textMuted}>
-          {totalCost === undefined ? "  session runs" : `  session runs · ${totalCost} spent`}
-        </Text>
-      </Text>
-      <Text>
-        {(["agents", "jobs", "plan"] as const).map((tab, index) => (
-          <Text key={tab}>
-            {index === 0 ? "" : "  "}
-            <Text
-              color={tab === props.view.tab ? props.palette.assistant : props.palette.textMuted}
-              bold={tab === props.view.tab}
-            >
-              {tab === props.view.tab ? `[${TAB_LABELS[tab]}]` : TAB_LABELS[tab]}
-            </Text>
+        <Text color={props.palette.assistant} bold>{props.view.tab === "quality"
+          ? (uiLocale === "ko" ? "◆ SCC 품질 엔진" : "◆ SCC Quality Engine")
+          : (uiLocale === "ko" ? "▤ 에이전트 콘솔" : "▤ Agent Console")}</Text>
+        {props.view.tab !== "quality" ? (
+          <Text color={props.palette.textMuted}>
+            {totalCost === undefined
+              ? (uiLocale === "ko" ? "  세션 실행" : "  session runs")
+              : (uiLocale === "ko" ? `  세션 실행 · ${totalCost} 사용` : `  session runs · ${totalCost} spent`)}
           </Text>
-        ))}
-        <Text color={props.palette.textDim}>
-          {truncateForDisplayWidth(
-            `  · ${formatCount(props.snapshot.agents.length, "agent", "agents")}`
-            + ` · ${formatCount(props.snapshot.jobs.length, "job", "jobs")}`
-            + ` · ${formatCount(props.snapshot.workGraph?.nodes.length ?? 0, "task", "tasks")}`,
-            Math.max(0, body - 26),
-          )}
-        </Text>
+        ) : null}
       </Text>
+      {props.view.tab !== "quality" ? (
+        <Text>
+          {(["agents", "jobs", "plan", "quality"] as const).map((tab, index) => (
+            <Text key={tab}>
+              {index === 0 ? "" : "  "}
+              <Text
+                color={tab === props.view.tab ? props.palette.assistant : props.palette.textMuted}
+                bold={tab === props.view.tab}
+              >
+                {tab === props.view.tab ? `[${tabLabel(tab, uiLocale)}]` : tabLabel(tab, uiLocale)}
+              </Text>
+            </Text>
+          ))}
+          <Text color={props.palette.textDim}>
+            {truncateForDisplayWidth(
+              `  · ${props.snapshot.agents.length} ${props.snapshot.agents.length === 1 ? m.agent : m.agents}`
+              + ` · ${props.snapshot.jobs.length} ${props.snapshot.jobs.length === 1 ? m.job : m.jobs}`
+              + ` · ${props.snapshot.workGraph?.nodes.length ?? 0} ${uiLocale === "ko" ? "단계" : ((props.snapshot.workGraph?.nodes.length ?? 0) === 1 ? "task" : "tasks")}`,
+              Math.max(0, body - 26),
+            )}
+          </Text>
+        </Text>
+      ) : null}
 
-      <Box marginTop={1} flexDirection="row">
-        {twoPane ? roster : props.view.inspectorVisible ? inspectorPane : roster}
-        {twoPane ? inspectorPane : null}
-      </Box>
+      {qualityReview.length > 0 ? (
+        <Box marginTop={1} flexDirection="column">
+          {qualityReview.map((line) => (
+            <Text key={line} color={props.palette.textMuted}>{line}</Text>
+          ))}
+        </Box>
+      ) : null}
+
+      {recordedEvolution.length > 0 ? (
+        <Box marginTop={1} flexDirection="column">
+          {recordedEvolution.map((line) => (
+            <Text key={line} color={props.palette.textMuted}>{line}</Text>
+          ))}
+        </Box>
+      ) : null}
+
+      {props.view.tab !== "quality" || props.view.inspectorVisible ? (
+        <Box marginTop={1} flexDirection="row">
+          {twoPane ? roster : props.view.inspectorVisible ? inspectorPane : roster}
+          {twoPane ? inspectorPane : null}
+        </Box>
+      ) : null}
 
       <Box marginTop={1}>
-        <Text color={props.palette.textDim}>{truncateForDisplayWidth(CONSOLE_KEY_HINTS, body)}</Text>
+        <Text color={props.palette.textDim}>{truncateForDisplayWidth(
+          props.view.tab === "quality"
+            ? (props.view.inspectorVisible
+              ? (uiLocale === "ko"
+                ? "j/k 기록 이동 · Enter 요약 · Esc 닫기 · 읽기 전용"
+                : "j/k history · Enter summary · Esc close · read-only")
+              : (uiLocale === "ko"
+                ? "Enter 증거 보기 · Esc 닫기 · 읽기 전용"
+                : "Enter evidence · Esc close · read-only"))
+            : (uiLocale === "ko" ? "j/k 이동 · Tab 창 · s 조정 · x 취소 · r 계속 · Esc 닫기" : CONSOLE_KEY_HINTS),
+          body,
+        )}</Text>
       </Box>
     </Box>
   );
 }
 
-const TAB_LABELS = { agents: "Agents", jobs: "Jobs", plan: "Plan" } as const;
+function renderEmptyQualityCockpit(props: {
+  readonly lines: readonly string[];
+  readonly width: number;
+  readonly palette: ContextInspectorPalette;
+  readonly uiLocale: "en" | "ko";
+}): React.ReactNode {
+  const hint = props.uiLocale === "ko"
+    ? "Esc 닫기 · 작업을 시작하거나 /scc review <대상> 실행"
+    : "Esc close · start a task or run /scc review <target>";
+  return (
+    <Box marginTop={1} flexDirection="column" width={props.width}>
+      {props.lines.map((line, index) => (
+        <Text key={`${index}:${line}`} color={index === 0 ? props.palette.assistant : props.palette.textMuted}>
+          {line}
+        </Text>
+      ))}
+      <Box marginTop={1}>
+        <Text color={props.palette.textDim}>{truncateForDisplayWidth(hint, Math.max(20, props.width))}</Text>
+      </Box>
+    </Box>
+  );
+}
+
+const TAB_LABELS = { agents: "Agents", jobs: "Jobs", plan: "Plan", quality: "Quality" } as const;
+
+function tabLabel(tab: keyof typeof TAB_LABELS, uiLocale: "en" | "ko"): string {
+  if (uiLocale === "en") return TAB_LABELS[tab];
+  return ({ agents: "에이전트", jobs: "작업", plan: "계획", quality: "품질" } as const)[tab];
+}
 
 function renderInspector(
   inspector: AgentConsoleInspector,
   palette: ContextInspectorPalette,
+  uiLocale: "en" | "ko" = "en",
 ): React.ReactNode {
+  const localizedFacts = inspector.facts.map((fact) => ({
+    ...fact,
+    localizedLabel: localizeInspectorLabel(fact.label, uiLocale),
+  }));
+  const factLabelWidth = localizedFacts.reduce(
+    (width, fact) => Math.max(width, getDisplayWidth(fact.localizedLabel) + 1),
+    0,
+  );
   return (
     <>
       <Text>
@@ -203,10 +303,10 @@ function renderInspector(
       <Text color={palette.textMuted}>{inspector.subtitle}</Text>
       {inspector.facts.length > 0 ? (
         <Box marginTop={1} flexDirection="column">
-          {inspector.facts.map((fact) => (
+          {localizedFacts.map((fact) => (
             <Text key={fact.label}>
               <Text color={palette.textDim}>
-                {`${fact.label}${" ".repeat(Math.max(1, inspector.factLabelWidth - getDisplayWidth(fact.label)))}`}
+                {`${fact.localizedLabel}${" ".repeat(Math.max(1, factLabelWidth - getDisplayWidth(fact.localizedLabel)))}`}
               </Text>
               <Text color={palette.text}>{fact.value}</Text>
             </Text>
@@ -215,12 +315,12 @@ function renderInspector(
       ) : null}
       {inspector.timeline.length > 0 ? (
         <Box marginTop={1} flexDirection="column">
-          <Text color={palette.textDim}>Activity</Text>
+          <Text color={palette.textDim}>{uiLocale === "ko" ? "활동" : "Activity"}</Text>
           {inspector.timeline.map((line, index) => (
             <AgentConsoleHudLine key={`${index}:${line}`} line={line} palette={palette} />
           ))}
           {inspector.hiddenTimelineCount > 0 ? (
-            <Text color={palette.textDim}>{`  … +${inspector.hiddenTimelineCount} earlier`}</Text>
+            <Text color={palette.textDim}>{uiLocale === "ko" ? `  … 이전 ${inspector.hiddenTimelineCount}개 더 있음` : `  … +${inspector.hiddenTimelineCount} earlier`}</Text>
           ) : null}
         </Box>
       ) : null}
@@ -233,6 +333,41 @@ function renderInspector(
       ) : null}
     </>
   );
+}
+
+function localizeInspectorLabel(label: string, uiLocale: "en" | "ko"): string {
+  if (uiLocale !== "ko") return label;
+  return ({
+    Duration: "기간",
+    Elapsed: "경과",
+    Lineage: "계보",
+    Activity: "활동",
+    Input: "입력",
+    Queued: "대기",
+    Owner: "소유자",
+    "Depends on": "종속",
+    Owns: "소유 경로",
+    Acceptance: "승인 기준",
+    Evidence: "증거",
+    Artifacts: "산출물",
+    Stage: "단계",
+    Role: "역할",
+    Attempt: "시도",
+    Review: "검토",
+    Gate: "게이트",
+    Completion: "완료",
+    Reviewer: "검토자",
+    "Reviewer run": "검토 실행",
+    Route: "경로",
+    "Reviewed hash": "검토 해시",
+    "Current hash": "현재 해시",
+    "Artifact hash": "산출물 해시",
+    Iteration: "반복",
+    Verification: "검증",
+    Tokens: "토큰",
+    Cost: "비용",
+    Model: "모델",
+  } as Readonly<Record<string, string>>)[label] ?? label;
 }
 
 const AgentConsoleRosterLine = React.memo(function AgentConsoleRosterLine(props: {
@@ -281,6 +416,9 @@ const AgentConsoleHudLine = React.memo(function AgentConsoleHudLine(props: {
 });
 
 const HUD_GLYPH_TONES: Readonly<Record<string, AgentConsoleRowTone>> = {
+  "✓": "success",
+  "×": "danger",
+  "◆": "warning",
   "◐": "active",
   "●": "success",
   "▲": "warning",
@@ -306,7 +444,13 @@ function toneColor(
   }
 }
 
-function emptyRosterLabel(tab: AgentConsoleViewState["tab"]): string {
+function emptyRosterLabel(tab: AgentConsoleViewState["tab"], uiLocale: "en" | "ko" = "en"): string {
+  if (uiLocale === "ko") {
+    if (tab === "agents") return "이 세션에 위임된 에이전트 실행이 없습니다.";
+    if (tab === "jobs") return "이 세션에 백그라운드 작업이 없습니다.";
+    if (tab === "quality") return "아직 품질 엔진 검토 기록이 없습니다.";
+    return "아직 승인된 작업 그래프가 없습니다.";
+  }
   switch (tab) {
     case "agents":
       return "No delegated agent runs in this session.";
@@ -314,6 +458,8 @@ function emptyRosterLabel(tab: AgentConsoleViewState["tab"]): string {
       return "No background jobs in this session.";
     case "plan":
       return "No approved work graph yet.";
+    case "quality":
+      return "No Quality Engine review history yet.";
   }
 }
 

@@ -1,10 +1,12 @@
 import type {
+  CacheTelemetrySnapshot,
   ModeBackgroundTaskPolicy,
   ModeEditingPolicy,
   ModeExplanationStyle,
   ModeProfileId,
   ModeSearchDepth,
 } from "@unclecode/contracts";
+import { createInstrumentedLruCache } from "@unclecode/contracts";
 import { homedir } from "node:os";
 import path from "node:path";
 
@@ -36,50 +38,66 @@ type ExtensionManifestPayload = {
   readonly summaries: readonly ExtensionManifestSummary[];
 };
 
-const manifestCache = new Map<string, ExtensionManifestPayload>();
+const MANIFEST_CACHE_MAX_ENTRIES = 32;
+const MANIFEST_CACHE_MAX_RETAINED_BYTES = 4 * 1024 * 1024;
+const manifestCache = createInstrumentedLruCache<string, ExtensionManifestPayload>({
+  name: "orchestrator-extension-manifests",
+  maxEntries: MANIFEST_CACHE_MAX_ENTRIES,
+  maxRetainedBytes: MANIFEST_CACHE_MAX_RETAINED_BYTES,
+});
 let extensionRegistryCacheGeneration = 0;
 
-function getManifestCacheKey(input: {
+type ExtensionRegistryInput = {
   readonly workspaceRoot?: string;
   readonly userHomeDir?: string;
-} = {}): string {
+  readonly env?: NodeJS.ProcessEnv;
+};
+
+function resolveUserHomeDir(input: ExtensionRegistryInput): string {
+  if (input.userHomeDir !== undefined) {
+    return input.userHomeDir;
+  }
+  return (input.env ? input.env.HOME : process.env.HOME) ?? homedir();
+}
+
+function getManifestCacheKey(input: ExtensionRegistryInput = {}): string {
   const workspaceRoot = input.workspaceRoot ?? process.cwd();
-  const userHomeDir = input.userHomeDir ?? process.env.HOME ?? homedir();
+  const userHomeDir = resolveUserHomeDir(input);
   return `${path.resolve(workspaceRoot)}::${path.resolve(userHomeDir)}`;
 }
 
-export function clearExtensionRegistryCache(input?: {
-  readonly workspaceRoot?: string;
-  readonly userHomeDir?: string;
-}): void {
+export function clearExtensionRegistryCache(input?: ExtensionRegistryInput): void {
   extensionRegistryCacheGeneration += 1;
   if (!input?.workspaceRoot && !input?.userHomeDir) {
-    manifestCache.clear();
+    manifestCache.invalidateAll();
     return;
   }
 
-  manifestCache.delete(getManifestCacheKey(input));
+  manifestCache.invalidate(getManifestCacheKey(input));
 }
 
 export function getExtensionRegistryCacheGeneration(): number {
   return extensionRegistryCacheGeneration;
 }
 
-function loadExtensionManifestPayload(input: {
-  readonly workspaceRoot?: string;
-  readonly userHomeDir?: string;
-} = {}): ExtensionManifestPayload {
+export function getExtensionRegistryCacheTelemetrySnapshot(): CacheTelemetrySnapshot {
+  return manifestCache.snapshot();
+}
+
+function loadExtensionManifestPayload(input: ExtensionRegistryInput = {}): ExtensionManifestPayload {
   const cacheKey = getManifestCacheKey(input);
-  const cached = manifestCache.get(cacheKey);
-  if (cached) {
-    return cached;
+  const cached = manifestCache.lookup(cacheKey);
+  if (cached.hit) {
+    return cached.value;
   }
 
   const workspaceRoot = input.workspaceRoot ?? process.cwd();
-  const userHomeDir = input.userHomeDir ?? process.env.HOME ?? homedir();
+  const userHomeDir = resolveUserHomeDir(input);
   const raw = runRustCommandSync(
     ["rust", "command", "extension-manifests", workspaceRoot, userHomeDir || "-"],
     workspaceRoot,
+    undefined,
+    input.env ?? process.env,
   ).trim();
   const parsed = JSON.parse(raw) as unknown;
   if (!isRecord(parsed) || !Array.isArray(parsed.configOverlays) || !Array.isArray(parsed.summaries)) {
@@ -94,15 +112,14 @@ function loadExtensionManifestPayload(input: {
   return loaded;
 }
 
-export function loadExtensionSlashCommands(input: {
-  readonly workspaceRoot?: string;
-  readonly userHomeDir?: string;
-} = {}): readonly RegisteredSlashCommand[] {
+export function loadExtensionSlashCommands(input: ExtensionRegistryInput = {}): readonly RegisteredSlashCommand[] {
   const workspaceRoot = input.workspaceRoot ?? process.cwd();
-  const userHomeDir = input.userHomeDir ?? process.env.HOME ?? homedir();
+  const userHomeDir = resolveUserHomeDir(input);
   const raw = runRustCommandSync(
     ["rust", "command", "extension-slash-commands", workspaceRoot, userHomeDir || "-"],
     workspaceRoot,
+    undefined,
+    input.env ?? process.env,
   ).trim();
   const parsed = JSON.parse(raw) as unknown;
   if (!Array.isArray(parsed)) {
@@ -130,17 +147,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function loadExtensionConfigOverlays(input: {
-  readonly workspaceRoot?: string;
-  readonly userHomeDir?: string;
-} = {}): readonly { readonly name: string; readonly config: ExtensionManifestConfigLayer }[] {
+export function loadExtensionConfigOverlays(
+  input: ExtensionRegistryInput = {},
+): readonly { readonly name: string; readonly config: ExtensionManifestConfigLayer }[] {
   return loadExtensionManifestPayload(input).configOverlays;
 }
 
-export function loadExtensionManifestSummaries(input: {
-  readonly workspaceRoot?: string;
-  readonly userHomeDir?: string;
-} = {}): readonly ExtensionManifestSummary[] {
+export function loadExtensionManifestSummaries(
+  input: ExtensionRegistryInput = {},
+): readonly ExtensionManifestSummary[] {
   return loadExtensionManifestPayload(input).summaries;
 }
 

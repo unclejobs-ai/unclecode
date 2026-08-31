@@ -944,7 +944,7 @@ test("getSessionCenterEscapeHint describes the next visible Escape action", () =
       hasSelectedApproval: false,
       hasEmbeddedWorkPane: true,
     }),
-    "Ctrl+O context",
+    "? sessions",
   );
   assert.equal(
     getSessionCenterEscapeHint({

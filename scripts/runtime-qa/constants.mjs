@@ -6,12 +6,22 @@ export const reportPath = path.join(repoRoot, ".unclecode", "qa", "runtime-qa-la
 export const tmpPrefix = "unclecode-runtime-qa-";
 
 export const responseText = "UNCLECODE_RUNTIME_QA_OK";
+export const scrollbackResponseText = (prompt) => `${responseText} · ${prompt}`;
 export const ttyResponseText = "UNCLECODE_TTY_QA_OK";
 export const fullTuiResponseText = "UNCLECODE_FULL_TUI_QA_OK";
 export const yoloGreetingResponseText = "UNCLECODE_YOLO_GREETING_QA_OK";
 export const koreanBusyPromptText = "한글 스피너 QA";
 export const koreanBusyResponseText = "하이요! 편하게 말씀 주세요.";
-export const realUseFirstPromptText = "실사용 스트레스 첫 번째";
+export const koreanBusyStatusPattern =
+  /(?:^|\n)\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+(?:컨텍스트 준비 중|컨텍스트 읽는 중|생각 중|다음 단계 검토 중|작업 계획 중|응답 작성 중|검토 중|병렬 작업 중|작업 중|모델 .+ 호출 중|도구 실행 중|결과 확인 중|변경 적용 중|대기 중|응답 수신 중)/u;
+export const busySpinnerRowPattern =
+  /^\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠁⠂⠄⠠⠐⠈]\s+\S/u;
+export const englishBusyChromePattern =
+  /(?:^|\n)\s*(?:[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠁⠂⠄⠠⠐⠈]\s+)?(?:Preparing context|Reading context|Thinking(?: through the next step)?(?:·[^\n]*)?|Reasoning(?:·[^\n]*)?|Checking next move|Planning work|Composing answer|Drafting response|Reviewing results|Running parallel work|Coordinating workers|Working|Queued|Receiving reply|Running tools|Checking result|Applying changes|Queue a follow-up|Enter queue)(?:\s|·|$)/iu;
+// Keep this above Composer's large single-chunk threshold. tmux sends the
+// complete prompt followed immediately by CR, matching terminal paste/input
+// bursts that must submit on the first Enter.
+export const realUseFirstPromptText = `실사용 긴 프롬프트 즉시 제출 검증: ${"가".repeat(48)}`;
 export const realUseFirstResponseText = "REAL_USE_FIRST_OK";
 export const realUseQueuedPromptText = "큐 후속 질문";
 export const realUseQueuedResponseText = "REAL_USE_QUEUE_OK";

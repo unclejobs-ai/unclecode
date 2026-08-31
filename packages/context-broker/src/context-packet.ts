@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { assertFreshContext, checkFreshness, getWorktreeFingerprint } from "./freshness.js";
+import { assertFreshContext, checkFreshness } from "./freshness.js";
 import { defaultRepoMapCache } from "./repo-map-cache.js";
 import { generateRepoMap, getRepoMapCacheToken } from "./repo-map.js";
 import { runRustCommandSync } from "./rust-command.js";
@@ -44,19 +44,19 @@ export function getTokenBudget(mode: AssembleOptions["mode"]): TokenBudget {
 export async function assembleContextPacket(options: AssembleOptions): Promise<ContextPacket> {
   const generatedAt = new Date().toISOString();
   const repoMapCacheToken = await getRepoMapCacheToken(options.rootDir);
+  const worktreeFingerprint = getWorktreeFingerprintFromRepoMapCacheToken(repoMapCacheToken);
   const { repoMap } = await defaultRepoMapCache.load({
     rootDir: options.rootDir,
     gitHeadSha: repoMapCacheToken,
     loader: () => generateRepoMap(options.rootDir),
   });
   const selection = getContextSelection(options.rootDir, options.mode, options.sinceSha, repoMap);
-  const worktreeState = await getWorktreeFingerprint(options.rootDir);
 
   const packetWithoutFreshness: ContextPacket = {
     id: randomUUID(),
     generatedAt,
     gitHeadSha: repoMap.gitHeadSha,
-    worktreeFingerprint: worktreeState.fingerprint,
+    worktreeFingerprint,
     repoMap,
     hotspots: selection.hotspots,
     changedFiles: selection.changedFiles,
@@ -88,6 +88,14 @@ export async function assembleContextPacket(options: AssembleOptions): Promise<C
     ...packetWithoutFreshness,
     freshness,
   };
+}
+
+function getWorktreeFingerprintFromRepoMapCacheToken(cacheToken: string): string {
+  const separatorIndex = cacheToken.indexOf(":");
+  if (separatorIndex < 0 || separatorIndex === cacheToken.length - 1) {
+    throw new Error("Rust repo map cache token did not include a worktree fingerprint.");
+  }
+  return cacheToken.slice(separatorIndex + 1);
 }
 
 function getContextSelection(

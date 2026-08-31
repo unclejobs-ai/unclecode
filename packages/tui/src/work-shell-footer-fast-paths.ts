@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import { runRustCommandSync } from "@unclecode/orchestrator";
+import { formatWorkShellModeLabelForLocale } from "@unclecode/orchestrator";
 
 import type { GitFacts } from "./facts.js";
 import { getDisplayWidth, truncateForDisplayWidth } from "./text-width.js";
@@ -26,6 +27,8 @@ export function formatWorkShellFooterLineFast(input: {
    * not become a second answer to "what has this session cost".
    */
   readonly cost?: string;
+  /** Last completed provider turn, preformatted for the status line. */
+  readonly performance?: string;
 }): string {
   void input.model;
   void input.reasoningLabel;
@@ -47,6 +50,7 @@ export function formatWorkShellFooterLineFast(input: {
     dirty,
   ]);
   const cost = input.cost?.trim();
+  const performance = input.performance?.trim();
 
   const left = (
     workspacePath: string | undefined,
@@ -57,10 +61,14 @@ export function formatWorkShellFooterLineFast(input: {
     workspaceFacts || undefined,
     withContext && !budget ? contextChip : undefined,
   ]);
-  const right = (withCost: boolean) => joinFooterFacts([budget, withCost ? cost : undefined]);
+  const right = (withBudget: boolean, withPerformance: boolean, withCost: boolean) => joinFooterFacts([
+    withBudget ? budget : undefined,
+    withPerformance ? performance : undefined,
+    withCost ? cost : undefined,
+  ]);
 
   if (input.width === undefined) {
-    return joinFooterParts([left(fullPath), right(true)]);
+    return joinFooterParts([left(fullPath), right(true, true, true)]);
   }
 
   // Degradation order. Directories go first, then cost, then the entire path.
@@ -68,16 +76,27 @@ export function formatWorkShellFooterLineFast(input: {
   // those are the two facts the operator cannot reconstruct elsewhere.
   const basePath = footerPathBasename(fullPath);
   for (const candidate of [
-    { path: fullPath, workspace, cost: true, context: true },
-    { path: basePath, workspace, cost: true, context: true },
-    { path: basePath, workspace, cost: false, context: true },
-    { path: undefined, workspace, cost: false, context: true },
-    { path: basePath, workspace, cost: false, context: false },
-    { path: undefined, workspace, cost: false, context: false },
-    { path: undefined, workspace: dirty ?? workspace, cost: false, context: false },
+    { path: fullPath, workspace, budget: true, performance: true, cost: true, context: true },
+    { path: basePath, workspace, budget: true, performance: true, cost: true, context: true },
+    // Last-turn latency/cache is actionable and cannot be reconstructed from
+    // another surface. Prefer it over the window fraction at medium widths.
+    ...(performance
+      ? [
+          { path: basePath, workspace, budget: false, performance: true, cost: true, context: false },
+          { path: undefined, workspace, budget: false, performance: true, cost: true, context: false },
+        ]
+      : []),
+    { path: basePath, workspace, budget: true, performance: false, cost: true, context: true },
+    { path: basePath, workspace, budget: true, performance: false, cost: false, context: true },
+    { path: undefined, workspace, budget: true, performance: false, cost: false, context: true },
+    ...(budget
+      ? [{ path: undefined, workspace: dirty ?? workspace, budget: true, performance: false, cost: false, context: false }]
+      : []),
+    { path: basePath, workspace, budget: false, performance: false, cost: false, context: false },
+    { path: undefined, workspace, budget: false, performance: false, cost: false, context: false },
   ]) {
     const leftGroup = left(candidate.path, candidate.workspace, candidate.context);
-    const rightGroup = right(candidate.cost);
+    const rightGroup = right(candidate.budget, candidate.performance, candidate.cost);
     const leftWidth = getDisplayWidth(leftGroup);
     const rightWidth = getDisplayWidth(rightGroup);
     if (rightGroup.length === 0) {
@@ -92,7 +111,7 @@ export function formatWorkShellFooterLineFast(input: {
     }
   }
 
-  const rightGroup = right(false);
+  const rightGroup = right(true, false, false);
   const rightWidth = getDisplayWidth(rightGroup);
   if (rightWidth >= input.width) {
     return truncateForDisplayWidth(rightGroup, input.width);
@@ -174,10 +193,11 @@ function formatCompactWindow(modelWindow: number): string {
 export function formatWorkShellSessionFactsGroup(input: {
   readonly model: string;
   readonly mode: string;
+  readonly uiLocale?: "en" | "ko";
 }): string {
   return joinFooterFacts([
     input.model.trim(),
-    resolveWorkShellModeLabel(input.mode),
+    resolveWorkShellModeLabel(input.mode, input.uiLocale ?? "en"),
   ]);
 }
 
@@ -263,23 +283,25 @@ function compactWorkShellAuthLabel(authLabel: string): string {
 }
 
 const modeLabelCache = new Map<string, string>();
+const MODE_LABEL_CACHE_MAX_ENTRIES = 32;
 
-function resolveWorkShellModeLabel(mode: string): string {
+function resolveWorkShellModeLabel(mode: string, uiLocale: "en" | "ko"): string {
   const normalized = mode.trim().toLowerCase();
   if (normalized.length === 0) {
     return "";
   }
 
-  const cached = modeLabelCache.get(normalized);
+  const cacheKey = `${uiLocale}:${normalized}`;
+  const cached = modeLabelCache.get(cacheKey);
   if (cached !== undefined) {
     return cached;
   }
 
-  const label = runRustCommandSync(
-    ["rust", "ux", "text", "mode-label"],
-    process.cwd(),
-    normalized,
-  ).trim();
-  modeLabelCache.set(normalized, label);
+  const label = formatWorkShellModeLabelForLocale(normalized, uiLocale);
+  if (modeLabelCache.has(cacheKey)) modeLabelCache.delete(cacheKey);
+  modeLabelCache.set(cacheKey, label);
+  while (modeLabelCache.size > MODE_LABEL_CACHE_MAX_ENTRIES) {
+    modeLabelCache.delete(modeLabelCache.keys().next().value as string);
+  }
   return label;
 }

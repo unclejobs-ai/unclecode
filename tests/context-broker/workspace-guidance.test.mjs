@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   clearCachedWorkspaceGuidance,
+  getContextBrokerCacheTelemetrySnapshot,
   loadCachedWorkspaceGuidance,
   loadWorkspaceGuidance,
 } from "@unclecode/context-broker";
@@ -89,17 +90,52 @@ test("context-broker cached workspace guidance keeps project-skill context stabl
     "utf8",
   );
 
+  const before = getContextBrokerCacheTelemetrySnapshot()
+    .find((snapshot) => snapshot.name === "workspace-guidance");
   const first = await loadCachedWorkspaceGuidance({ cwd: nested });
   writeFileSync(path.join(root, "AGENTS.md"), "# Agents\nPrefer tests first.\n", "utf8");
 
   const cached = await loadCachedWorkspaceGuidance({ cwd: nested });
+  const afterHit = getContextBrokerCacheTelemetrySnapshot()
+    .find((snapshot) => snapshot.name === "workspace-guidance");
   assert.match(first.systemPromptAppendix, /Prefer read before edit/);
   assert.match(cached.systemPromptAppendix, /Prefer read before edit/);
   assert.doesNotMatch(cached.systemPromptAppendix, /Keep moving without waiting for approval/);
+  assert.equal(afterHit.misses - before.misses, 1);
+  assert.equal(afterHit.hits - before.hits, 1);
+  assert.ok(afterHit.maxRetainedBytes > 0);
+  assert.ok(afterHit.retainedBytesEstimate > 0);
 
   clearCachedWorkspaceGuidance(nested);
+  const afterInvalidation = getContextBrokerCacheTelemetrySnapshot()
+    .find((snapshot) => snapshot.name === "workspace-guidance");
+  assert.equal(afterInvalidation.invalidations - afterHit.invalidations, 1);
+  assert.equal(afterInvalidation.currentSize, afterHit.currentSize - 1);
   const refreshed = await loadCachedWorkspaceGuidance({ cwd: nested });
   assert.match(refreshed.systemPromptAppendix, /Prefer tests first/);
+});
+
+test("context-broker cache isolates cwd and home pairs containing delimiters", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "unclecode-guidance-key-isolation-"));
+  const cwdA = path.join(root, "a");
+  const homeA = path.join(root, "b::", root, "c");
+  const cwdB = path.join(root, "a::", root, "b");
+  const homeB = path.join(root, "c");
+  mkdirSync(cwdA, { recursive: true });
+  mkdirSync(homeA, { recursive: true });
+  mkdirSync(cwdB, { recursive: true });
+  mkdirSync(homeB, { recursive: true });
+  writeFileSync(path.join(cwdA, "AGENTS.md"), "# A\nGuidance belongs only to workspace A.\n", "utf8");
+  writeFileSync(path.join(cwdB, "AGENTS.md"), "# B\nGuidance belongs only to workspace B.\n", "utf8");
+
+  const first = await loadCachedWorkspaceGuidance({ cwd: cwdA, userHomeDir: homeA });
+  const second = await loadCachedWorkspaceGuidance({ cwd: cwdB, userHomeDir: homeB });
+
+  assert.match(first.systemPromptAppendix, /workspace A/);
+  assert.match(second.systemPromptAppendix, /workspace B/);
+  assert.doesNotMatch(second.systemPromptAppendix, /workspace A/);
+  clearCachedWorkspaceGuidance(cwdA, homeA);
+  clearCachedWorkspaceGuidance(cwdB, homeB);
 });
 
 test("context-broker loadWorkspaceGuidance discovers .sisyphus/rules/*.md as guidance sources", async () => {

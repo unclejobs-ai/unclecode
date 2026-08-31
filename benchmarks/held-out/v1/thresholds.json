@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "minimumAggregateQualityDeltaPercentagePoints": 5,
+  "maximumDomainRegressionPercentagePoints": 2,
+  "minimumFrontierTokenReductionPercent": 50,
+  "requireCriticProof": true
+}

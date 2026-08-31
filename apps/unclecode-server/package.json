@@ -13,5 +13,10 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     }
+  },
+  "dependencies": {
+    "@unclecode/contracts": "0.1.0",
+    "@unclecode/orchestrator": "0.1.0",
+    "@unclecode/session-store": "0.1.0"
   }
 }

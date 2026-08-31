@@ -10,12 +10,15 @@
  */
 
 import { spawn } from "node:child_process";
+import { createOwnedProcessGroupController } from "../process-group-settlement.js";
 
 export type RunShellInput = {
   readonly command: string;
   readonly cwd: string;
   readonly timeoutMs?: number;
   readonly outputCap?: number;
+  readonly forceKillDelayMs?: number;
+  readonly signal?: AbortSignal;
 };
 
 export type RunShellResult = {
@@ -40,12 +43,20 @@ export async function runShell(input: RunShellInput): Promise<RunShellResult> {
     const child = spawn("/bin/sh", ["-c", input.command], {
       cwd: input.cwd,
       stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+    });
+    const processGroup = createOwnedProcessGroupController({
+      child,
+      label: "run_shell",
+      ...(input.forceKillDelayMs === undefined ? {} : { forceKillDelayMs: input.forceKillDelayMs }),
     });
 
     let stdout = "";
     let stderr = "";
     let truncated = false;
     let settled = false;
+    let terminationCause: "timeout" | "abort" | undefined;
+    let spawnError: Error | undefined;
 
     const settle = (result: RunShellResult): void => {
       if (settled) {
@@ -53,6 +64,7 @@ export async function runShell(input: RunShellInput): Promise<RunShellResult> {
       }
       settled = true;
       clearTimeout(timer);
+      if (input.signal) input.signal.removeEventListener("abort", onAbort);
       resolvePromise(result);
     };
 
@@ -82,33 +94,47 @@ export async function runShell(input: RunShellInput): Promise<RunShellResult> {
       if (settled) {
         return;
       }
-      child.kill("SIGKILL");
-      settle({
-        stdout,
-        stderr: `${stderr}\nrun_shell: timed out after ${timeoutMs}ms`.trim(),
-        exitCode: -1,
-        truncated,
-      });
+      terminationCause ??= "timeout";
+      void processGroup.terminate().catch(() => undefined);
     }, timeoutMs);
     timer.unref?.();
+    const onAbort = () => {
+      terminationCause ??= "abort";
+      void processGroup.terminate().catch(() => undefined);
+    };
+    if (input.signal) {
+      if (input.signal.aborted) onAbort();
+      else input.signal.addEventListener("abort", onAbort, { once: true });
+    }
 
     child.stdout.on("data", (data: Buffer) => onChunk("stdout", data));
     child.stderr.on("data", (data: Buffer) => onChunk("stderr", data));
 
     child.on("error", (error) => {
-      settle({
-        stdout,
-        stderr: `${stderr}\n${error.message}`.trim(),
-        exitCode: -1,
-        truncated,
-      });
+      spawnError = error;
     });
 
-    child.on("close", (code, signal) => {
+    child.on("close", async (code, signal) => {
+      let settlementError: unknown;
+      try {
+        await (terminationCause ? processGroup.terminate() : processGroup.settle());
+      } catch (error) {
+        settlementError = error;
+      }
+      const suffix = terminationCause === "timeout"
+        ? `run_shell: timed out after ${timeoutMs}ms`
+        : terminationCause === "abort"
+          ? "run_shell: aborted"
+          : spawnError?.message ?? (settlementError instanceof Error ? settlementError.message : undefined);
       const exitCode = typeof code === "number"
         ? code
         : signal != null ? -1 : 0;
-      settle({ stdout, stderr, exitCode, truncated });
+      settle({
+        stdout,
+        stderr: suffix ? `${stderr}\n${suffix}`.trim() : stderr,
+        exitCode: terminationCause || spawnError || settlementError ? -1 : exitCode,
+        truncated,
+      });
     });
   });
 }

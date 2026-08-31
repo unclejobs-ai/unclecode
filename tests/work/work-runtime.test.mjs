@@ -58,7 +58,29 @@ test("parseArgs extracts cwd/provider/model/reasoning/session/help/tools/prompt 
 
 test("resolveRuntimeProvider rejects unsupported providers honestly", () => {
   assert.equal(resolveRuntimeProvider("openai"), "openai");
+  assert.equal(resolveRuntimeProvider("deepseek"), "deepseek");
   assert.throws(() => resolveRuntimeProvider("bogus"), /Unsupported runtime provider: bogus/);
+});
+
+test("parseArgs accepts deepseek as a first-class work runtime", () => {
+  assert.deepEqual(
+    parseArgs([
+      "--provider",
+      "deepseek",
+      "--model",
+      "deepseek-reasoner",
+      "review",
+      "this",
+    ]),
+    {
+      cwd: process.cwd(),
+      provider: "deepseek",
+      model: "deepseek-reasoner",
+      prompt: "review this",
+      showHelp: false,
+      showTools: false,
+    },
+  );
 });
 
 test("deriveAuthIssueLines maps saved oauth states into actionable operator guidance", () => {
@@ -123,6 +145,48 @@ test("loadResumedWorkSession reports missing session ids honestly", async () => 
       }),
       /Session not found: work-missing/,
     );
+  } finally {
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("Rust CLI persist-json to resume-json preserves transcript ids and accepts legacy missing ids", async () => {
+  const originalEnv = { ...process.env };
+  const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-work-runtime-entry-id-"));
+  const fakeHome = path.join(workspaceRoot, "home");
+  const env = {
+    ...originalEnv,
+    HOME: fakeHome,
+    UNCLECODE_SESSION_STORE_ROOT: path.join(workspaceRoot, "session-store"),
+    ...preserveRustToolchainEnv(originalEnv),
+  };
+
+  try {
+    await persistWorkShellSessionSnapshot({
+      cwd: workspaceRoot,
+      env,
+      sessionId: "work-entry-id-roundtrip",
+      model: "gpt-5.6-sol",
+      mode: "analyze",
+      state: "idle",
+      summary: "Chat: transcript identity roundtrip",
+      entries: [
+        { id: "entry-user-stable", role: "user", text: "첫 질문" },
+        { id: "entry-assistant-stable", role: "assistant", text: "첫 답변" },
+        { role: "user", text: "legacy entry without an id" },
+      ],
+    });
+
+    const resumed = await loadResumedWorkSession({
+      cwd: workspaceRoot,
+      sessionId: "work-entry-id-roundtrip",
+      env,
+    });
+    assert.deepEqual(resumed.initialEntries, [
+      { id: "entry-user-stable", role: "user", text: "첫 질문" },
+      { id: "entry-assistant-stable", role: "assistant", text: "첫 답변" },
+      { role: "user", text: "legacy entry without an id" },
+    ]);
   } finally {
     rmSync(workspaceRoot, { recursive: true, force: true });
   }
@@ -1128,4 +1192,95 @@ test("managed dashboard preserves the resumed submitted receipt identity", () =>
   });
   const pane = embeddedPane.props.buildPane({ onExit() {} });
   assert.equal(pane.ompAuthCatalog, ompAuthCatalog);
+});
+
+test("managed dashboard publishes one attachment callback per runtime engine", () => {
+  const attached = [];
+  const managed = createManagedDashboardInput({
+    agent: {},
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "build",
+      authLabel: "api-key-env",
+      reasoning: {
+        effort: "high",
+        source: "mode-default",
+        support: {
+          status: "supported",
+          defaultEffort: "medium",
+          supportedEfforts: ["low", "medium", "high"],
+        },
+      },
+      cwd: "/repo",
+      modelWindow: 128_000,
+      contextSummaryLines: [],
+      homeState: {},
+      onWorkShellEngineReady(engine) {
+        attached.push(engine);
+      },
+    },
+  }, {
+    resolveWorkShellInlineCommand: async () => ({ lines: [], failed: false }),
+  });
+  const sharedEngine = {
+    getState() { return { model: "gpt-5.4" }; },
+  };
+  const dashboard = createManagedWorkShellDashboardProps({
+    ...managed,
+    paneEngine: sharedEngine,
+  });
+
+  dashboard.renderWorkPane({ openSessions() {}, syncHomeState() {} })
+    .props.buildPane({ onExit() {} });
+  dashboard.renderWorkPane({ openSessions() {}, syncHomeState() {} })
+    .props.buildPane({ onExit() {} });
+
+  assert.deepEqual(attached, [sharedEngine]);
+});
+
+test("managed dashboard retries an engine attachment callback that throws", () => {
+  let attempts = 0;
+  const managed = createManagedDashboardInput({
+    agent: {},
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "build",
+      authLabel: "api-key-env",
+      reasoning: {
+        effort: "high",
+        source: "mode-default",
+        support: {
+          status: "supported",
+          defaultEffort: "medium",
+          supportedEfforts: ["low", "medium", "high"],
+        },
+      },
+      cwd: "/repo",
+      modelWindow: 128_000,
+      contextSummaryLines: [],
+      homeState: {},
+      onWorkShellEngineReady() {
+        attempts += 1;
+        if (attempts === 1) throw new Error("attach failed");
+      },
+    },
+  }, {
+    resolveWorkShellInlineCommand: async () => ({ lines: [], failed: false }),
+  });
+  const sharedEngine = {
+    getState() { return { model: "gpt-5.4" }; },
+  };
+  const dashboard = createManagedWorkShellDashboardProps({
+    ...managed,
+    paneEngine: sharedEngine,
+  });
+  const build = () => dashboard.renderWorkPane({ openSessions() {}, syncHomeState() {} })
+    .props.buildPane({ onExit() {} });
+
+  assert.throws(build, /attach failed/);
+  assert.doesNotThrow(build);
+  assert.doesNotThrow(build);
+  assert.equal(attempts, 2);
 });

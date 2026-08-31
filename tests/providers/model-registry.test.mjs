@@ -140,6 +140,59 @@ test("provider route metadata is resolved by the Rust router", () => {
   );
 });
 
+test("deepseek is a first-class runtime route with a pinned compat catalog", () => {
+  const route = resolveProviderRoute("deepseek");
+  assert.deepEqual(
+    {
+      providerId: route.providerId,
+      label: route.label,
+      transport: route.transport,
+      runtimeSupported: route.runtimeSupported,
+      defaultModel: route.defaultModel,
+      endpointUrl: route.endpointUrl,
+      envKeys: route.envKeys,
+      thinkingFormat: route.compatPolicy.thinkingFormat,
+    },
+    {
+      providerId: "deepseek",
+      label: "DeepSeek",
+      transport: "compat",
+      runtimeSupported: true,
+      defaultModel: "deepseek-chat",
+      endpointUrl: "https://api.deepseek.com/chat/completions",
+      envKeys: ["DEEPSEEK_API_KEY", "DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL"],
+      thinkingFormat: "deepseek",
+    },
+  );
+
+  const registry = getProviderAdapter("deepseek").getModelRegistry({});
+  assert.equal(registry.providerId, "deepseek");
+  assert.equal(registry.defaultModel, "deepseek-chat");
+  assert.deepEqual(registry.models, ["deepseek-chat", "deepseek-reasoner"]);
+
+  const policy = resolveOpenAICompatPolicy("deepseek", "deepseek-reasoner");
+  assert.equal(policy.thinkingFormat, "deepseek");
+  assert.equal(policy.supportsToolChoice, false);
+  assert.equal(policy.requiresReasoningContentForToolCalls, true);
+});
+
+test("deepseek registry keeps an explicit empty env isolated from the host model", (t) => {
+  const previousModel = process.env.DEEPSEEK_MODEL;
+  process.env.DEEPSEEK_MODEL = "host-only-model";
+  t.after(() => {
+    if (previousModel === undefined) {
+      delete process.env.DEEPSEEK_MODEL;
+    } else {
+      process.env.DEEPSEEK_MODEL = previousModel;
+    }
+  });
+
+  const registry = getProviderAdapter("deepseek").getModelRegistry({});
+
+  assert.equal(registry.defaultModel, "deepseek-chat");
+  assert.deepEqual(registry.models, ["deepseek-chat", "deepseek-reasoner"]);
+});
+
 test("omp resolves as an executor-only native route instead of being rejected", () => {
   const ompRoute = resolveProviderRoute("omp");
   assert.deepEqual(

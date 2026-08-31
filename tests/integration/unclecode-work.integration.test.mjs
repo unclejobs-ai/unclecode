@@ -50,7 +50,7 @@ test("built unclecode cli forwards work --help to the real assistant entrypoint"
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /UncleCode Work/);
-  assert.match(result.stdout, /Choose openai, anthropic, or gemini/);
+  assert.match(result.stdout, /Choose openai, anthropic, gemini, or deepseek/);
   assert.match(result.stdout, /--reasoning/);
 });
 

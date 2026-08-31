@@ -2,11 +2,17 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 
-import { buildWindowsTreeKillArgs, listTeamRuns, startTeamRun } from "@unclecode/orchestrator";
+import {
+  buildWindowsTreeKillArgs,
+  listTeamRuns,
+  startTeamRun,
+  waitForWindowsTreeKill,
+} from "@unclecode/orchestrator";
 import { readTeamCheckpoints, verifyTeamRunChain } from "@unclecode/session-store";
 
 // Place tmp dirs inside the workspace so spawned worker scripts can resolve
@@ -50,8 +56,49 @@ function makeRun() {
   return dataRoot;
 }
 
+async function waitForFile(filePath, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(filePath)) return readFileSync(filePath, "utf8").trim();
+    await sleep(10);
+  }
+  throw new Error(`Timed out waiting for ${filePath}`);
+}
+
+function processExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    throw error;
+  }
+}
+
 test("Windows worker termination targets the entire descendant tree", () => {
   assert.deepEqual(buildWindowsTreeKillArgs(4321), ["/PID", "4321", "/T", "/F"]);
+});
+
+test("Windows worker termination awaits taskkill completion", async () => {
+  let invoked;
+  let taskkillClosed = false;
+  const promise = waitForWindowsTreeKill(4321, (command, args) => {
+    invoked = { command, args };
+    const taskkill = new EventEmitter();
+    setTimeout(() => {
+      taskkillClosed = true;
+      taskkill.emit("close", 0);
+    }, 25);
+    return taskkill;
+  });
+  await sleep(5);
+  assert.equal(taskkillClosed, false);
+  await promise;
+  assert.deepEqual(invoked, {
+    command: "taskkill",
+    args: ["/PID", "4321", "/T", "/F"],
+  });
+  assert.equal(taskkillClosed, true);
 });
 
 test("dispatch spawns N workers, publishes running+accepted, chain verifies", async () => {
@@ -234,19 +281,45 @@ process.exit(7);
 
 test("worker timeout kills descendant processes before returning", {
   skip: process.platform === "win32",
+  timeout: 8_000,
 }, async () => {
   const dataRoot = makeRun();
+  let workerPid;
+  let descendantPid;
   try {
-    const markerPath = join(dataRoot, "descendant-survived.txt");
+    const workerPidPath = join(dataRoot, "worker.pid");
+    const descendantPidPath = join(dataRoot, "descendant.pid");
+    const workerTermPath = join(dataRoot, "worker.term");
+    const descendantTermPath = join(dataRoot, "descendant.term");
+    const readyPath = join(dataRoot, "worker.ready");
+    const descendantPath = join(dataRoot, "stubborn-descendant.mjs");
     const workerPath = join(dataRoot, "worker-with-descendant.mjs");
+    writeFileSync(
+      descendantPath,
+      `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(descendantPidPath)}, String(process.pid));
+process.on("SIGTERM", () => writeFileSync(${JSON.stringify(descendantTermPath)}, "term"));
+setInterval(() => {}, 1_000);
+`,
+      { mode: 0o755 },
+    );
     writeFileSync(
       workerPath,
       `#!/usr/bin/env node
+import { existsSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
-const marker = process.env.DESCENDANT_MARKER;
-spawn(process.execPath, ["-e", \`setTimeout(() => require("node:fs").writeFileSync(\${JSON.stringify(marker)}, "alive"), 300)\`], {
+writeFileSync(${JSON.stringify(workerPidPath)}, String(process.pid));
+process.on("SIGTERM", () => writeFileSync(${JSON.stringify(workerTermPath)}, "term"));
+spawn(process.execPath, [${JSON.stringify(descendantPath)}], {
   stdio: "ignore",
 });
+const readyTimer = setInterval(() => {
+  if (existsSync(${JSON.stringify(descendantPidPath)})) {
+    writeFileSync(${JSON.stringify(readyPath)}, "ready");
+    clearInterval(readyTimer);
+  }
+}, 10);
 setInterval(() => {}, 1_000);
 `,
       { mode: 0o755 },
@@ -266,15 +339,21 @@ setInterval(() => {}, 1_000);
     const result = await handle.dispatch({
       workerCommand: { command: process.execPath, args: [workerPath] },
       workers: [{ workerId: "w1", persona: "coder", task: "timeout" }],
-      extraEnv: { DESCENDANT_MARKER: markerPath },
-      perWorkerTimeoutMs: 100,
+      perWorkerTimeoutMs: 600,
     });
     handle.release();
 
+    await waitForFile(readyPath);
+    workerPid = Number(await waitForFile(workerPidPath));
+    descendantPid = Number(await waitForFile(descendantPidPath));
     assert.equal(result.outcomes[0].status, "killed");
-    await sleep(500);
-    assert.equal(existsSync(markerPath), false);
+    assert.equal(readFileSync(workerTermPath, "utf8"), "term");
+    assert.equal(readFileSync(descendantTermPath, "utf8"), "term");
+    assert.equal(processExists(workerPid), false);
+    assert.equal(processExists(descendantPid), false);
   } finally {
+    if (workerPid && processExists(workerPid)) process.kill(workerPid, "SIGKILL");
+    if (descendantPid && processExists(descendantPid)) process.kill(descendantPid, "SIGKILL");
     rmSync(dataRoot, { recursive: true, force: true });
   }
 });

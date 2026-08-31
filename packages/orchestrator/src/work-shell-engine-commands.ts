@@ -28,9 +28,13 @@ export type ResolvedWorkShellBuiltinCommand =
   | { readonly kind: "status" }
   | { readonly kind: "sessions" }
   | { readonly kind: "tools" }
+  | { readonly kind: "policy" }
   | { readonly kind: "skills" }
   | { readonly kind: "queue" }
   | { readonly kind: "queue-clear" }
+  | { readonly kind: "queue-remove"; readonly id: number }
+  | { readonly kind: "queue-move"; readonly id: number; readonly direction: "up" | "down" }
+  | { readonly kind: "queue-resume" }
   | { readonly kind: "cancel" }
   | { readonly kind: "harness" }
   | { readonly kind: "auth-key" }
@@ -69,12 +73,19 @@ function isBuiltinCommand(value: unknown): value is ResolvedWorkShellBuiltinComm
   if (!value || typeof value !== "object") {
     return false;
   }
-  const command = value as { kind?: unknown; tab?: unknown; traceMode?: unknown; line?: unknown; skillName?: unknown; suggestion?: unknown; consoleInvalid?: unknown };
+  const command = value as { kind?: unknown; tab?: unknown; traceMode?: unknown; line?: unknown; skillName?: unknown; suggestion?: unknown; consoleInvalid?: unknown; id?: unknown; direction?: unknown };
   if (typeof command.kind !== "string") {
     return false;
   }
   if (command.kind === "agent-console") {
     return isAgentConsoleTab(command.tab);
+  }
+  if (command.kind === "queue-remove") {
+    return typeof command.id === "number" && Number.isSafeInteger(command.id) && command.id > 0;
+  }
+  if (command.kind === "queue-move") {
+    return typeof command.id === "number" && Number.isSafeInteger(command.id) && command.id > 0
+      && (command.direction === "up" || command.direction === "down");
   }
   if (command.kind === "trace-mode") {
     return command.traceMode === "verbose" || command.traceMode === "minimal";
@@ -100,9 +111,11 @@ function isBuiltinCommand(value: unknown): value is ResolvedWorkShellBuiltinComm
     "status",
     "sessions",
     "tools",
+    "policy",
     "skills",
     "queue",
     "queue-clear",
+    "queue-resume",
     "cancel",
     "harness",
     "auth-key",
@@ -123,7 +136,11 @@ export function createQueuePanel(input: {
   readonly mode?: string;
   readonly workerBudget?: number;
   readonly queuedCount?: number;
-  readonly queuedItems?: readonly { readonly id: number; readonly line: string }[];
+  readonly queuedItems?: readonly {
+    readonly id: number;
+    readonly line: string;
+    readonly attachmentCount?: number;
+  }[];
 }): WorkShellPanel {
   return buildRustUxPanel("queue", input);
 }

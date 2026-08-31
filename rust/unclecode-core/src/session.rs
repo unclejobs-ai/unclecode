@@ -8,6 +8,7 @@ use crate::model_registry::is_openai_reasoning_effort;
 use crate::redaction::redact_secrets;
 use crate::session_listing::{parse_session_list_item, parse_session_resume_summary};
 pub use crate::session_listing::{SessionListItem, SessionResumeSummary};
+use crate::session_safe_io::AnchoredSessionRoot;
 use crate::sha256::sha256_hex;
 use crate::time_iso::{unix_millis_to_iso, utc_now_iso};
 use serde_json::{json, Map, Value};
@@ -17,7 +18,17 @@ const MAX_AGENT_CONSOLE_BYTES: usize = 32 * 1024;
 const MAX_AGENT_CONSOLE_ACTIVITY: usize = 80;
 const MAX_AGENT_CONSOLE_AGENTS: usize = 128;
 const MAX_AGENT_CONSOLE_JOBS: usize = 128;
+const MAX_AGENT_CONSOLE_PLUGIN_DIAGNOSTICS: usize = 64;
+const MAX_AGENT_CONSOLE_QUALITY_HISTORY: usize = 32;
+const MAX_AGENT_CONSOLE_EVOLUTION_PROPOSALS: usize = 32;
 const MAX_RESUME_ENTRY_CHARS: usize = 600;
+const SESSION_NOTICE_VERSION: u8 = 1;
+const MAX_SESSION_NOTICE_BYTES: usize = 4 * 1024;
+const MAX_SESSION_NOTICE_FILES: usize = 256;
+const MAX_SESSION_CHECKPOINT_READ_BYTES: usize = 512 * 1024;
+const MAX_WORK_SHELL_EVENT_LOG_BYTES: usize = 256 * 1024;
+const MAX_PAUSE_CHECKPOINT_REFS: usize = 64;
+const MAX_PAUSE_CHECKPOINT_STRING_CHARS: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionEvent {
@@ -33,6 +44,7 @@ pub struct SessionLog {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkShellTranscriptEntry {
+    pub id: Option<String>,
     pub role: String,
     pub text: String,
 }
@@ -46,10 +58,13 @@ pub struct WorkShellSessionSnapshot {
     pub state: String,
     pub summary: String,
     pub trace_mode: Option<String>,
+    pub ui_locale: Option<String>,
     pub reasoning_effort: Option<String>,
     pub last_submitted_context_receipt_id: Option<String>,
+    pub owner_mutation_revision: Option<usize>,
     pub entries: Vec<WorkShellTranscriptEntry>,
     pub agent_console: Option<Value>,
+    pub pause_checkpoint: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,12 +78,16 @@ pub struct SessionLine {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkShellResume {
     pub session_id: String,
+    pub state: String,
     pub trace_mode: Option<String>,
+    pub ui_locale: Option<String>,
     pub reasoning_effort: Option<String>,
     pub last_submitted_context_receipt_id: Option<String>,
+    pub owner_mutation_revision: Option<usize>,
     pub summary: String,
     pub entries: Vec<WorkShellTranscriptEntry>,
     pub agent_console: Option<Value>,
+    pub pause_checkpoint: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -129,32 +148,86 @@ impl WorkShellSessionStore {
         &self,
         snapshot: &WorkShellSessionSnapshot,
     ) -> io::Result<()> {
+        let root = AnchoredSessionRoot::open(&self.root_dir)?;
         let paths = session_paths(
             &self.root_dir,
             Path::new(&snapshot.project_path),
             &snapshot.session_id,
         );
-        fs::create_dir_all(&paths.session_dir)?;
-        fs::create_dir_all(&paths.project_memory_dir)?;
-        fs::create_dir_all(&paths.research_artifacts_dir)?;
+        root.create_dir_all(self.relative_path(&paths.session_dir)?)?;
+        root.create_dir_all(self.relative_path(&paths.project_memory_dir)?)?;
+        root.create_dir_all(self.relative_path(&paths.research_artifacts_dir)?)?;
 
+        let checkpoint_path = self.relative_path(&paths.checkpoint_path)?;
+        let previous_event_count = read_checkpoint_event_count(&root, checkpoint_path)?;
         let records = build_work_shell_records(snapshot);
-        let mut existing_count = count_lines(&paths.event_log_path)?;
+        let event_log_path = self.relative_path(&paths.event_log_path)?;
+        let mut event_count = previous_event_count.unwrap_or(0);
         let mut updated_at = String::new();
-        let mut event_log = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&paths.event_log_path)?;
+        let mut event_lines = String::new();
         for record in &records {
             updated_at = record.timestamp.clone();
-            existing_count += 1;
-            writeln!(event_log, "{}", record.to_json(&snapshot.session_id))?;
+            event_count = event_count.saturating_add(1);
+            event_lines.push_str(&record.to_json(&snapshot.session_id));
+            event_lines.push('\n');
+        }
+        let existing_log_bytes = root.regular_file_len(event_log_path)?.unwrap_or(0);
+        let rotate_log = previous_event_count.is_none()
+            || existing_log_bytes.saturating_add(event_lines.len() as u64)
+                > MAX_WORK_SHELL_EVENT_LOG_BYTES as u64;
+        if rotate_log {
+            root.write_atomic_durable(event_log_path, event_lines.as_bytes())?;
+        } else {
+            root.append_all(event_log_path, event_lines.as_bytes())?;
         }
 
-        fs::write(
-            &paths.checkpoint_path,
-            build_checkpoint_json(snapshot, existing_count, &updated_at),
-        )
+        let checkpoint = build_checkpoint_json(snapshot, event_count, &updated_at);
+        root.write_atomic_durable(checkpoint_path, checkpoint.as_bytes())?;
+        // Owner mutations and append-only session events have distinct clocks.
+        // New snapshots carry the accepted owner revision explicitly; legacy
+        // writers fall back to the event count only when that field is absent.
+        let notice_revision = snapshot.owner_mutation_revision.unwrap_or(event_count);
+        self.persist_checkpoint_notice(&root, &snapshot.session_id, notice_revision)
+    }
+
+    fn persist_checkpoint_notice(
+        &self,
+        root: &AnchoredSessionRoot,
+        session_id: &str,
+        revision: usize,
+    ) -> io::Result<()> {
+        let notice_path = Path::new("notifications").join(format!(
+            "{}.notice.json",
+            to_opaque_id(session_id, "session")
+        ));
+        let notice = serde_json::to_vec(&json!({
+            "version": SESSION_NOTICE_VERSION,
+            "sessionId": session_id,
+            "revision": revision,
+        }))
+        .map_err(io::Error::other)?;
+        root.write_atomic_durable(&notice_path, &notice)?;
+        root.prune_regular_files_matching(
+            Path::new("notifications"),
+            MAX_SESSION_NOTICE_FILES,
+            notice_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "invalid notice name")
+                })?,
+            is_session_notice_file_name_bytes,
+        )?;
+        Ok(())
+    }
+
+    fn relative_path<'a>(&self, path: &'a Path) -> io::Result<&'a Path> {
+        path.strip_prefix(&self.root_dir).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "session path escaped the anchored session root",
+            )
+        })
     }
 
     pub fn list_session_lines(&self, project_path: &Path) -> io::Result<Vec<SessionLine>> {
@@ -246,11 +319,22 @@ impl WorkShellSessionStore {
         else {
             return Ok(None);
         };
+        let state = parsed
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
         let trace_mode = parsed
             .get("metadata")
             .and_then(|value| value.get("traceMode"))
             .and_then(Value::as_str)
             .filter(|value| *value == "minimal" || *value == "verbose")
+            .map(str::to_string);
+        let ui_locale = parsed
+            .get("metadata")
+            .and_then(|value| value.get("uiLocale"))
+            .and_then(Value::as_str)
+            .filter(|value| *value == "en" || *value == "ko")
             .map(str::to_string);
         let reasoning_effort = parsed
             .get("metadata")
@@ -264,6 +348,11 @@ impl WorkShellSessionStore {
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
             .map(str::to_string);
+        let owner_mutation_revision = parsed
+            .get("metadata")
+            .and_then(|value| value.get("ownerMutationRevision"))
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok());
         let summary = parsed
             .get("taskSummary")
             .and_then(|value| value.get("summary"))
@@ -280,6 +369,11 @@ impl WorkShellSessionStore {
                         let role = entry.get("role").and_then(Value::as_str)?;
                         let text = entry.get("text").and_then(Value::as_str)?;
                         Some(WorkShellTranscriptEntry {
+                            id: entry
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .filter(|id| !id.trim().is_empty())
+                                .map(str::to_string),
                             role: role.to_string(),
                             text: text.to_string(),
                         })
@@ -290,14 +384,21 @@ impl WorkShellSessionStore {
         let agent_console = parsed
             .get("agentConsole")
             .and_then(sanitize_agent_console_snapshot);
+        let pause_checkpoint = parsed
+            .get("pauseCheckpoint")
+            .and_then(sanitize_pause_checkpoint);
         Ok(Some(WorkShellResume {
             session_id: parsed_session_id,
+            state,
             trace_mode,
+            ui_locale,
             reasoning_effort,
             last_submitted_context_receipt_id,
+            owner_mutation_revision,
             summary,
             entries,
             agent_console,
+            pause_checkpoint,
         }))
     }
 
@@ -333,6 +434,11 @@ pub fn persist_work_shell_session_snapshot_json(
         .and_then(Value::as_str)
         .filter(|value| *value == "minimal" || *value == "verbose")
         .map(str::to_string);
+    let ui_locale = parsed
+        .get("uiLocale")
+        .and_then(Value::as_str)
+        .filter(|value| *value == "en" || *value == "ko")
+        .map(str::to_string);
     let reasoning_effort = parsed
         .get("reasoningEffort")
         .and_then(Value::as_str)
@@ -343,6 +449,10 @@ pub fn persist_work_shell_session_snapshot_json(
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string);
+    let owner_mutation_revision = parsed
+        .get("ownerMutationRevision")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok());
     let entries = parsed
         .get("entries")
         .and_then(Value::as_array)
@@ -351,6 +461,9 @@ pub fn persist_work_shell_session_snapshot_json(
     let agent_console = parsed
         .get("agentConsole")
         .and_then(sanitize_agent_console_snapshot);
+    let pause_checkpoint = parsed
+        .get("pauseCheckpoint")
+        .and_then(sanitize_pause_checkpoint);
 
     store
         .persist_work_shell_snapshot(&WorkShellSessionSnapshot {
@@ -361,10 +474,13 @@ pub fn persist_work_shell_session_snapshot_json(
             state: state.to_string(),
             summary: summary.to_string(),
             trace_mode,
+            ui_locale,
             reasoning_effort,
             last_submitted_context_receipt_id,
+            owner_mutation_revision,
             entries,
             agent_console,
+            pause_checkpoint,
         })
         .map_err(|error| format!("Failed to persist session snapshot: {error}"))?;
     Ok(session_id.to_string())
@@ -383,7 +499,9 @@ pub fn resume_work_shell_session_json(
     };
     serde_json::to_string(&json!({
         "sessionId": resumed.session_id,
+        "state": resumed.state,
         "traceMode": resumed.trace_mode,
+        "uiLocale": resumed.ui_locale,
         "reasoningEffort": resumed.reasoning_effort,
         "lastSubmittedContextReceiptId": resumed.last_submitted_context_receipt_id,
         "contextLine": format!("Resumed session: {session_id}"),
@@ -391,9 +509,16 @@ pub fn resume_work_shell_session_json(
         "initialEntries": resumed
             .entries
             .into_iter()
-            .map(|entry| json!({ "role": entry.role, "text": entry.text }))
+            .map(|entry| {
+                let mut value = json!({ "role": entry.role, "text": entry.text });
+                if let Some(id) = entry.id {
+                    value["id"] = json!(id);
+                }
+                value
+            })
             .collect::<Vec<_>>(),
         "agentConsole": resumed.agent_console,
+        "pauseCheckpoint": resumed.pause_checkpoint,
     }))
     .map(Some)
     .map_err(|error| format!("Failed to serialize resumed session: {error}"))
@@ -423,6 +548,11 @@ fn parse_transcript_entries(items: &[Value]) -> Vec<WorkShellTranscriptEntry> {
             }
             let text = entry.get("text").and_then(Value::as_str)?;
             Some(WorkShellTranscriptEntry {
+                id: entry
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.trim().is_empty())
+                    .map(str::to_string),
                 role: role.to_string(),
                 text: minimize_resume_entry_text(text),
             })
@@ -444,6 +574,7 @@ fn minimize_resume_entries(entries: &[WorkShellTranscriptEntry]) -> Vec<WorkShel
         .iter()
         .filter(|entry| is_resume_entry_role(&entry.role))
         .map(|entry| WorkShellTranscriptEntry {
+            id: entry.id.clone(),
             role: entry.role.clone(),
             text: minimize_resume_entry_text(&entry.text),
         })
@@ -454,6 +585,13 @@ fn minimize_resume_entry_text(text: &str) -> String {
     let redacted = redact_resume_secrets(&redact_secrets(text).replace('\0', "\u{FFFD}"));
     let without_reference_bodies = strip_reference_body_lines(&redacted);
     truncate_chars(&without_reference_bodies, MAX_RESUME_ENTRY_CHARS)
+}
+
+fn bounded_session_summary(summary: &str) -> String {
+    truncate_chars(
+        &redact_resume_secrets(&redact_secrets(summary).replace('\0', "\u{FFFD}")),
+        MAX_RESUME_ENTRY_CHARS,
+    )
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {
@@ -592,6 +730,70 @@ pub fn session_paths(root_dir: &Path, project_path: &Path, session_id: &str) -> 
     }
 }
 
+pub fn scan_session_persistence_notices_json(root_dir: &Path) -> Result<String, String> {
+    let root = match AnchoredSessionRoot::open_existing(root_dir) {
+        Ok(root) => root,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok("{\"notices\":[],\"truncatedCount\":0}".to_string())
+        }
+        Err(error) => {
+            return Err(format!(
+                "Failed to anchor session persistence root: {error}"
+            ))
+        }
+    };
+    let scan = match root.read_bounded_regular_files_matching(
+        Path::new("notifications"),
+        MAX_SESSION_NOTICE_FILES,
+        MAX_SESSION_NOTICE_BYTES,
+        is_session_notice_file_name_bytes,
+    ) {
+        Ok(scan) => scan,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok("{\"notices\":[],\"truncatedCount\":0}".to_string())
+        }
+        Err(error) => {
+            return Err(format!(
+                "Failed to scan session persistence notices: {error}"
+            ))
+        }
+    };
+    let truncated_count = scan.truncated_count;
+    let notices = scan
+        .files
+        .into_iter()
+        .filter_map(|(name, bytes)| {
+            String::from_utf8(bytes)
+                .ok()
+                .map(|contents| json!({ "name": name, "contents": contents }))
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string(&json!({
+        "notices": notices,
+        "truncatedCount": truncated_count,
+    }))
+    .map_err(|error| format!("Failed to serialize session persistence notices: {error}"))
+}
+
+#[cfg(test)]
+fn is_session_notice_file_name(name: &str) -> bool {
+    is_session_notice_file_name_bytes(name.as_bytes())
+}
+
+fn is_session_notice_file_name_bytes(name: &[u8]) -> bool {
+    let Some(digest) = name
+        .strip_prefix(b"session-")
+        .and_then(|value| value.strip_suffix(b".notice.json"))
+    else {
+        return false;
+    };
+    digest.len() == 20
+        && digest
+            .iter()
+            .copied()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn to_opaque_project_bucket(project_path: &Path) -> String {
     let canonical = fs::canonicalize(project_path).unwrap_or_else(|_| project_path.to_path_buf());
     let mut normalized = canonical.to_string_lossy().replace('\\', "/");
@@ -608,12 +810,24 @@ fn to_opaque_id(value: &str, prefix: &str) -> String {
     format!("{}-{}", prefix, &sha256_hex(value)[..20])
 }
 
-fn count_lines(path: &Path) -> io::Result<usize> {
-    match fs::read_to_string(path) {
-        Ok(raw) => Ok(raw.lines().filter(|line| !line.trim().is_empty()).count()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
-        Err(error) => Err(error),
-    }
+fn read_checkpoint_event_count(
+    root: &AnchoredSessionRoot,
+    path: &Path,
+) -> io::Result<Option<usize>> {
+    let raw = match root.read_to_string_bounded(path, MAX_SESSION_CHECKPOINT_READ_BYTES) {
+        Ok(raw) => raw,
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                || error.kind() == io::ErrorKind::InvalidData =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(serde_json::from_str::<Value>(&raw)
+        .ok()
+        .and_then(|value| value.get("eventCount").and_then(Value::as_u64))
+        .and_then(|count| usize::try_from(count).ok()))
 }
 
 fn sanitize_agent_console_snapshot(value: &Value) -> Option<Value> {
@@ -640,6 +854,40 @@ fn sanitize_agent_console_snapshot(value: &Value) -> Option<Value> {
     }
     if let Some(work_graph) = source.get("workGraph") {
         snapshot.insert("workGraph".to_string(), sanitize_work_graph(work_graph)?);
+    }
+    if let Some(quality_review) = source.get("qualityReview") {
+        snapshot.insert(
+            "qualityReview".to_string(),
+            sanitize_quality_review(quality_review)?,
+        );
+    }
+    if let Some(evolution_proposals) = source.get("evolutionProposals") {
+        let evolution_proposals = evolution_proposals.as_array()?;
+        let start = evolution_proposals
+            .len()
+            .saturating_sub(MAX_AGENT_CONSOLE_EVOLUTION_PROPOSALS);
+        let evolution_proposals = evolution_proposals[start..]
+            .iter()
+            .map(sanitize_evolution_proposal)
+            .collect::<Option<Vec<_>>>()?;
+        snapshot.insert(
+            "evolutionProposals".to_string(),
+            Value::Array(evolution_proposals),
+        );
+    }
+    if let Some(plugin_diagnostics) = source.get("pluginDiagnostics") {
+        let plugin_diagnostics = plugin_diagnostics.as_array()?;
+        let start = plugin_diagnostics
+            .len()
+            .saturating_sub(MAX_AGENT_CONSOLE_PLUGIN_DIAGNOSTICS);
+        let plugin_diagnostics = plugin_diagnostics[start..]
+            .iter()
+            .map(sanitize_plugin_diagnostic)
+            .collect::<Option<Vec<_>>>()?;
+        snapshot.insert(
+            "pluginDiagnostics".to_string(),
+            Value::Array(plugin_diagnostics),
+        );
     }
 
     let activity = source.get("activity")?.as_array()?;
@@ -677,6 +925,24 @@ fn sanitize_agent_console_snapshot(value: &Value) -> Option<Value> {
             "mainUsage".to_string(),
             sanitize_agent_run_usage(main_usage)?,
         );
+    }
+    if let Some(total_usage) = source.get("totalUsage") {
+        snapshot.insert(
+            "totalUsage".to_string(),
+            sanitize_agent_run_usage(total_usage)?,
+        );
+    }
+
+    // Replay identity belongs to the persistent runtime owner's indexed
+    // ledger. Checkpoints retain projection totals/routes only; accepting and
+    // then removing legacy arrays keeps old checkpoints resumable without
+    // turning the 32 KiB console projection back into an identity store.
+    strip_run_usage_replay_identities(&mut snapshot);
+    if let Some(main_usage) = snapshot.get_mut("mainUsage") {
+        strip_usage_replay_identity(main_usage);
+    }
+    if let Some(total_usage) = snapshot.get_mut("totalUsage") {
+        strip_usage_replay_identity(total_usage);
     }
 
     // Allowlisting and redaction both run before fitting, so the size ladder
@@ -765,6 +1031,11 @@ fn fit_agent_console_snapshot(mut snapshot: Map<String, Value>) -> Map<String, V
         return snapshot;
     }
 
+    trim_oldest_entries(&mut snapshot, "pluginDiagnostics", |_| false);
+    if console_fits(&snapshot) {
+        return snapshot;
+    }
+
     trim_oldest_entries(&mut snapshot, "jobs", is_active_async_job);
     if console_fits(&snapshot) {
         return snapshot;
@@ -800,12 +1071,27 @@ fn fit_agent_console_snapshot(mut snapshot: Map<String, Value>) -> Map<String, V
         return snapshot;
     }
 
+    trim_quality_history(&mut snapshot);
+    if console_fits(&snapshot) {
+        return snapshot;
+    }
+
+    trim_evolution_proposals(&mut snapshot);
+    if console_fits(&snapshot) {
+        return snapshot;
+    }
+
     snapshot.remove("manifest");
     if console_fits(&snapshot) {
         return snapshot;
     }
 
     snapshot.remove("workGraph");
+    if console_fits(&snapshot) {
+        return snapshot;
+    }
+
+    snapshot.remove("qualityReview");
     if console_fits(&snapshot) {
         return snapshot;
     }
@@ -943,6 +1229,48 @@ fn compact_pending_decision(snapshot: &mut Map<String, Value>) {
     }
 }
 
+fn trim_quality_history(snapshot: &mut Map<String, Value>) {
+    loop {
+        if console_fits(snapshot) {
+            return;
+        }
+        let Some(history) = snapshot
+            .get_mut("qualityReview")
+            .and_then(Value::as_object_mut)
+            .and_then(|review| review.get_mut("history"))
+            .and_then(Value::as_array_mut)
+        else {
+            return;
+        };
+        // Keep the latest record so an interrupted or completed gate remains
+        // honest after resume even when older audit detail must be spent.
+        if history.len() <= 1 {
+            return;
+        }
+        history.remove(0);
+    }
+}
+
+fn trim_evolution_proposals(snapshot: &mut Map<String, Value>) {
+    loop {
+        if console_fits(snapshot) {
+            return;
+        }
+        let Some(proposals) = snapshot
+            .get_mut("evolutionProposals")
+            .and_then(Value::as_array_mut)
+        else {
+            return;
+        };
+        // The newest host record is the authoritative lifecycle outcome. Keep
+        // it while spending older history under the durable byte budget.
+        if proposals.len() <= 1 {
+            return;
+        }
+        proposals.remove(0);
+    }
+}
+
 fn is_active_agent_run(agent: &Value) -> bool {
     matches!(
         agent.get("status").and_then(Value::as_str),
@@ -986,16 +1314,21 @@ fn strip_run_usage_replay_identities(snapshot: &mut Map<String, Value>) {
     }
 }
 
-/// Replay identities are dedupe bookkeeping, not operator evidence. Dropping
-/// them under size pressure keeps the counters an operator actually reads; the
-/// cost is that a resumed trace may re-count a duplicate event, which is a far
-/// smaller loss than resuming with no console at all.
+/// Replay identities are owner-ledger truth, not Agent Console projection.
+/// Legacy checkpoints may still carry them; routes and all totals remain while
+/// only the obsolete identity arrays are removed.
 fn strip_usage_replay_identity(usage: &mut Value) {
     let Some(usage) = usage.as_object_mut() else {
         return;
     };
-    usage.remove("routes");
-    usage.insert("eventIds".to_string(), Value::Array(Vec::new()));
+    usage.remove("eventIds");
+    if let Some(routes) = usage.get_mut("routes").and_then(Value::as_array_mut) {
+        for route in routes {
+            if let Some(route) = route.as_object_mut() {
+                route.remove("eventIds");
+            }
+        }
+    }
 }
 
 fn drop_lifecycle_field(snapshot: &mut Map<String, Value>, field: &str) {
@@ -1027,8 +1360,7 @@ fn compact_lifecycle_text(snapshot: &mut Map<String, Value>, limit: Option<usize
                 let Some(text) = record.get(*field).and_then(Value::as_str) else {
                     continue;
                 };
-                let compacted =
-                    limit.map(|limit| text.chars().take(limit).collect::<String>());
+                let compacted = limit.map(|limit| text.chars().take(limit).collect::<String>());
                 match compacted {
                     Some(compacted) if !compacted.trim().is_empty() => {
                         record.insert((*field).to_string(), Value::String(compacted));
@@ -1108,13 +1440,33 @@ fn sanitize_async_job(value: &Value) -> Option<Value> {
     copy_known_fields(value, ASYNC_JOB_FIELDS).map(Value::Object)
 }
 
+fn sanitize_plugin_diagnostic(value: &Value) -> Option<Value> {
+    copy_known_fields(
+        value,
+        &[
+            "runId",
+            "source",
+            "trustLane",
+            "pluginId",
+            "pluginName",
+            "hookName",
+            "status",
+            "errorName",
+            "errorMessage",
+            "exitStatus",
+            "dedupeKey",
+            "startedAt",
+        ],
+    )
+    .map(Value::Object)
+}
+
 fn sanitize_agent_run_usage(value: &Value) -> Option<Value> {
     let source = value.as_object()?;
     let mut usage = copy_known_fields(value, USAGE_COUNTER_FIELDS)?;
-    usage.insert(
-        "eventIds".to_string(),
-        sanitize_usage_event_ids(source.get("eventIds")?)?,
-    );
+    if let Some(event_ids) = source.get("eventIds") {
+        usage.insert("eventIds".to_string(), sanitize_usage_event_ids(event_ids)?);
+    }
     if let Some(routes) = source.get("routes") {
         let routes = routes
             .as_array()?
@@ -1137,10 +1489,9 @@ fn sanitize_agent_run_usage_route(value: &Value) -> Option<Value> {
         "model".to_string(),
         Value::String(source.get("model")?.as_str()?.to_string()),
     );
-    route.insert(
-        "eventIds".to_string(),
-        sanitize_usage_event_ids(source.get("eventIds")?)?,
-    );
+    if let Some(event_ids) = source.get("eventIds") {
+        route.insert("eventIds".to_string(), sanitize_usage_event_ids(event_ids)?);
+    }
     Some(Value::Object(route))
 }
 
@@ -1155,6 +1506,88 @@ fn sanitize_usage_event_ids(value: &Value) -> Option<Value> {
             .map(|entry| entry.as_str().map(|id| Value::String(id.to_string())))
             .collect::<Option<Vec<_>>>()?,
     ))
+}
+
+fn bounded_pause_string(value: &Value) -> Option<Value> {
+    let input = value.as_str()?.trim();
+    if input.is_empty() {
+        return None;
+    }
+    Some(Value::String(
+        input
+            .chars()
+            .take(MAX_PAUSE_CHECKPOINT_STRING_CHARS)
+            .collect(),
+    ))
+}
+
+fn sanitize_pause_refs(value: &Value) -> Option<Value> {
+    Some(Value::Array(
+        value
+            .as_array()?
+            .iter()
+            .take(MAX_PAUSE_CHECKPOINT_REFS)
+            .filter_map(bounded_pause_string)
+            .collect(),
+    ))
+}
+
+fn sanitize_pause_checkpoint(value: &Value) -> Option<Value> {
+    let source = value.as_object()?;
+    let mut checkpoint = Map::new();
+    checkpoint.insert(
+        "turnId".to_string(),
+        bounded_pause_string(source.get("turnId")?)?,
+    );
+    checkpoint.insert(
+        "boundary".to_string(),
+        bounded_pause_string(source.get("boundary")?)?,
+    );
+    for field in [
+        "currentStage",
+        "gateStatus",
+        "decisionId",
+        "contextReceiptId",
+    ] {
+        if let Some(value) = source.get(field).and_then(bounded_pause_string) {
+            checkpoint.insert(field.to_string(), value);
+        }
+    }
+    if let Some(iteration) = source.get("iteration").and_then(Value::as_u64) {
+        checkpoint.insert(
+            "iteration".to_string(),
+            json!(iteration.min(u32::MAX as u64)),
+        );
+    }
+    if let Some(active) = source.get("activeNode").and_then(Value::as_object) {
+        if let (Some(id), Some(attempt)) = (
+            active.get("id").and_then(bounded_pause_string),
+            active.get("attempt").and_then(Value::as_u64),
+        ) {
+            checkpoint.insert(
+                "activeNode".to_string(),
+                json!({
+                    "id": id,
+                    "attempt": attempt.min(u32::MAX as u64),
+                }),
+            );
+        }
+    }
+    checkpoint.insert(
+        "attachmentRefs".to_string(),
+        source
+            .get("attachmentRefs")
+            .and_then(sanitize_pause_refs)
+            .unwrap_or_else(|| json!([])),
+    );
+    checkpoint.insert(
+        "artifactRefs".to_string(),
+        source
+            .get("artifactRefs")
+            .and_then(sanitize_pause_refs)
+            .unwrap_or_else(|| json!([])),
+    );
+    Some(Value::Object(checkpoint))
 }
 
 fn sanitize_prompt_manifest(value: &Value) -> Option<Value> {
@@ -1211,7 +1644,19 @@ fn sanitize_pending_decision(value: &Value) -> Option<Value> {
 }
 
 fn sanitize_work_graph(value: &Value) -> Option<Value> {
-    let mut graph = copy_known_fields(value, &["id", "approval"])?;
+    let mut graph = copy_known_fields(
+        value,
+        &[
+            "id",
+            "goal",
+            "constraints",
+            "qualityProfile",
+            "currentStage",
+            "gateStatus",
+            "iteration",
+            "approval",
+        ],
+    )?;
     let nodes = value
         .as_object()?
         .get("nodes")?
@@ -1228,7 +1673,13 @@ fn sanitize_work_graph(value: &Value) -> Option<Value> {
                     "dependsOn",
                     "fileOwnership",
                     "manifestId",
+                    "acceptanceCriteria",
                     "evidenceRefs",
+                    "stage",
+                    "role",
+                    "attempt",
+                    "artifactRefs",
+                    "reviewRequired",
                 ],
             )
             .map(Value::Object)
@@ -1236,6 +1687,172 @@ fn sanitize_work_graph(value: &Value) -> Option<Value> {
         .collect::<Option<Vec<_>>>()?;
     graph.insert("nodes".to_string(), Value::Array(nodes));
     Some(Value::Object(graph))
+}
+
+fn sanitize_quality_review(value: &Value) -> Option<Value> {
+    let source = value.as_object()?;
+    let mut review = copy_known_fields(
+        value,
+        &[
+            "runId",
+            "graphId",
+            "profile",
+            "currentStage",
+            "iteration",
+            "refineCount",
+            "pivotCount",
+            "latestDecision",
+        ],
+    )?;
+    let history = source.get("history")?.as_array()?;
+    let start = history
+        .len()
+        .saturating_sub(MAX_AGENT_CONSOLE_QUALITY_HISTORY);
+    let history = history[start..]
+        .iter()
+        .map(|entry| {
+            copy_known_fields(
+                entry,
+                &[
+                    "event",
+                    "stage",
+                    "decision",
+                    "iteration",
+                    "reason",
+                    "failures",
+                    "evidenceRefs",
+                    "artifactRefs",
+                    "artifactHash",
+                    "reviewedArtifactHash",
+                    "currentArtifactHash",
+                    "reviewerId",
+                    "reviewerRunId",
+                    "provider",
+                    "model",
+                    "route",
+                    "count",
+                    "limit",
+                    "independentVerification",
+                    "stale",
+                    "startedAt",
+                ],
+            )
+            .map(Value::Object)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    review.insert("history".to_string(), Value::Array(history));
+    Some(Value::Object(review))
+}
+
+fn sanitize_evolution_proposal(value: &Value) -> Option<Value> {
+    let source = value.as_object()?;
+    let mut proposal = copy_known_fields(
+        value,
+        &[
+            "id",
+            "runId",
+            "candidateId",
+            "creatorId",
+            "evaluatorId",
+            "attestorId",
+            "state",
+            "isolation",
+            "isolatedBranch",
+            "isolatedWorktree",
+            "heldOutBenchmark",
+            "heldOutBenchmarkId",
+            "humanApproval",
+            "mergeRequiresHumanApproval",
+            "stale",
+            "summary",
+            "createdAt",
+        ],
+    )?;
+
+    let changed_assets = source
+        .get("changedAssets")?
+        .as_array()?
+        .iter()
+        .take(128)
+        .map(|asset| copy_known_fields(asset, &["path", "sha256"]).map(Value::Object))
+        .collect::<Option<Vec<_>>>()?;
+    proposal.insert("changedAssets".to_string(), Value::Array(changed_assets));
+
+    let hashes = copy_known_fields(
+        source.get("hashes")?,
+        &[
+            "baseCommit",
+            "candidateCommit",
+            "patch",
+            "candidateArtifact",
+            "evaluator",
+            "evaluatorEnvironment",
+            "policy",
+            "suite",
+            "baselineResult",
+            "candidateResult",
+        ],
+    )?;
+    proposal.insert("hashes".to_string(), Value::Object(hashes));
+
+    if let Some(comparison) = source.get("comparison") {
+        proposal.insert(
+            "comparison".to_string(),
+            Value::Object(copy_known_fields(
+                comparison,
+                &[
+                    "baselineScore",
+                    "candidateScore",
+                    "delta",
+                    "passed",
+                    "thresholdsHash",
+                ],
+            )?),
+        );
+    }
+    if let Some(attestation) = source.get("attestation") {
+        proposal.insert(
+            "attestation".to_string(),
+            Value::Object(copy_known_fields(
+                attestation,
+                &["timestamp", "maxAgeMs", "branchExists", "worktreeExists"],
+            )?),
+        );
+    }
+
+    let cleanup_source = source.get("cleanup")?.as_object()?;
+    let mut cleanup = copy_known_fields(source.get("cleanup")?, &["status", "summary"])?;
+    let resources = cleanup_source
+        .get("resources")?
+        .as_array()?
+        .iter()
+        .take(16)
+        .map(|resource| {
+            copy_known_fields(resource, &["kind", "identity", "status"]).map(Value::Object)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    cleanup.insert("resources".to_string(), Value::Array(resources));
+    proposal.insert("cleanup".to_string(), Value::Object(cleanup));
+    proposal.insert(
+        "failures".to_string(),
+        sanitize_bounded_string_array(source.get("failures")?, 32)?,
+    );
+    proposal.insert(
+        "artifactRefs".to_string(),
+        sanitize_bounded_string_array(source.get("artifactRefs")?, 32)?,
+    );
+    Some(Value::Object(proposal))
+}
+
+fn sanitize_bounded_string_array(value: &Value, maximum_items: usize) -> Option<Value> {
+    Some(Value::Array(
+        value
+            .as_array()?
+            .iter()
+            .take(maximum_items)
+            .map(|entry| entry.as_str().map(|text| Value::String(text.to_string())))
+            .collect::<Option<Vec<_>>>()?,
+    ))
 }
 
 fn sanitize_tool_activity(value: &Value) -> Option<Value> {
@@ -1284,10 +1901,16 @@ fn redact_json_strings(value: Value) -> Value {
 
 fn build_work_shell_records(snapshot: &WorkShellSessionSnapshot) -> Vec<WorkShellRecord> {
     let summary_timestamp = now_timestamp();
+    let summary = bounded_session_summary(&snapshot.summary);
     let metadata_trace = snapshot
         .trace_mode
         .as_ref()
         .map(|trace_mode| format!(",\"traceMode\":\"{}\"", escape_json(trace_mode)))
+        .unwrap_or_default();
+    let metadata_locale = snapshot
+        .ui_locale
+        .as_ref()
+        .map(|locale| format!(",\"uiLocale\":\"{}\"", escape_json(locale)))
         .unwrap_or_default();
     let metadata_reasoning = snapshot
         .reasoning_effort
@@ -1317,11 +1940,12 @@ fn build_work_shell_records(snapshot: &WorkShellSessionSnapshot) -> Vec<WorkShel
         WorkShellRecord {
             timestamp: now_timestamp(),
             checkpoint_json: format!(
-                "{{\"type\":\"metadata\",\"metadata\":{{\"model\":\"{}\",\"taskSummary\":\"{}\",\"isUltraworkMode\":{}{}{}{}}}}}",
+                "{{\"type\":\"metadata\",\"metadata\":{{\"model\":\"{}\",\"taskSummary\":\"{}\",\"isUltraworkMode\":{}{}{}{}{}}}}}",
                 escape_json(&snapshot.model),
-                escape_json(&snapshot.summary),
+                escape_json(&summary),
                 if snapshot.mode == "ultrawork" { "true" } else { "false" },
                 metadata_trace,
+                metadata_locale,
                 metadata_reasoning,
                 metadata_context_receipt,
             ),
@@ -1330,7 +1954,7 @@ fn build_work_shell_records(snapshot: &WorkShellSessionSnapshot) -> Vec<WorkShel
             timestamp: summary_timestamp.clone(),
             checkpoint_json: format!(
                 "{{\"type\":\"task_summary\",\"summary\":\"{}\",\"timestamp\":\"{}\"}}",
-                escape_json(&snapshot.summary),
+                escape_json(&summary),
                 summary_timestamp
             ),
         },
@@ -1339,7 +1963,11 @@ fn build_work_shell_records(snapshot: &WorkShellSessionSnapshot) -> Vec<WorkShel
             checkpoint_json: "{\"type\":\"mode\",\"mode\":\"normal\"}".to_string(),
         },
     ];
-    if let Some(agent_console) = &snapshot.agent_console {
+    if let Some(agent_console) = snapshot
+        .agent_console
+        .as_ref()
+        .and_then(sanitize_agent_console_snapshot)
+    {
         records.push(WorkShellRecord {
             timestamp: now_timestamp(),
             checkpoint_json: format!(
@@ -1355,15 +1983,19 @@ fn build_checkpoint_json(
     event_count: usize,
     updated_at: &str,
 ) -> String {
+    let summary = bounded_session_summary(&snapshot.summary);
     let mut metadata = serde_json::Map::new();
     metadata.insert("model".to_string(), json!(snapshot.model));
-    metadata.insert("taskSummary".to_string(), json!(snapshot.summary));
+    metadata.insert("taskSummary".to_string(), json!(summary));
     metadata.insert(
         "isUltraworkMode".to_string(),
         json!(snapshot.mode == "ultrawork"),
     );
     if let Some(trace_mode) = &snapshot.trace_mode {
         metadata.insert("traceMode".to_string(), json!(trace_mode));
+    }
+    if let Some(ui_locale) = &snapshot.ui_locale {
+        metadata.insert("uiLocale".to_string(), json!(ui_locale));
     }
     if let Some(reasoning_effort) = &snapshot.reasoning_effort {
         metadata.insert("reasoningEffort".to_string(), json!(reasoning_effort));
@@ -1373,6 +2005,9 @@ fn build_checkpoint_json(
             "lastSubmittedContextReceiptId".to_string(),
             json!(receipt_id),
         );
+    }
+    if let Some(revision) = snapshot.owner_mutation_revision {
+        metadata.insert("ownerMutationRevision".to_string(), json!(revision));
     }
 
     let entries = minimize_resume_entries(&snapshot.entries);
@@ -1385,15 +2020,22 @@ fn build_checkpoint_json(
         "state": snapshot.state,
         "metadata": metadata,
         "taskSummary": {
-            "summary": snapshot.summary,
+            "summary": summary,
             "timestamp": updated_at,
         },
         "mode": "normal",
         "entries": entries
             .into_iter()
-            .map(|entry| json!({ "role": entry.role, "text": entry.text }))
+            .map(|entry| json!({ "id": entry.id, "role": entry.role, "text": entry.text }))
             .collect::<Vec<_>>(),
-        "agentConsole": snapshot.agent_console.clone(),
+        "agentConsole": snapshot
+            .agent_console
+            .as_ref()
+            .and_then(sanitize_agent_console_snapshot),
+        "pauseCheckpoint": snapshot
+            .pause_checkpoint
+            .as_ref()
+            .and_then(sanitize_pause_checkpoint),
     }))
     .unwrap_or_else(|_| "{}".to_string())
 }
@@ -1483,6 +2125,109 @@ mod tests {
     }
 
     #[test]
+    fn notice_scan_returns_all_129_and_256_valid_files_without_truncation() {
+        for notice_count in [129_usize, 256] {
+            let root = env::temp_dir().join(format!(
+                "unclecode-session-notice-truncation-{notice_count}-{}-{}",
+                std::process::id(),
+                now_ms()
+            ));
+            let notice_dir = root.join("notifications");
+            fs::create_dir_all(&notice_dir).expect("create notice directory");
+            for index in 0..notice_count {
+                let session_id = format!("bounded-session-{index}");
+                fs::write(
+                    notice_dir.join(format!(
+                        "{}.notice.json",
+                        to_opaque_id(&session_id, "session")
+                    )),
+                    serde_json::to_vec(&json!({
+                        "version": SESSION_NOTICE_VERSION,
+                        "sessionId": session_id,
+                        "revision": index + 1,
+                    }))
+                    .expect("serialize notice"),
+                )
+                .expect("write notice");
+            }
+
+            let raw = scan_session_persistence_notices_json(&root).expect("scan notices");
+            let scan: Value = serde_json::from_str(&raw).expect("parse scan");
+            assert_eq!(scan["notices"].as_array().map(Vec::len), Some(notice_count));
+            assert_eq!(scan["truncatedCount"].as_u64(), Some(0));
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn notice_scan_reports_the_exact_count_beyond_the_256_file_bound() {
+        let root = env::temp_dir().join(format!(
+            "unclecode-session-notice-truncation-count-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let notice_dir = root.join("notifications");
+        fs::create_dir_all(&notice_dir).expect("create notice directory");
+        for index in 0..300 {
+            let session_id = format!("overflow-session-{index}");
+            fs::write(
+                notice_dir.join(format!(
+                    "{}.notice.json",
+                    to_opaque_id(&session_id, "session")
+                )),
+                serde_json::to_vec(&json!({
+                    "version": SESSION_NOTICE_VERSION,
+                    "sessionId": session_id,
+                    "revision": index + 1,
+                }))
+                .expect("serialize notice"),
+            )
+            .expect("write notice");
+        }
+
+        let raw = scan_session_persistence_notices_json(&root).expect("scan notices");
+        let scan: Value = serde_json::from_str(&raw).expect("parse scan");
+        assert_eq!(scan["notices"].as_array().map(Vec::len), Some(256));
+        assert_eq!(scan["truncatedCount"].as_u64(), Some(44));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn notice_scan_ignores_malformed_names_before_applying_the_bound() {
+        let root = env::temp_dir().join(format!(
+            "unclecode-session-notice-starvation-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let notice_dir = root.join("notifications");
+        fs::create_dir_all(&notice_dir).expect("create notice directory");
+        for index in 0..256 {
+            fs::write(notice_dir.join(format!("{index:03}-malformed")), b"ignored")
+                .expect("write malformed entry");
+        }
+        let session_id = "valid-starvation-session";
+        let valid_name = format!("{}.notice.json", to_opaque_id(session_id, "session"));
+        fs::write(
+            notice_dir.join(&valid_name),
+            serde_json::to_vec(&json!({
+                "version": SESSION_NOTICE_VERSION,
+                "sessionId": session_id,
+                "revision": 7,
+            }))
+            .expect("serialize notice"),
+        )
+        .expect("write valid notice");
+
+        let raw = scan_session_persistence_notices_json(&root).expect("scan notices");
+        let scan: Value = serde_json::from_str(&raw).expect("parse scan");
+        let notices = scan["notices"].as_array().expect("notice array");
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0]["name"], valid_name.as_str());
+        assert_eq!(scan["truncatedCount"], 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn work_shell_snapshot_matches_session_store_shape() {
         let root = env::temp_dir().join(format!(
             "unclecode-session-store-test-{}-{}",
@@ -1500,19 +2245,24 @@ mod tests {
                 state: "idle".to_string(),
                 summary: "Chat: inspect repo".to_string(),
                 trace_mode: Some("verbose".to_string()),
+                ui_locale: Some("ko".to_string()),
                 reasoning_effort: Some("high".to_string()),
                 last_submitted_context_receipt_id: Some("receipt-submitted".to_string()),
+                owner_mutation_revision: Some(7),
                 entries: vec![
                     WorkShellTranscriptEntry {
+                        id: Some("entry-user".to_string()),
                         role: "user".to_string(),
                         text: "inspect repo".to_string(),
                     },
                     WorkShellTranscriptEntry {
+                        id: Some("entry-assistant".to_string()),
                         role: "assistant".to_string(),
                         text: "repo inspected".to_string(),
                     },
                 ],
                 agent_console: None,
+                pause_checkpoint: None,
             })
             .expect("persist snapshot");
 
@@ -1527,14 +2277,337 @@ mod tests {
             .expect("resumed");
         assert_eq!(resumed.session_id, "work-session-1");
         assert_eq!(resumed.trace_mode, Some("verbose".to_string()));
+        assert_eq!(resumed.ui_locale, Some("ko".to_string()));
         assert_eq!(
             resumed.last_submitted_context_receipt_id,
             Some("receipt-submitted".to_string())
         );
         assert_eq!(resumed.summary, "Chat: inspect repo");
+        assert_eq!(resumed.owner_mutation_revision, Some(7));
         assert_eq!(resumed.entries.len(), 2);
+        let notice_path = root.join("notifications").join(format!(
+            "{}.notice.json",
+            to_opaque_id("work-session-1", "session")
+        ));
+        let notice: Value = serde_json::from_str(
+            &fs::read_to_string(notice_path).expect("read persistence notice"),
+        )
+        .expect("parse persistence notice");
+        assert_eq!(notice.get("revision").and_then(Value::as_u64), Some(7));
+        assert_eq!(resumed.entries[0].id.as_deref(), Some("entry-user"));
+        assert_eq!(resumed.entries[1].id.as_deref(), Some("entry-assistant"));
         assert_eq!(resumed.entries[0].text, "inspect repo");
         assert_eq!(resumed.entries[1].text, "repo inspected");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn checkpoint_notice_rotation_keeps_the_current_session_and_bounds_the_directory() {
+        let root_dir = env::temp_dir().join(format!(
+            "unclecode-session-notice-rotation-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let store = WorkShellSessionStore::new(&root_dir);
+        let root = AnchoredSessionRoot::open(&root_dir).expect("anchor root");
+        for index in 0..384 {
+            store
+                .persist_checkpoint_notice(&root, &format!("rotated-session-{index}"), index + 1)
+                .expect("persist bounded notice");
+        }
+
+        let current = format!(
+            "{}.notice.json",
+            to_opaque_id("rotated-session-383", "session")
+        );
+        let notice_dir = root_dir.join("notifications");
+        let retained = fs::read_dir(&notice_dir)
+            .expect("read notice directory")
+            .filter_map(Result::ok)
+            .filter(|entry| is_session_notice_file_name(&entry.file_name().to_string_lossy()))
+            .count();
+        assert_eq!(retained, MAX_SESSION_NOTICE_FILES);
+        assert!(notice_dir.join(current).is_file());
+        let _ = fs::remove_dir_all(root_dir);
+    }
+
+    #[test]
+    fn repeated_snapshots_use_checkpoint_count_and_keep_the_append_log_bounded() {
+        let root = env::temp_dir().join(format!(
+            "unclecode-session-bounded-log-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let project = env::current_dir().expect("cwd");
+        let store = WorkShellSessionStore::new(&root);
+        let mut snapshot = WorkShellSessionSnapshot {
+            session_id: "work-session-bounded-log".to_string(),
+            project_path: project.to_string_lossy().to_string(),
+            model: "gpt-5.4".to_string(),
+            mode: "normal".to_string(),
+            state: "running".to_string(),
+            summary: "initial".to_string(),
+            trace_mode: Some("minimal".to_string()),
+            ui_locale: None,
+            reasoning_effort: None,
+            last_submitted_context_receipt_id: None,
+            owner_mutation_revision: None,
+            entries: Vec::new(),
+            agent_console: None,
+            pause_checkpoint: None,
+        };
+        let records_per_snapshot = build_work_shell_records(&snapshot).len();
+        for index in 0..256 {
+            snapshot.summary = format!("checkpoint-{index}-{}", "x".repeat(400));
+            store
+                .persist_work_shell_snapshot(&snapshot)
+                .expect("persist repeated snapshot");
+        }
+
+        let paths = session_paths(&root, &project, &snapshot.session_id);
+        let checkpoint: Value = serde_json::from_str(
+            &fs::read_to_string(&paths.checkpoint_path).expect("read checkpoint"),
+        )
+        .expect("parse checkpoint");
+        assert_eq!(
+            checkpoint["eventCount"].as_u64(),
+            Some((256 * records_per_snapshot) as u64)
+        );
+        assert!(
+            fs::metadata(&paths.event_log_path)
+                .expect("event log metadata")
+                .len()
+                <= MAX_WORK_SHELL_EVENT_LOG_BYTES as u64
+        );
+        let resumed = store
+            .resume_work_shell_session(&project, &snapshot.session_id)
+            .expect("resume")
+            .expect("resumed");
+        assert_eq!(resumed.summary, snapshot.summary);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn oversized_legacy_log_is_compacted_without_recounting_its_contents() {
+        let root = env::temp_dir().join(format!(
+            "unclecode-session-log-metadata-count-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let project = env::current_dir().expect("cwd");
+        let store = WorkShellSessionStore::new(&root);
+        let snapshot = WorkShellSessionSnapshot {
+            session_id: "work-session-log-metadata-count".to_string(),
+            project_path: project.to_string_lossy().to_string(),
+            model: "gpt-5.4".to_string(),
+            mode: "normal".to_string(),
+            state: "idle".to_string(),
+            summary: "latest durable state".to_string(),
+            trace_mode: None,
+            ui_locale: None,
+            reasoning_effort: None,
+            last_submitted_context_receipt_id: None,
+            owner_mutation_revision: None,
+            entries: Vec::new(),
+            agent_console: None,
+            pause_checkpoint: None,
+        };
+        let paths = session_paths(&root, &project, &snapshot.session_id);
+        fs::create_dir_all(&paths.session_dir).expect("create session directory");
+        fs::write(
+            &paths.checkpoint_path,
+            serde_json::to_vec(&json!({ "eventCount": 77 })).expect("checkpoint json"),
+        )
+        .expect("write checkpoint metadata");
+        fs::write(
+            &paths.event_log_path,
+            vec![b'x'; MAX_WORK_SHELL_EVENT_LOG_BYTES + 1],
+        )
+        .expect("write oversized event log");
+
+        store
+            .persist_work_shell_snapshot(&snapshot)
+            .expect("persist over oversized log");
+
+        let checkpoint: Value = serde_json::from_str(
+            &fs::read_to_string(&paths.checkpoint_path).expect("read checkpoint"),
+        )
+        .expect("parse checkpoint");
+        assert_eq!(
+            checkpoint["eventCount"].as_u64(),
+            Some((77 + build_work_shell_records(&snapshot).len()) as u64)
+        );
+        assert!(
+            fs::metadata(&paths.event_log_path)
+                .expect("event log metadata")
+                .len()
+                <= MAX_WORK_SHELL_EVENT_LOG_BYTES as u64
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pause_checkpoint_is_bounded_allow_listed_and_resumable() {
+        let root = env::temp_dir().join(format!(
+            "unclecode-pause-checkpoint-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let project = env::current_dir().expect("cwd");
+        let store = WorkShellSessionStore::new(&root);
+        let payload = json!({
+            "sessionId": "paused-session",
+            "model": "gpt-5.4",
+            "mode": "normal",
+            "state": "paused",
+            "summary": "Turn paused at before_tool.",
+            "entries": [],
+            "pauseCheckpoint": {
+                "turnId": "turn-paused-1",
+                "boundary": "before_tool",
+                "activeNode": { "id": "worker-1", "attempt": 2, "prompt": "secret" },
+                "currentStage": "work",
+                "gateStatus": "refine",
+                "iteration": 3,
+                "decisionId": "decision-1",
+                "contextReceiptId": "receipt-1",
+                "attachmentRefs": ["image:image/png:clipboard.png"],
+                "artifactRefs": ["artifact:sha256:abc"],
+                "providerHeaders": { "authorization": "Bearer secret" }
+            }
+        })
+        .to_string();
+
+        persist_work_shell_session_snapshot_json(&store, &project, &payload)
+            .expect("persist pause checkpoint");
+        let resumed = store
+            .resume_work_shell_session(&project, "paused-session")
+            .expect("resume")
+            .expect("resumed");
+        assert_eq!(resumed.state, "paused");
+        let checkpoint = resumed.pause_checkpoint.expect("pause checkpoint");
+        assert_eq!(checkpoint["turnId"], "turn-paused-1");
+        assert_eq!(checkpoint["activeNode"]["attempt"], 2);
+        assert_eq!(checkpoint["artifactRefs"][0], "artifact:sha256:abc");
+        let serialized = serde_json::to_string(&checkpoint).expect("serialize checkpoint");
+        assert!(!serialized.contains("providerHeaders"));
+        assert!(!serialized.contains("authorization"));
+        assert!(!serialized.contains("prompt"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn work_shell_evolution_projection_and_notice_cross_the_durable_gate() {
+        let root = env::temp_dir().join(format!(
+            "unclecode-session-evolution-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let project = env::current_dir().expect("cwd");
+        let session_id = "work-session-evolution";
+        let store = WorkShellSessionStore::new(&root);
+        let proposal = json!({
+            "id": "proposal-1",
+            "runId": "run-1",
+            "candidateId": "candidate-1",
+            "creatorId": "creator-1",
+            "evaluatorId": "evaluator-1",
+            "attestorId": "attestor-1",
+            "state": "pr-ready",
+            "isolation": "worktree",
+            "isolatedBranch": "unclecode/evolve/candidate-1",
+            "isolatedWorktree": "/private/candidate-1",
+            "heldOutBenchmark": true,
+            "heldOutBenchmarkId": "suite-1",
+            "humanApproval": "pending",
+            "mergeRequiresHumanApproval": true,
+            "stale": false,
+            "changedAssets": [{ "path": "skills/creator.md", "sha256": format!("sha256:{}", "a".repeat(64)), "body": "must-not-persist" }],
+            "hashes": {
+                "evaluator": format!("sha256:{}", "b".repeat(64)),
+                "evaluatorEnvironment": format!("sha256:{}", "c".repeat(64)),
+                "policy": format!("sha256:{}", "d".repeat(64)),
+                "suite": format!("sha256:{}", "e".repeat(64)),
+                "providerCredential": "must-not-persist"
+            },
+            "comparison": {
+                "baselineScore": 0.7,
+                "candidateScore": 0.9,
+                "delta": 0.2,
+                "passed": true,
+                "thresholdsHash": format!("sha256:{}", "f".repeat(64)),
+                "rawOutput": "must-not-persist"
+            },
+            "attestation": {
+                "timestamp": "2026-08-28T12:00:00.000Z",
+                "maxAgeMs": 300000,
+                "branchExists": true,
+                "worktreeExists": true,
+                "hookOutput": "must-not-persist"
+            },
+            "cleanup": {
+                "status": "retained",
+                "resources": [{ "kind": "branch", "identity": "unclecode/evolve/candidate-1", "status": "retained", "command": "must-not-persist" }]
+            },
+            "failures": [],
+            "summary": format!("safe summary sk-proj-{}", "s".repeat(30)),
+            "artifactRefs": [".unclecode/artifacts/run-1/proposal.json"],
+            "createdAt": "2026-08-28T12:00:00.000Z",
+            "rawCandidateOutput": "must-not-persist"
+        });
+        let payload = json!({
+            "sessionId": session_id,
+            "model": "gpt-5.4",
+            "mode": "normal",
+            "state": "idle",
+            "summary": "Recorded evolution proposal",
+            "entries": [],
+            "agentConsole": {
+                "profileId": "build",
+                "activity": [],
+                "evolutionProposals": [proposal]
+            }
+        })
+        .to_string();
+
+        persist_work_shell_session_snapshot_json(&store, &project, &payload)
+            .expect("persist evolution snapshot");
+        let resumed = store
+            .resume_work_shell_session(&project, session_id)
+            .expect("resume")
+            .expect("resumed");
+        let console = resumed.agent_console.expect("agent console");
+        let recorded = &console["evolutionProposals"][0];
+        assert_eq!(recorded["state"], "pr-ready");
+        assert_eq!(
+            recorded["hashes"]["evaluatorEnvironment"],
+            format!("sha256:{}", "c".repeat(64))
+        );
+        let serialized = serde_json::to_string(recorded).expect("serialize proposal");
+        assert!(!serialized.contains("must-not-persist"));
+        assert!(!serialized.contains("sk-proj-"));
+        assert!(serialized.contains("[REDACTED]"));
+
+        let notice_path = root.join("notifications").join(format!(
+            "{}.notice.json",
+            to_opaque_id(session_id, "session")
+        ));
+        let first_notice: Value = serde_json::from_str(
+            &fs::read_to_string(&notice_path).expect("read persistence notice"),
+        )
+        .expect("parse persistence notice");
+        assert_eq!(first_notice["version"], 1);
+        assert_eq!(first_notice["sessionId"], session_id);
+        assert_eq!(first_notice["revision"], 5);
+
+        persist_work_shell_session_snapshot_json(&store, &project, &payload)
+            .expect("persist next evolution snapshot");
+        let next_notice: Value = serde_json::from_str(
+            &fs::read_to_string(&notice_path).expect("read next persistence notice"),
+        )
+        .expect("parse next persistence notice");
+        assert_eq!(next_notice["revision"], 10);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1686,9 +2759,15 @@ mod tests {
             console["agents"][0]["transcriptRef"],
             "transcripts/run-1.jsonl"
         );
-        assert_eq!(console["agents"][0]["summary"], "Refactoring the auth guard.");
+        assert_eq!(
+            console["agents"][0]["summary"],
+            "Refactoring the auth guard."
+        );
         assert_eq!(console["agents"][0]["usage"]["inputTokens"], 120);
-        assert_eq!(console["agents"][0]["usage"]["eventIds"][0], "usage-1");
+        assert!(console["agents"][0]["usage"].get("eventIds").is_none());
+        assert!(console["agents"][0]["usage"]["routes"][0]
+            .get("eventIds")
+            .is_none());
         assert_eq!(
             console["agents"][0]["usage"]["routes"][0]["model"],
             "gpt-5.6-sol"
@@ -1818,7 +2897,9 @@ mod tests {
             .resume_work_shell_session(&project, "work-session-oversized")
             .expect("resume")
             .expect("resumed");
-        let fitted = resumed.agent_console.expect("agent console survives fitting");
+        let fitted = resumed
+            .agent_console
+            .expect("agent console survives fitting");
 
         // Fits the durable budget instead of collapsing to nothing.
         let bytes = serde_json::to_vec(&fitted).expect("serialize fitted");
@@ -1849,9 +2930,7 @@ mod tests {
         // Oldest terminal history is what paid for the budget.
         assert!(agents.len() < 128);
         assert!(jobs.len() < 128);
-        assert!(!agents
-            .iter()
-            .any(|agent| agent["id"] == json!("run-0")));
+        assert!(!agents.iter().any(|agent| agent["id"] == json!("run-0")));
         assert!(!jobs.iter().any(|job| job["id"] == json!("job-0")));
 
         // Aggregate main usage counters survive.
@@ -1869,6 +2948,57 @@ mod tests {
         assert!(!serialized.contains("ghp_"));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn work_shell_agent_console_migrates_10k_legacy_ids_to_owner_totals_projection() {
+        let ids = (0..10_000)
+            .map(|index| format!("usage:restart:{index}"))
+            .collect::<Vec<_>>();
+        let console = json!({
+            "profileId": "build",
+            "activity": (0..80).map(|index| json!({
+                "id": format!("activity-{index}"),
+                "toolCallId": format!("call-{index}"),
+                "toolName": "read_file",
+                "kind": "read",
+                "intent": "x".repeat(400),
+                "status": "completed",
+                "startedAt": index,
+            })).collect::<Vec<_>>(),
+            "agents": [],
+            "jobs": [],
+            "mainUsage": {
+                "eventIds": ids,
+                "inputTokens": 10_000,
+                "routes": [{
+                    "provider": "openai",
+                    "model": "gpt-5.6-sol",
+                    "eventIds": ["usage:restart:0"],
+                    "inputTokens": 10_000
+                }]
+            },
+            "totalUsage": {
+                "inputTokens": 25_000,
+                "costUsd": 1.25,
+                "routes": [{
+                    "provider": "openai",
+                    "model": "gpt-5.6-sol",
+                    "inputTokens": 25_000,
+                    "costUsd": 1.25
+                }]
+            },
+        });
+
+        let fitted = persist_and_resume_console("work-session-usage-ledger", console);
+        assert!(fitted["mainUsage"].get("eventIds").is_none());
+        assert!(fitted["mainUsage"]["routes"][0].get("eventIds").is_none());
+        assert_eq!(fitted["mainUsage"]["inputTokens"], 10_000);
+        assert_eq!(fitted["mainUsage"]["routes"][0]["inputTokens"], 10_000);
+        assert_eq!(fitted["totalUsage"]["inputTokens"], 25_000);
+        assert_eq!(fitted["totalUsage"]["routes"][0]["costUsd"], 1.25);
+        assert!(fitted["totalUsage"].get("eventIds").is_none());
+        assert!(fitted["activity"].as_array().expect("activity").len() < 80);
     }
 
     fn active_lifecycle_console_fields() -> Map<String, Value> {
@@ -1982,7 +3112,9 @@ mod tests {
             .resume_work_shell_session(&project, session_id)
             .expect("resume")
             .expect("resumed");
-        let fitted = resumed.agent_console.expect("agent console survives fitting");
+        let fitted = resumed
+            .agent_console
+            .expect("agent console survives fitting");
         let _ = fs::remove_dir_all(root);
         fitted
     }
@@ -2027,14 +3159,20 @@ mod tests {
         let policy = fitted["manifest"]["policy"].as_array().expect("policy");
         assert!(!policy.is_empty());
         assert!(policy.len() < 400);
-        assert_eq!(policy[0]["id"], json!(format!("policy-{}", 400 - policy.len())));
+        assert_eq!(
+            policy[0]["id"],
+            json!(format!("policy-{}", 400 - policy.len()))
+        );
         assert_eq!(policy[policy.len() - 1]["id"], "policy-399");
     }
 
     #[test]
     fn work_shell_agent_console_compacts_oversized_pending_decision_before_active_work() {
         let mut console = active_lifecycle_console_fields();
-        console.insert("pendingDecision".to_string(), oversized_pending_decision(60));
+        console.insert(
+            "pendingDecision".to_string(),
+            oversized_pending_decision(60),
+        );
 
         let fitted = persist_and_resume_console("work-session-decision", Value::Object(console));
 
@@ -2064,7 +3202,10 @@ mod tests {
     fn work_shell_agent_console_drops_shell_metadata_before_active_identities() {
         let mut console = active_lifecycle_console_fields();
         console.insert("manifest".to_string(), oversized_manifest(400));
-        console.insert("pendingDecision".to_string(), oversized_pending_decision(400));
+        console.insert(
+            "pendingDecision".to_string(),
+            oversized_pending_decision(400),
+        );
         console.insert(
             "workGraph".to_string(),
             json!({
@@ -2137,14 +3278,20 @@ mod tests {
         let policy = fitted["manifest"]["policy"]
             .as_array()
             .expect("policy survives as an array");
-        assert!(!policy.is_empty(), "trimming must not empty a policy that fits");
+        assert!(
+            !policy.is_empty(),
+            "trimming must not empty a policy that fits"
+        );
         assert!(policy.len() < sources);
 
         // Oldest-first retention: the survivors are the newest contiguous
         // suffix, still in order.
         let first_kept = sources - policy.len();
         for (offset, source) in policy.iter().enumerate() {
-            assert_eq!(source["id"], json!(format!("policy-{}", first_kept + offset)));
+            assert_eq!(
+                source["id"],
+                json!(format!("policy-{}", first_kept + offset))
+            );
         }
 
         // Minimality: putting the newest dropped source back must overflow.
@@ -2308,11 +3455,13 @@ mod tests {
             "x".repeat(MAX_RESUME_ENTRY_CHARS + 50)
         );
         let mut entries = vec![WorkShellTranscriptEntry {
+            id: None,
             role: "ignored".to_string(),
             text: "should not persist".to_string(),
         }];
         for index in 0..30 {
             entries.push(WorkShellTranscriptEntry {
+                id: Some(format!("entry-{index}")),
                 role: "user".to_string(),
                 text: format!("{index}: {long_text}"),
             });
@@ -2327,10 +3476,13 @@ mod tests {
                 state: "idle".to_string(),
                 summary: "Chat: minimize".to_string(),
                 trace_mode: Some("minimal".to_string()),
+                ui_locale: None,
                 reasoning_effort: None,
                 last_submitted_context_receipt_id: None,
+                owner_mutation_revision: None,
                 entries,
                 agent_console: None,
+                pause_checkpoint: None,
             })
             .expect("persist snapshot");
 

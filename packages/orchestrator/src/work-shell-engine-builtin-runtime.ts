@@ -35,6 +35,7 @@ import type {
 import type { WorkShellReasoningConfig } from "./reasoning.js";
 import type { WorkShellSubmitRoute } from "./work-shell-engine-submit.js";
 import type { AgentConsoleTab, ContextPacketView } from "@unclecode/contracts";
+import { createPermissionPolicyPanel, type CanonicalPermissionRule } from "./permission-scope.js";
 
 type WorkShellBuiltinCommand = Extract<
   WorkShellSubmitRoute,
@@ -115,6 +116,7 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
   listAvailableSkills: (cwd: string) => Promise<readonly WorkShellSkillListItem[]>;
   loadNamedSkill: (name: string, cwd: string) => Promise<WorkShellLoadedSkill>;
   toolLines: readonly string[];
+  listCanonicalPermissionRules?: (() => readonly CanonicalPermissionRule[]) | undefined;
   clearAgent: () => void;
   interruptTurn: () => void;
   updateRuntimeSettings: (settings: {
@@ -127,8 +129,15 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
   reloadContextState: () => Promise<void>;
   refreshContextPacket?: (() => Promise<ContextPacketView | undefined>) | undefined;
   queuedCount?: (() => number) | undefined;
-  queuedItems?: (() => Promise<readonly { readonly id: number; readonly line: string }[]>) | undefined;
+  queuedItems?: (() => Promise<readonly {
+    readonly id: number;
+    readonly line: string;
+    readonly attachmentCount?: number;
+  }[]>) | undefined;
   clearQueuedItems?: (() => Promise<void>) | undefined;
+  removeQueuedItem?: ((id: number) => Promise<boolean>) | undefined;
+  moveQueuedItem?: ((id: number, direction: "up" | "down") => Promise<boolean>) | undefined;
+  resumeQueuedItems?: (() => Promise<void>) | undefined;
   appendEntries: (...entries: readonly WorkShellChatEntry[]) => void;
   setState: (patch: Partial<WorkShellEngineState<Reasoning>>) => void;
   persistSessionSnapshot: (
@@ -325,6 +334,11 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
     case "tools":
       input.appendEntries(...createToolsBuiltinResult(input.line, input.toolLines));
       return;
+    case "policy":
+      input.setState({
+        panel: createPermissionPolicyPanel(input.listCanonicalPermissionRules?.() ?? []),
+      });
+      return;
     case "queue": {
       const queuedItems = input.queuedItems ? await input.queuedItems() : undefined;
       applyQueueBuiltinResult(input, buildWorkShellQueueBuiltinInput({
@@ -336,13 +350,56 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
     }
     case "queue-clear": {
       await input.clearQueuedItems?.();
+      const queuedItems = input.queuedItems ? await input.queuedItems() : undefined;
       applyQueueBuiltinResult(input, buildWorkShellQueueBuiltinInput({
         ...buildQueueBuiltinBase(input),
-        queuedCount: 0,
-        queuedItems: [],
+        ...(input.queuedCount ? { queuedCount: input.queuedCount() } : {}),
+        ...(queuedItems ? { queuedItems } : {}),
         transcriptText: input.state.isBusy
           ? "Queue cleared. Active turn is still running."
           : "Queue cleared.",
+      }));
+      return;
+    }
+    case "queue-remove": {
+      const removed = await input.removeQueuedItem?.(input.builtinCommand.id) ?? false;
+      const queuedItems = input.queuedItems ? await input.queuedItems() : undefined;
+      applyQueueBuiltinResult(input, buildWorkShellQueueBuiltinInput({
+        ...buildQueueBuiltinBase(input),
+        ...(input.queuedCount ? { queuedCount: input.queuedCount() } : {}),
+        ...(queuedItems ? { queuedItems } : {}),
+        transcriptText: removed
+          ? `Removed queued follow-up id ${input.builtinCommand.id}.`
+          : `Queued follow-up id ${input.builtinCommand.id} was not found.`,
+      }));
+      return;
+    }
+    case "queue-move": {
+      const moved = await input.moveQueuedItem?.(
+        input.builtinCommand.id,
+        input.builtinCommand.direction,
+      ) ?? false;
+      const queuedItems = input.queuedItems ? await input.queuedItems() : undefined;
+      applyQueueBuiltinResult(input, buildWorkShellQueueBuiltinInput({
+        ...buildQueueBuiltinBase(input),
+        ...(input.queuedCount ? { queuedCount: input.queuedCount() } : {}),
+        ...(queuedItems ? { queuedItems } : {}),
+        transcriptText: moved
+          ? `Moved queued follow-up id ${input.builtinCommand.id} ${input.builtinCommand.direction}.`
+          : `Queued follow-up id ${input.builtinCommand.id} cannot move ${input.builtinCommand.direction}.`,
+      }));
+      return;
+    }
+    case "queue-resume": {
+      await input.resumeQueuedItems?.();
+      const queuedItems = input.queuedItems ? await input.queuedItems() : undefined;
+      const base = buildQueueBuiltinBase(input);
+      applyQueueBuiltinResult(input, buildWorkShellQueueBuiltinInput({
+        ...base,
+        state: { ...base.state, queuePaused: false },
+        ...(input.queuedCount ? { queuedCount: input.queuedCount() } : {}),
+        ...(queuedItems ? { queuedItems } : {}),
+        transcriptText: "Queue resumed. Follow-ups will run in order.",
       }));
       return;
     }

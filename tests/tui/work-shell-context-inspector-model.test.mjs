@@ -231,6 +231,34 @@ test("context token labels distinguish estimated, exact, and unknown totals", ()
   assert.equal(formatContextTokenEstimate(42, "estimated"), "~42t");
   assert.equal(formatContextTokenEstimate(42, "exact"), "42t exact");
   assert.equal(formatContextTokenEstimate(0, "unknown"), "unknown token estimate");
+  assert.equal(formatContextTokenEstimate(42, "estimated", "ko"), "~42t");
+  assert.equal(formatContextTokenEstimate(42, "exact", "ko"), "42t 정확");
+  assert.equal(formatContextTokenEstimate(0, "unknown", "ko"), "토큰 추정치 알 수 없음");
+});
+
+test("context readiness follows locale without changing source payload", () => {
+  const source = {
+    id: "rules",
+    category: "workspace",
+    label: "AGENTS.md EXACT",
+    includedInModel: true,
+    tokenEstimate: 12,
+  };
+  const packet = {
+    included: [source], excluded: [], warnings: [],
+    sourceCounts: { included: 1, excluded: 0, warnings: 0 },
+    tokenEstimate: 12, tokenEstimateState: "estimated",
+  };
+  const rows = buildContextInspectorRows(packet);
+  assert.equal(
+    buildContextInspectorOverview({ packet, rows, modelWindow: 1000, uiLocale: "en" }).suggestion.message,
+    "Context packet looks ready for the next answer.",
+  );
+  assert.equal(
+    buildContextInspectorOverview({ packet, rows, modelWindow: 1000, uiLocale: "ko" }).suggestion.message,
+    "컨텍스트 패킷이 다음 응답에 사용할 준비가 되었습니다.",
+  );
+  assert.equal(rows[0].item.label, "AGENTS.md EXACT");
 });
 
 test("context inspector delivery state follows staging-first cursor identity", () => {

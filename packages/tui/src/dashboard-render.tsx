@@ -1,6 +1,9 @@
 import {
   createWorkShellPaneRuntime,
+  getWorkShellSlashSuggestions,
+  shouldBlockSlashSubmit,
   type CreateWorkShellEngineInput,
+  type WorkShellPaneRuntime,
   type WorkShellEngineState,
   type WorkShellReasoningConfig,
 } from "@unclecode/orchestrator";
@@ -106,6 +109,8 @@ export type ManagedWorkShellDashboardInput<
   > & {
     readonly ompAuthCatalog?: OmpAuthCatalogPort | undefined;
   };
+  readonly onEngineReady?: ((engine: WorkShellPaneRuntime<Attachment, Reasoning, TraceEvent>["engine"]) => void) | undefined;
+  readonly paneEngine?: WorkShellPaneRuntime<Attachment, Reasoning, TraceEvent>["engine"] | undefined;
   readonly getReasoningLabel: (reasoning: Reasoning) => string;
   readonly isReasoningSupported: (reasoning: Reasoning) => boolean;
 };
@@ -136,24 +141,34 @@ export function createManagedWorkShellDashboardProps<
       Attachment,
       WorkShellEngineState<Reasoning>
     > => {
-      const runtime = createWorkShellPaneRuntime({
+      const localRuntime = input.paneEngine ? undefined : createWorkShellPaneRuntime({
         ...input.paneRuntime,
         onExit,
       });
+      const engine = input.paneEngine ?? localRuntime!.engine;
+      const slashOptions = {
+        workspaceRoot: input.paneRuntime.options.cwd,
+        currentModel: engine.getState().model,
+      };
+      input.onEngineReady?.(engine);
 
       return {
         provider: input.paneRuntime.options.provider,
         model: input.paneRuntime.options.model,
         mode: input.paneRuntime.options.mode,
-        engine: runtime.engine,
+        engine,
+        engineOwnership: localRuntime ? "owned" : "shared",
         cwd: input.paneRuntime.options.cwd,
         resolveComposerInput: input.paneRuntime.resolveComposerInput,
-        getSuggestions: runtime.getSuggestions,
-        browserOAuthAvailable: runtime.browserOAuthAvailable,
+        getSuggestions: localRuntime?.getSuggestions
+          ?? ((value) => getWorkShellSlashSuggestions(value, slashOptions)),
+        browserOAuthAvailable: localRuntime?.browserOAuthAvailable
+          ?? Boolean(input.paneRuntime.browserOAuthAvailable),
         ...(input.paneRuntime.ompAuthCatalog
           ? { ompAuthCatalog: input.paneRuntime.ompAuthCatalog }
           : {}),
-        shouldBlockSlashSubmit: runtime.shouldBlockSlashSubmit,
+        shouldBlockSlashSubmit: localRuntime?.shouldBlockSlashSubmit
+          ?? ((line) => shouldBlockSlashSubmit(line, slashOptions)),
         getReasoningLabel: input.getReasoningLabel,
         isReasoningSupported: input.isReasoningSupported,
       };

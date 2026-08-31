@@ -123,6 +123,30 @@ test("package resolveOpenAIAuth uses Rust resolver for a single fallback credent
   assert.equal(result.projectId, "proj_single");
 });
 
+test("package resolveOpenAIAuth keeps an explicit empty env isolated from host credentials", async (t) => {
+  const previousApiKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "sk-host-must-not-leak";
+  t.after(() => {
+    if (previousApiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = previousApiKey;
+    }
+  });
+
+  const result = await resolveOpenAIAuth({
+    env: {},
+    fallbackAuthPath: "/definitely/missing",
+  });
+
+  assert.deepEqual(result, {
+    status: "missing",
+    authType: "none",
+    source: "none",
+    reason: "auth-file-missing",
+  });
+});
+
 test("package resolveOpenAIAuth reports expired env oauth token honestly", async () => {
   const pastExp = Math.floor(Date.now() / 1000) - 3600;
   const result = await resolveOpenAIAuth({

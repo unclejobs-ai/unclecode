@@ -42,7 +42,7 @@ function agent(overrides) {
   };
 }
 
-test("the WorkGraph HUD lifts active, blocked, requires-action and failed work above pending and completed rows", () => {
+test("the WorkGraph HUD shows current work, the next stage, and one blocker without overflow noise", () => {
   const rows = selectWorkGraphHudRows(
     snapshot({
       workGraph: {
@@ -62,13 +62,13 @@ test("the WorkGraph HUD lifts active, blocked, requires-action and failed work a
     120,
   );
 
-  // Snapshot order would put "Draft schema" first; priority order must not.
+  // Snapshot order would put "Draft schema" first; the quiet hierarchy must
+  // instead show current → remaining → blocker and stop at three nearby rows.
   assert.deepEqual(rows, [
     "Ship authentication · 1/6",
     "  ◐ Land refresh flow · running",
+    "  ○ Wire session store · ready",
     "  ▲ Await review · requires action",
-    "  ✕ Rotate secrets · failed",
-    "  … +3 more",
   ]);
 });
 
@@ -197,6 +197,21 @@ test("total console cost counts main usage and each agent's usage exactly once",
   }));
 
   assert.equal(total, "$1.00");
+});
+
+test("total console cost uses owner lifetime total after settled agents leave projection", () => {
+  const total = formatAgentConsoleTotalCost(snapshot({
+    totalUsage: { costUsd: 12.5 },
+    mainUsage: { eventIds: ["recent-main"], costUsd: 0.25 },
+    agents: [agent({
+      id: "recent-agent",
+      displayName: "RecentAgent",
+      status: "completed",
+      usage: { eventIds: ["recent-agent-usage"], costUsd: 0.5 },
+    })],
+  }));
+
+  assert.equal(total, "$12.50");
 });
 
 test("total console cost deduplicates overlapping usage event ids", () => {

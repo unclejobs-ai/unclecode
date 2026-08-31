@@ -1,4 +1,4 @@
-export type CompatProvider = "openai" | "gemini" | "groq" | "ollama" | "copilot" | "zai";
+export type CompatProvider = "openai" | "deepseek" | "gemini" | "groq" | "ollama" | "copilot" | "zai";
 
 export type ModelOption = {
   value: string;

@@ -8,13 +8,32 @@ import {
   type AgentRunUsage,
   type AgentRunUsageRoute,
   type AsyncJob,
+  MAX_QUALITY_REVIEW_HISTORY,
+  MAX_SUPERSEDED_WORK_PROPOSALS,
+  type QualityReviewHistoryEntry,
+  type QualityReviewProjection,
+  type QualityProfile,
   type TerminalAgentRunStatus,
   type ToolActivity,
-  type WorkNodeStatus,
   type ToolActivityKind,
+  type WorkGraph,
+  type WorkNodeStatus,
+  type WorkProposalIdentity,
+  type WorkProposalOrderProjection,
+} from "@unclecode/contracts";
+import {
+  reduceProviderTurnPerformance,
+  type ProviderPerformanceTraceEvent,
 } from "@unclecode/contracts";
 
 const MAX_TOOL_ACTIVITY = 80;
+const QUALITY_STAGE_RANK: Readonly<Record<QualityReviewHistoryEntry["stage"], number>> = {
+  explore: 0,
+  plan: 1,
+  work: 2,
+  critic: 3,
+  promote: 4,
+};
 
 type TraceRecord = Record<string, unknown>;
 
@@ -25,18 +44,116 @@ type TraceRecord = Record<string, unknown>;
 export function applyTraceEventToAgentConsole(
   snapshot: AgentConsoleSnapshot,
   event: { readonly type: string },
+  usageRecorder?: AgentConsoleUsageRecorder,
 ): AgentConsoleSnapshot {
-  const lifecycleSnapshot = applyAgentLifecycleEvent(snapshot, event);
-  if (lifecycleSnapshot !== snapshot) {
+  // Let the owner ledger arbitrate usage identity before projecting a receipt.
+  // A replay that was originally scoped to a worker can arrive without its
+  // scope after transport/replay rewriting; projecting it first would turn a
+  // previously settled worker measurement into a new main-turn receipt even
+  // though the ledger correctly rejects the scope mismatch.
+  const usageProjection = event.type === "usage.recorded" && usageRecorder
+    ? (() => {
+        const trace = asRecord(event);
+        return trace ? applyUsageEvent(snapshot, trace, usageRecorder) : snapshot;
+      })()
+    : snapshot;
+  const performanceSnapshot = event.type === "usage.recorded"
+    && usageRecorder
+    && usageProjection === snapshot
+    ? snapshot
+    : applyProviderPerformanceEvent(usageProjection, event);
+  const evolutionSnapshot = applyEvolutionProposalEvent(performanceSnapshot, event);
+  if (evolutionSnapshot !== performanceSnapshot) {
+    return evolutionSnapshot;
+  }
+  const diagnosticSnapshot = applyPluginDiagnosticEvent(performanceSnapshot, event);
+  if (diagnosticSnapshot !== performanceSnapshot) {
+    return diagnosticSnapshot;
+  }
+  const lifecycleSnapshot = applyAgentLifecycleEvent(performanceSnapshot, event, usageRecorder);
+  if (lifecycleSnapshot !== performanceSnapshot) {
     return lifecycleSnapshot;
   }
 
-  const workSnapshot = applyWorkLifecycleEvent(snapshot, event);
-  if (workSnapshot !== snapshot) {
+  const workSnapshot = applyWorkLifecycleEvent(performanceSnapshot, event);
+  if (workSnapshot !== performanceSnapshot) {
     return workSnapshot;
   }
 
-  return applyToolLifecycleEvent(snapshot, event);
+  return applyToolLifecycleEvent(performanceSnapshot, event);
+}
+
+function applyProviderPerformanceEvent(
+  snapshot: AgentConsoleSnapshot,
+  event: { readonly type: string },
+): AgentConsoleSnapshot {
+  if (
+    event.type !== "turn.started"
+    && event.type !== "assistant.delta"
+    && event.type !== "turn.completed"
+    && event.type !== "usage.recorded"
+  ) {
+    return snapshot;
+  }
+  const next = reduceProviderTurnPerformance(
+    snapshot.lastTurnPerformance,
+    event as ProviderPerformanceTraceEvent,
+    Date.now(),
+  );
+  if (next === snapshot.lastTurnPerformance) return snapshot;
+  return createAgentConsoleSnapshot({
+    ...snapshot,
+    ...(next ? { lastTurnPerformance: next } : {}),
+  });
+}
+
+function applyEvolutionProposalEvent(
+  snapshot: AgentConsoleSnapshot,
+  event: { readonly type: string },
+): AgentConsoleSnapshot {
+  if (event.type !== "evolution.proposed") return snapshot;
+  const trace = asRecord(event);
+  const proposal = asRecord(trace?.proposal);
+  const runId = trace ? readNonEmptyString(trace, "runId") : undefined;
+  if (trace?.recorded !== true || !proposal || !runId || proposal.runId !== runId) {
+    return snapshot;
+  }
+  const id = readNonEmptyString(proposal, "id");
+  const candidateId = readNonEmptyString(proposal, "candidateId");
+  if (!id || !candidateId) return snapshot;
+  const retained = (snapshot.evolutionProposals ?? []).filter((current) =>
+    current.id !== id && !(current.runId === runId && current.candidateId === candidateId));
+  return parseAgentConsoleSnapshot({
+    ...snapshot,
+    evolutionProposals: [...retained, proposal].slice(-32),
+  }) ?? snapshot;
+}
+
+function applyPluginDiagnosticEvent(
+  snapshot: AgentConsoleSnapshot,
+  event: { readonly type: string },
+): AgentConsoleSnapshot {
+  if (event.type !== "plugin.diagnostic") return snapshot;
+  const trace = asRecord(event);
+  if (!trace) return snapshot;
+  const parsed = parseAgentConsoleSnapshot({
+    ...snapshot,
+    pluginDiagnostics: [...(snapshot.pluginDiagnostics ?? []), {
+      runId: trace.runId,
+      source: trace.source,
+      trustLane: trace.trustLane,
+      pluginId: trace.pluginId,
+      pluginName: trace.pluginName,
+      hookName: trace.hookName,
+      status: trace.status,
+      errorName: trace.errorName,
+      errorMessage: trace.errorMessage,
+      exitStatus: trace.exitStatus,
+      dedupeKey: trace.dedupeKey,
+      startedAt: trace.startedAt,
+    }],
+  });
+  return parsed ?? snapshot;
 }
 
 /**
@@ -149,6 +266,7 @@ function withCurrentActivity(
 function applyAgentLifecycleEvent(
   snapshot: AgentConsoleSnapshot,
   event: { readonly type: string },
+  usageRecorder: AgentConsoleUsageRecorder | undefined,
 ): AgentConsoleSnapshot {
   const trace = asRecord(event);
   if (!trace) {
@@ -156,7 +274,7 @@ function applyAgentLifecycleEvent(
   }
 
   if (event.type === "usage.recorded") {
-    return applyUsageEvent(snapshot, trace);
+    return applyUsageEvent(snapshot, trace, usageRecorder);
   }
 
   if (event.type === "job.queued") {
@@ -376,6 +494,103 @@ function settleLinkedJob(
 const USAGE_TOKEN_KEYS = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"] as const;
 const USAGE_MONEY_KEYS = ["cacheSavingsUsd", "costUsd"] as const;
 
+export type AgentConsoleUsageCounterVector = {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheReadTokens: number;
+  readonly cacheWriteTokens: number;
+  readonly cacheSavingsUsd: number;
+  readonly costUsd: number;
+};
+
+export type AgentConsoleUsageTotalsSnapshot = {
+  readonly session: AgentConsoleUsageCounterVector;
+  readonly byMain: readonly {
+    readonly mainId: string;
+    readonly totals: AgentConsoleUsageCounterVector;
+  }[];
+  readonly byAgent: readonly {
+    readonly agentId: string;
+    readonly totals: AgentConsoleUsageCounterVector;
+  }[];
+  readonly byRoute: readonly {
+    readonly provider: string;
+    readonly model: string;
+    readonly totals: AgentConsoleUsageCounterVector;
+  }[];
+};
+
+export type AgentConsoleUsageRecordInput = {
+  readonly eventId: string;
+  readonly agentId?: string;
+  readonly route: { readonly provider: string; readonly model: string };
+  readonly counters: AgentConsoleUsageCounterVector;
+};
+
+export type AgentConsoleUsageRecordResult =
+  | {
+      readonly kind: "recorded" | "duplicate";
+      readonly mainId: string;
+      readonly totals: AgentConsoleUsageTotalsSnapshot;
+    }
+  | { readonly kind: "scope_mismatch" };
+
+/** Narrow synchronous port owned by the persistent runtime process. */
+export interface AgentConsoleUsageRecorder {
+  recordUsage(input: AgentConsoleUsageRecordInput): AgentConsoleUsageRecordResult;
+}
+
+export type RuntimeUsageLedgerPort = {
+  recordUsage(input: AgentConsoleUsageRecordInput & {
+    readonly sessionId: string;
+    readonly mainId?: string;
+  }): { readonly kind: "recorded" | "duplicate" | "scope_mismatch" };
+  snapshotUsageTotals(
+    sessionId: string,
+    options?: {
+      readonly mainIds?: readonly string[];
+      readonly agentIds?: readonly string[];
+      readonly includeRoutes?: boolean;
+    },
+  ): AgentConsoleUsageTotalsSnapshot;
+};
+
+/**
+ * Bind one owner-opened ledger to one session. The adapter requests only the
+ * main projection and the at-most-128 agent rows the console can retain; exact
+ * event membership and lifetime session totals remain SQLite-owned.
+ */
+export function bindRuntimeUsageRecorder(input: {
+  readonly sessionId: string;
+  readonly ledger: RuntimeUsageLedgerPort;
+  readonly mainId?: string;
+  readonly projectedAgentIds?: (() => readonly string[]) | undefined;
+}): AgentConsoleUsageRecorder {
+  const mainId = input.mainId ?? "main";
+  return {
+    recordUsage(usage) {
+      const result = input.ledger.recordUsage({
+        ...usage,
+        sessionId: input.sessionId,
+        ...(usage.agentId ? {} : { mainId }),
+      });
+      if (result.kind === "scope_mismatch") return { kind: "scope_mismatch" };
+      const projectedAgentIds = [...new Set(input.projectedAgentIds?.() ?? (
+        usage.agentId ? [usage.agentId] : []
+      ))].slice(-128);
+      return {
+        kind: result.kind,
+        mainId,
+        totals: input.ledger.snapshotUsageTotals(input.sessionId, {
+          mainIds: [mainId],
+          agentIds: projectedAgentIds,
+          includeRoutes: true,
+        }),
+      };
+    },
+  };
+}
+
 /**
  * Gate a usage measurement before it reaches a ledger.
  *
@@ -387,12 +602,15 @@ const USAGE_MONEY_KEYS = ["cacheSavingsUsd", "costUsd"] as const;
 function applyUsageEvent(
   snapshot: AgentConsoleSnapshot,
   trace: TraceRecord,
+  recorder: AgentConsoleUsageRecorder | undefined,
 ): AgentConsoleSnapshot {
   const eventId = readNonEmptyString(trace, "eventId");
-  if (!eventId) {
+  if (!eventId || !recorder) {
     return snapshot;
   }
-  if (!readNonEmptyString(trace, "provider") || !readNonEmptyString(trace, "model")) {
+  const provider = readNonEmptyString(trace, "provider");
+  const model = readNonEmptyString(trace, "model");
+  if (!provider || !model) {
     return snapshot;
   }
 
@@ -407,150 +625,136 @@ function applyUsageEvent(
     return snapshot;
   }
 
-  // One provider event contributes to exactly one ledger. Every ledger is
-  // checked, not just the one this event points at, so a replay that arrives
-  // with a changed scope cannot double-count.
-  if (
-    snapshot.mainUsage?.eventIds.includes(eventId)
-    || snapshot.agents.some((agent) => agent.usage?.eventIds.includes(eventId))
-  ) {
-    return snapshot;
-  }
-
   const scopedRun = agentRunId
     ? snapshot.agents.find((agent) => agent.id === agentRunId)
     : undefined;
   if (agentRunId && !scopedRun) {
     return snapshot;
   }
-  const base = agentRunId ? scopedRun?.usage : snapshot.mainUsage;
-  if (!isStorableUsage(appendUsage(base, trace, eventId))) {
+  if (!usageTraceIsStorable(trace)) return snapshot;
+
+  const counters = readUsageCounterVector(trace);
+  try {
+    const result = recorder.recordUsage({
+      eventId,
+      ...(agentRunId ? { agentId: agentRunId } : {}),
+      route: { provider, model },
+      counters,
+    });
+    if (result.kind === "scope_mismatch") return snapshot;
+    if (
+      result.kind === "duplicate"
+      && usageTotalsAlreadyMaterialized(snapshot, result.mainId, result.totals)
+    ) return snapshot;
+    return materializeUsageTotals(snapshot, result.mainId, result.totals);
+  } catch {
+    // The projection never guesses after an owner-ledger failure. A write that
+    // committed before a read failure is recovered by the next exact replay.
     return snapshot;
   }
-  return applyUsageRecordedEvent(snapshot, trace);
 }
 
-/**
- * Every persisted total has to survive `parseAgentConsoleSnapshot`: token
- * counts as safe integers, money as finite numbers. A total that has left
- * either range cannot be written — clamping would invent spend and truncating
- * would hide it — so the event that produced it is refused instead.
- */
-function isStorableUsage(usage: AgentRunUsage): boolean {
-  for (const key of USAGE_TOKEN_KEYS) {
-    const total = usage[key];
-    if (total !== undefined && !Number.isSafeInteger(total)) {
-      return false;
-    }
-  }
-  for (const key of USAGE_MONEY_KEYS) {
-    const total = usage[key];
-    if (total !== undefined && !Number.isFinite(total)) {
-      return false;
-    }
+function usageTotalsAlreadyMaterialized(
+  snapshot: AgentConsoleSnapshot,
+  mainId: string,
+  totals: AgentConsoleUsageTotalsSnapshot,
+): boolean {
+  if (!sameUsageVector(snapshot.totalUsage, totals.session)) return false;
+  const routes = snapshot.totalUsage?.routes ?? [];
+  if (
+    routes.length !== totals.byRoute.length
+    || totals.byRoute.some((entry, index) => {
+      const route = routes[index];
+      return route?.provider !== entry.provider
+        || route.model !== entry.model
+        || !sameUsageVector(route, entry.totals);
+    })
+  ) return false;
+  const mainUsage = totals.byMain.find((entry) => entry.mainId === mainId)?.totals;
+  if (mainUsage && !sameUsageVector(snapshot.mainUsage, mainUsage)) return false;
+  for (const entry of totals.byAgent) {
+    const usage = snapshot.agents.find((agent) => agent.id === entry.agentId)?.usage;
+    if (!sameUsageVector(usage, entry.totals)) return false;
   }
   return true;
 }
 
-function applyUsageRecordedEvent(
+function sameUsageVector(
+  usage: AgentRunUsage | AgentRunUsageRoute | undefined,
+  vector: AgentConsoleUsageCounterVector,
+): boolean {
+  return usage !== undefined
+    && USAGE_TOKEN_KEYS.every((key) => (usage[key] ?? 0) === vector[key])
+    && USAGE_MONEY_KEYS.every((key) => (usage[key] ?? 0) === vector[key]);
+}
+
+function materializeUsageTotals(
   snapshot: AgentConsoleSnapshot,
-  trace: TraceRecord,
+  mainId: string,
+  totals: AgentConsoleUsageTotalsSnapshot,
 ): AgentConsoleSnapshot {
-  const eventId = readNonEmptyString(trace, "eventId");
-  if (!eventId) {
+  if (
+    !usageVectorIsStorable(totals.session)
+    || totals.byMain.some((entry) => !usageVectorIsStorable(entry.totals))
+    || totals.byAgent.some((entry) => !usageVectorIsStorable(entry.totals))
+    || totals.byRoute.some((entry) => !usageVectorIsStorable(entry.totals))
+  ) {
     return snapshot;
   }
-  const agentRunId = readNonEmptyString(trace, "agentRunId");
-  if (agentRunId) {
-    const current = snapshot.agents.find((agent) => agent.id === agentRunId);
-    if (!current || current.usage?.eventIds.includes(eventId)) {
-      return snapshot;
-    }
-    const usage = appendUsage(current.usage, trace, eventId);
-    return createAgentConsoleSnapshot({
-      ...snapshot,
-      agents: snapshot.agents.map((agent) => agent.id === agentRunId ? { ...agent, usage } : agent),
-    });
-  }
-  if (snapshot.mainUsage?.eventIds.includes(eventId)) {
-    return snapshot;
-  }
+  const mainUsage = totals.byMain.find((entry) => entry.mainId === mainId)?.totals;
+  const byAgent = new Map(totals.byAgent.map((entry) => [entry.agentId, entry.totals]));
+  const totalUsage: AgentRunUsage = {
+    ...totals.session,
+    routes: totals.byRoute.map((entry): AgentRunUsageRoute => ({
+      provider: entry.provider,
+      model: entry.model,
+      ...entry.totals,
+    })),
+  };
   return createAgentConsoleSnapshot({
     ...snapshot,
-    mainUsage: appendUsage(snapshot.mainUsage, trace, eventId),
+    ...(mainUsage ? { mainUsage } : {}),
+    totalUsage,
+    agents: snapshot.agents.map((agent) => {
+      const usage = byAgent.get(agent.id);
+      return usage ? { ...agent, usage } : agent;
+    }),
   });
 }
 
-function appendUsage(
-  current: AgentRunUsage | undefined,
-  trace: TraceRecord,
-  eventId: string,
-): AgentRunUsage {
-  const routes = appendUsageRoute(current?.routes ?? [], trace, eventId);
-  return {
-    eventIds: [...(current?.eventIds ?? []), eventId],
-    ...sumUsageCounter(current, trace, "inputTokens"),
-    ...sumUsageCounter(current, trace, "outputTokens"),
-    ...sumUsageCounter(current, trace, "cacheReadTokens"),
-    ...sumUsageCounter(current, trace, "cacheWriteTokens"),
-    ...sumUsageMoney(current, trace, "cacheSavingsUsd"),
-    ...sumUsageMoney(current, trace, "costUsd"),
-    ...(routes.length === 0 ? {} : { routes }),
-  };
+function usageTraceIsStorable(trace: TraceRecord): boolean {
+  for (const key of USAGE_TOKEN_KEYS) {
+    const value = trace[key];
+    if (
+      typeof value === "number"
+      && value > 0
+      && Number.isInteger(value)
+      && !Number.isSafeInteger(value)
+    ) return false;
+  }
+  return true;
 }
 
-function appendUsageRoute(
-  currentRoutes: readonly AgentRunUsageRoute[],
-  trace: TraceRecord,
-  eventId: string,
-): readonly AgentRunUsageRoute[] {
-  const provider = readNonEmptyString(trace, "provider");
-  const model = readNonEmptyString(trace, "model");
-  if (!provider || !model) return currentRoutes;
-
-  const routeIndex = currentRoutes.findIndex(
-    (route) => route.provider === provider && route.model === model,
-  );
-  const current = routeIndex === -1 ? undefined : currentRoutes[routeIndex];
-  const route: AgentRunUsageRoute = {
-    provider,
-    model,
-    eventIds: [...(current?.eventIds ?? []), eventId],
-    ...sumUsageCounter(current, trace, "inputTokens"),
-    ...sumUsageCounter(current, trace, "outputTokens"),
-    ...sumUsageCounter(current, trace, "cacheReadTokens"),
-    ...sumUsageCounter(current, trace, "cacheWriteTokens"),
-    ...sumUsageMoney(current, trace, "cacheSavingsUsd"),
-    ...sumUsageMoney(current, trace, "costUsd"),
-  };
-  if (routeIndex === -1) return [...currentRoutes, route];
-  return currentRoutes.map((candidate, index) => index === routeIndex ? route : candidate);
+function usageVectorIsStorable(vector: AgentConsoleUsageCounterVector): boolean {
+  return USAGE_TOKEN_KEYS.every((key) => Number.isSafeInteger(vector[key]) && vector[key] >= 0)
+    && USAGE_MONEY_KEYS.every((key) => Number.isFinite(vector[key]) && vector[key] >= 0);
 }
 
-function sumUsageCounter(
-  current: AgentRunUsage | AgentRunUsageRoute | undefined,
-  trace: TraceRecord,
-  key: "inputTokens" | "outputTokens" | "cacheReadTokens" | "cacheWriteTokens",
-): Partial<AgentRunUsageRoute> {
-  const value = trace[key];
-  return typeof value === "number" && Number.isInteger(value) && value > 0
-    ? { [key]: (current?.[key] ?? 0) + value }
-    : current?.[key] === undefined
-      ? {}
-      : { [key]: current[key] };
-}
-
-function sumUsageMoney(
-  current: AgentRunUsage | AgentRunUsageRoute | undefined,
-  trace: TraceRecord,
-  key: "cacheSavingsUsd" | "costUsd",
-): Partial<AgentRunUsageRoute> {
-  const value = trace[key];
-  return typeof value === "number" && Number.isFinite(value) && value > 0
-    ? { [key]: (current?.[key] ?? 0) + value }
-    : current?.[key] === undefined
-      ? {}
-      : { [key]: current[key] };
+function readUsageCounterVector(trace: TraceRecord): AgentConsoleUsageCounterVector {
+  const vector = {} as Record<keyof AgentConsoleUsageCounterVector, number>;
+  for (const key of USAGE_TOKEN_KEYS) {
+    const value = trace[key];
+    vector[key] = typeof value === "number" && Number.isSafeInteger(value) && value > 0
+      ? value
+      : 0;
+  }
+  for (const key of USAGE_MONEY_KEYS) {
+    const value = trace[key];
+    vector[key] = typeof value === "number" && Number.isFinite(value) && value > 0
+      ? value
+      : 0;
+  }
+  return vector;
 }
 
 function upsertById<T extends { readonly id: string }>(items: readonly T[], item: T): readonly T[] {
@@ -581,8 +785,9 @@ function applyWorkLifecycleEvent(
   }
 
   if (event.type === "work.proposed") {
+    const { workProposalOrder: _workProposalOrder, ...snapshotWithoutProposalOrder } = snapshot;
     const parsed = parseAgentConsoleSnapshot({
-      ...snapshot,
+      ...snapshotWithoutProposalOrder,
       workGraph: trace.graph,
     });
     if (
@@ -591,7 +796,160 @@ function applyWorkLifecycleEvent(
     ) {
       return snapshot;
     }
-    return parsed;
+    const proposedGraph = parsed.workGraph;
+    const currentGraph = snapshot.workGraph;
+    if (currentGraph && workGraphsEqual(currentGraph, proposedGraph)) {
+      return snapshot;
+    }
+    const candidateStartedAt = readTimestamp(trace, "startedAt");
+    const candidateSequence = readTimestamp(trace, "sequence");
+    if (Object.hasOwn(trace, "sequence") && candidateSequence === undefined) {
+      return snapshot;
+    }
+    const candidateIdentity = workProposalIdentity(proposedGraph);
+    const currentOrder = snapshot.workProposalOrder;
+    if (
+      currentOrder
+      && (
+        sameWorkProposalIdentity(currentOrder, candidateIdentity)
+        || currentOrder.superseded.some((identity) =>
+          sameWorkProposalIdentity(identity, candidateIdentity))
+      )
+    ) {
+      return snapshot;
+    }
+    // The trace contract owns this timestamp. Without a validated value there
+    // is no safe fallback order for either the first proposal or its replay.
+    if (candidateStartedAt === undefined) {
+      return snapshot;
+    }
+    if (currentOrder) {
+      const currentSequence = currentOrder.sequence;
+      if (currentSequence !== undefined) {
+        // Once the source establishes an authoritative sequence, an omitted
+        // sequence cannot fall back to a timestamp and bypass that watermark.
+        if (candidateSequence === undefined || candidateSequence <= currentSequence) {
+          return snapshot;
+        }
+      } else if (currentOrder.graphId === proposedGraph.id) {
+        if (proposedGraph.iteration < currentOrder.iteration) return snapshot;
+      } else if (candidateStartedAt < currentOrder.startedAt) {
+        return snapshot;
+      } else if (
+        candidateSequence === undefined
+        && candidateStartedAt === currentOrder.startedAt
+        && currentOrder.unsequencedTieSaturated
+      ) {
+        return snapshot;
+      }
+    } else if (
+      currentGraph?.id === proposedGraph.id
+      && proposedGraph.iteration <= currentGraph.iteration
+    ) {
+      return snapshot;
+    }
+
+    const workProposalOrder = projectWorkProposalOrder({
+      currentOrder,
+      currentGraph,
+      candidate: {
+        ...candidateIdentity,
+        startedAt: candidateStartedAt,
+        ...(candidateSequence === undefined ? {} : { sequence: candidateSequence }),
+      },
+    });
+    return createAgentConsoleSnapshot({ ...parsed, workProposalOrder });
+  }
+
+  if (
+    event.type === "quality.stage_started"
+    || event.type === "quality.gate_evaluated"
+    || event.type === "quality.refine_requested"
+    || event.type === "quality.pivot_requested"
+    || event.type === "quality.completed"
+  ) {
+    const graph = snapshot.workGraph;
+    const graphId = readNonEmptyString(trace, "graphId");
+    if (!graphId || (graph && graphId !== graph.id)) return snapshot;
+    const stage = readQualityStage(trace.stage);
+    const iteration = readNonNegativeInteger(trace.iteration);
+    const graphIteration = graph?.iteration ?? 0;
+    const reviewIteration = snapshot.qualityReview?.iteration ?? 0;
+    const currentIteration = Math.max(graphIteration, reviewIteration);
+    if (!stage || iteration === undefined || iteration < currentIteration) return snapshot;
+    const gateStatus = event.type === "quality.stage_started"
+      ? graph?.gateStatus ?? snapshot.qualityReview?.latestDecision ?? "unproven"
+      : readQualityGateStatus(trace.decision);
+    if (!gateStatus) return snapshot;
+
+    const currentStage = reviewIteration > graphIteration
+      ? snapshot.qualityReview?.currentStage
+      : graph?.currentStage ?? snapshot.qualityReview?.currentStage;
+    const sameIteration = iteration === currentIteration;
+    const terminalAtCurrentIteration = snapshot.qualityReview?.history.some((entry) =>
+      entry.event === "completed" && entry.iteration === currentIteration
+    ) ?? false;
+    if (
+      sameIteration
+      && (
+        terminalAtCurrentIteration
+        || (currentStage !== undefined && QUALITY_STAGE_RANK[stage] < QUALITY_STAGE_RANK[currentStage])
+      )
+    ) {
+      return snapshot;
+    }
+
+    const nodeId = readNonEmptyString(trace, "nodeId");
+    const nodeAttempt = readNonNegativeInteger(trace.nodeAttempt);
+    const artifactRefs = readQualityArtifactRefs(trace.artifactRefs);
+    const nodes = nodeId && graph
+      ? (() => {
+          let changed = false;
+          const projected = graph.nodes.map((node) => {
+            if (node.id !== nodeId) return node;
+            const attempt = nodeAttempt === undefined ? node.attempt : Math.max(node.attempt, nodeAttempt);
+            const nextArtifactRefs = artifactRefs === undefined
+              ? node.artifactRefs
+              : [...new Set([...node.artifactRefs, ...artifactRefs])];
+            if (
+              node.stage === stage
+              && node.attempt === attempt
+              && nextArtifactRefs.length === node.artifactRefs.length
+            ) return node;
+            changed = true;
+            return { ...node, stage, attempt, artifactRefs: nextArtifactRefs };
+          });
+          return changed ? projected : graph.nodes;
+        })()
+      : graph?.nodes;
+    const qualityReview = event.type === "quality.stage_started"
+      ? projectQualityStage(snapshot.qualityReview, trace, stage, iteration)
+      : projectQualityReview(snapshot.qualityReview, trace, event.type, stage, gateStatus, iteration);
+    if (!qualityReview) return snapshot;
+    if (
+      qualityReview === snapshot.qualityReview
+      && (!graph || (
+        graph.currentStage === stage
+        && graph.gateStatus === gateStatus
+        && graph.iteration === iteration
+        && nodes === graph.nodes
+      ))
+    ) return snapshot;
+    return createAgentConsoleSnapshot({
+      ...snapshot,
+      ...(graph && nodes
+        ? {
+            workGraph: {
+              ...graph,
+              currentStage: stage,
+              gateStatus,
+              iteration,
+              nodes,
+            },
+          }
+        : {}),
+      qualityReview,
+    });
   }
 
   const graph = snapshot.workGraph;
@@ -637,6 +995,280 @@ function applyWorkLifecycleEvent(
   });
 }
 
+function workGraphsEqual(left: WorkGraph, right: WorkGraph): boolean {
+  // Both graphs crossed the contracts parser, so their bounded canonical
+  // property order makes this a stable exact-payload identity check.
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function workProposalIdentity(graph: WorkGraph): WorkProposalIdentity {
+  return { graphId: graph.id, iteration: graph.iteration };
+}
+
+function sameWorkProposalIdentity(
+  left: WorkProposalIdentity,
+  right: WorkProposalIdentity,
+): boolean {
+  return left.graphId === right.graphId && left.iteration === right.iteration;
+}
+
+function projectWorkProposalOrder(input: {
+  readonly currentOrder: WorkProposalOrderProjection | undefined;
+  readonly currentGraph: WorkGraph | undefined;
+  readonly candidate: Omit<WorkProposalOrderProjection, "superseded">;
+}): WorkProposalOrderProjection {
+  const previous = input.currentOrder
+    ? [
+        ...input.currentOrder.superseded,
+        { graphId: input.currentOrder.graphId, iteration: input.currentOrder.iteration },
+      ]
+    : input.currentGraph ? [workProposalIdentity(input.currentGraph)] : [];
+  const unique = new Map<string, WorkProposalIdentity>();
+  for (const identity of previous) {
+    if (sameWorkProposalIdentity(identity, input.candidate)) continue;
+    unique.set(JSON.stringify([identity.graphId, identity.iteration]), identity);
+  }
+  const unsequencedTieSaturated = input.candidate.sequence === undefined
+    && input.currentOrder?.sequence === undefined
+    && input.currentOrder?.startedAt === input.candidate.startedAt
+    && (
+      input.currentOrder.unsequencedTieSaturated === true
+      || input.currentOrder.superseded.length >= MAX_SUPERSEDED_WORK_PROPOSALS
+    );
+  return {
+    ...input.candidate,
+    ...(unsequencedTieSaturated ? { unsequencedTieSaturated: true as const } : {}),
+    superseded: [...unique.values()].slice(-MAX_SUPERSEDED_WORK_PROPOSALS),
+  };
+}
+
+function projectQualityStage(
+  current: QualityReviewProjection | undefined,
+  trace: TraceRecord,
+  stage: QualityReviewHistoryEntry["stage"],
+  iteration: number,
+): QualityReviewProjection | undefined {
+  const runId = readNonEmptyString(trace, "runId");
+  const graphId = readNonEmptyString(trace, "graphId");
+  const profile = readQualityProfile(trace.profile);
+  if (!runId || !graphId || !profile) return undefined;
+  const sameRun = current?.runId === runId && current.graphId === graphId;
+  if (
+    sameRun
+    && current.currentStage === stage
+    && current.iteration === iteration
+  ) return current;
+  return {
+    runId,
+    graphId,
+    profile,
+    currentStage: stage,
+    iteration,
+    refineCount: sameRun ? current.refineCount : 0,
+    pivotCount: sameRun ? current.pivotCount : 0,
+    latestDecision: sameRun ? current.latestDecision : "unproven",
+    history: sameRun ? current.history : [],
+  };
+}
+
+function projectQualityReview(
+  current: QualityReviewProjection | undefined,
+  trace: TraceRecord,
+  type: "quality.gate_evaluated" | "quality.refine_requested" | "quality.pivot_requested" | "quality.completed",
+  stage: QualityReviewHistoryEntry["stage"],
+  decision: QualityReviewHistoryEntry["decision"],
+  iteration: number,
+): QualityReviewProjection | undefined {
+  const runId = readNonEmptyString(trace, "runId");
+  const graphId = readNonEmptyString(trace, "graphId");
+  const startedAt = readTimestamp(trace, "startedAt");
+  const profile = readQualityProfile(trace.profile);
+  if (!runId || !graphId || !profile || startedAt === undefined) return undefined;
+  const sameRun = current?.runId === runId && current.graphId === graphId;
+  const baseHistory = sameRun ? current.history : [];
+  const failures = readQualityArtifactRefs(trace.failures) ?? [];
+  const evidenceRefs = readQualityArtifactRefs(trace.evidenceRefs) ?? [];
+  const artifactRefs = readQualityArtifactRefs(trace.artifactRefs) ?? [];
+  const reason = readNonEmptyString(trace, "reason");
+  const provider = readNonEmptyString(trace, "provider");
+  const model = readNonEmptyString(trace, "model");
+  const artifactHash = readNonEmptyString(trace, "artifactHash");
+  const reviewedArtifactHash = readNonEmptyString(trace, "reviewedArtifactHash");
+  const currentArtifactHash = readNonEmptyString(trace, "currentArtifactHash");
+  const reviewerRunId = readNonEmptyString(trace, "reviewerRunId")
+    ?? readNonEmptyString(trace, "agentRunId");
+  const routeValue = readNonEmptyString(trace, "route");
+  const route = routeValue === "direct"
+    || routeValue === "frontier"
+    || routeValue === "commodity"
+    || routeValue === "fallback"
+    ? routeValue
+    : undefined;
+  const count = readNonNegativeInteger(trace.count);
+  const limit = readNonNegativeInteger(trace.limit);
+  const refineCount = type === "quality.refine_requested"
+    ? readNonNegativeInteger(trace.count) ?? (sameRun ? current.refineCount : 0)
+    : readNonNegativeInteger(trace.refineCount) ?? (sameRun ? current.refineCount : 0);
+  const pivotCount = type === "quality.pivot_requested"
+    ? readNonNegativeInteger(trace.count) ?? (sameRun ? current.pivotCount : 0)
+    : readNonNegativeInteger(trace.pivotCount) ?? (sameRun ? current.pivotCount : 0);
+  const stale = trace.stale === true;
+  const verifiedCritic = type === "quality.completed"
+    && stage === "promote"
+    && decision === "proceed"
+    && trace.independentVerification === true
+    && !stale
+    ? findVerifiedCritic(baseHistory, iteration, {
+        artifactHash,
+        reviewedArtifactHash,
+        currentArtifactHash,
+      })
+    : undefined;
+  const terminalArtifactRefs = verifiedCritic
+    ? [...new Set([
+        ...artifactRefs,
+        ...evidenceRefs,
+        ...verifiedCritic.artifactRefs,
+        ...verifiedCritic.evidenceRefs,
+      ])].slice(0, 64)
+    : artifactRefs;
+  const entry: QualityReviewHistoryEntry = {
+    event: type === "quality.gate_evaluated"
+      ? "gate"
+      : type === "quality.refine_requested"
+        ? "refine"
+        : type === "quality.pivot_requested"
+          ? "pivot"
+          : "completed",
+    stage,
+    decision,
+    iteration,
+    ...(reason ? { reason } : {}),
+    failures,
+    evidenceRefs,
+    artifactRefs: terminalArtifactRefs,
+    ...(artifactHash
+      ? { artifactHash }
+      : verifiedCritic?.artifactHash ? { artifactHash: verifiedCritic.artifactHash } : {}),
+    ...(reviewedArtifactHash
+      ? { reviewedArtifactHash }
+      : verifiedCritic?.reviewedArtifactHash
+        ? { reviewedArtifactHash: verifiedCritic.reviewedArtifactHash }
+        : {}),
+    ...(currentArtifactHash
+      ? { currentArtifactHash }
+      : verifiedCritic?.currentArtifactHash
+        ? { currentArtifactHash: verifiedCritic.currentArtifactHash }
+        : {}),
+    ...(verifiedCritic?.reviewerId
+      ? { reviewerId: verifiedCritic.reviewerId }
+      : provider && model ? { reviewerId: `${stage}:${provider}:${model}` } : {}),
+    ...(reviewerRunId
+      ? { reviewerRunId }
+      : verifiedCritic?.reviewerRunId ? { reviewerRunId: verifiedCritic.reviewerRunId } : {}),
+    ...(provider
+      ? { provider }
+      : verifiedCritic?.provider ? { provider: verifiedCritic.provider } : {}),
+    ...(model ? { model } : verifiedCritic?.model ? { model: verifiedCritic.model } : {}),
+    ...(route ? { route } : verifiedCritic?.route ? { route: verifiedCritic.route } : {}),
+    ...(count === undefined ? {} : { count }),
+    ...(limit === undefined ? {} : { limit }),
+    independentVerification: type === "quality.completed"
+      ? verifiedCritic !== undefined
+      : trace.independentVerification === true,
+    stale,
+    startedAt,
+  };
+  if (sameRun && baseHistory.some((candidate) => qualityHistoryIdentity(candidate) === qualityHistoryIdentity(entry))) {
+    return current;
+  }
+  return {
+    runId,
+    graphId,
+    profile,
+    currentStage: stage,
+    iteration,
+    refineCount,
+    pivotCount,
+    latestDecision: decision,
+    history: [...baseHistory, entry].slice(-MAX_QUALITY_REVIEW_HISTORY),
+  };
+}
+
+function qualityHistoryIdentity(entry: QualityReviewHistoryEntry): string {
+  return JSON.stringify([
+    entry.event,
+    entry.stage,
+    entry.decision,
+    entry.iteration,
+    entry.startedAt,
+    entry.reason ?? null,
+    entry.failures,
+    entry.evidenceRefs,
+    entry.artifactRefs,
+    entry.artifactHash ?? null,
+    entry.reviewedArtifactHash ?? null,
+    entry.currentArtifactHash ?? null,
+    entry.reviewerId ?? null,
+    entry.reviewerRunId ?? null,
+    entry.provider ?? null,
+    entry.model ?? null,
+    entry.route ?? null,
+    entry.count ?? null,
+    entry.limit ?? null,
+    entry.independentVerification,
+    entry.stale,
+  ]);
+}
+
+function findVerifiedCritic(
+  history: readonly QualityReviewHistoryEntry[],
+  iteration: number,
+  terminalHashes: {
+    readonly artifactHash: string | undefined;
+    readonly reviewedArtifactHash: string | undefined;
+    readonly currentArtifactHash: string | undefined;
+  },
+): QualityReviewHistoryEntry | undefined {
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const entry = history[index];
+    if (
+      !entry
+      || entry.iteration !== iteration
+      || entry.event !== "gate"
+      || entry.stage !== "critic"
+      || entry.decision !== "proceed"
+      || entry.independentVerification !== true
+      || entry.stale
+      || !entry.reviewerRunId
+      || !qualityHashesAgree(entry)
+      || !qualityHashesAgree(terminalHashes)
+    ) continue;
+    const criticHash = entry.currentArtifactHash ?? entry.reviewedArtifactHash ?? entry.artifactHash;
+    const terminalHash = terminalHashes.currentArtifactHash
+      ?? terminalHashes.reviewedArtifactHash
+      ?? terminalHashes.artifactHash;
+    if (criticHash && terminalHash && criticHash !== terminalHash) continue;
+    return entry;
+  }
+  return undefined;
+}
+
+function qualityHashesAgree(value: {
+  readonly reviewedArtifactHash?: string | undefined;
+  readonly currentArtifactHash?: string | undefined;
+}): boolean {
+  return !value.reviewedArtifactHash
+    || !value.currentArtifactHash
+    || value.reviewedArtifactHash === value.currentArtifactHash;
+}
+
+function readQualityProfile(value: unknown): QualityProfile | undefined {
+  return value === "minimal" || value === "standard" || value === "deep" || value === "creator"
+    ? value
+    : undefined;
+}
+
 function readWorkNodeStatus(value: unknown): WorkNodeStatus | undefined {
   return typeof value === "string" && [
     "proposed",
@@ -651,6 +1283,33 @@ function readWorkNodeStatus(value: unknown): WorkNodeStatus | undefined {
   ].includes(value)
     ? value as WorkNodeStatus
     : undefined;
+}
+
+function readQualityStage(value: unknown): "explore" | "plan" | "work" | "critic" | "promote" | undefined {
+  return value === "explore" || value === "plan" || value === "work" || value === "critic" || value === "promote"
+    ? value
+    : undefined;
+}
+
+function readQualityGateStatus(
+  value: unknown,
+): "proceed" | "refine" | "pivot" | "block" | "unproven" | undefined {
+  return value === "proceed" || value === "refine" || value === "pivot" || value === "block" || value === "unproven"
+    ? value
+    : undefined;
+}
+
+function readNonNegativeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
+function readQualityArtifactRefs(value: unknown): readonly string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) return undefined;
+  return value
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+    .slice(0, 64);
 }
 
 function createStartedActivity(input: {

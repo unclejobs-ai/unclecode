@@ -51,6 +51,7 @@ export type TuiRenderOptions<
   readonly launchWorkSession?: ((forwardedArgs?: readonly string[]) => Promise<void>) | undefined;
   readonly openEmbeddedWorkSession?: OpenEmbeddedWorkSession<HomeState> | undefined;
   readonly refreshHomeState?: (() => Promise<HomeState>) | undefined;
+  readonly dispose?: (() => void | Promise<void>) | undefined;
 };
 
 export type EmbeddedWorkDashboardSnapshot<
@@ -67,6 +68,7 @@ export type EmbeddedWorkDashboardSnapshot<
   | "bridgeLines"
   | "memoryLines"
   | "renderWorkPane"
+  | "dispose"
 >;
 
 export type EmbeddedWorkPaneRenderOptions<
@@ -149,14 +151,31 @@ export async function createEmbeddedWorkPaneController<
     | undefined;
   let currentContextLines: readonly string[] | undefined;
   let currentHomeStatePatch: Partial<HomeState> | undefined;
+  let currentSnapshot: EmbeddedWorkDashboardSnapshot<HomeState> | undefined;
+  const disposedSnapshots = new WeakSet<object>();
+  let disposed = false;
+
+  const disposeSnapshot = async (
+    snapshot: EmbeddedWorkDashboardSnapshot<HomeState> | undefined,
+  ): Promise<void> => {
+    if (!snapshot || disposedSnapshots.has(snapshot)) return;
+    disposedSnapshots.add(snapshot);
+    await snapshot.dispose?.();
+  };
 
   const loadPane = async (forwardedArgs: readonly string[] = []) => {
+    if (disposed) throw new Error("Embedded Work pane controller is closed.");
     const props = await input.loadSnapshot(forwardedArgs);
+    const previousSnapshot = currentSnapshot;
+    currentSnapshot = props;
     currentRenderWorkPane = props?.renderWorkPane;
     currentContextLines = props?.contextLines;
     currentHomeStatePatch = props
       ? extractEmbeddedHomeStatePatch(props)
       : undefined;
+    if (previousSnapshot !== props) {
+      await disposeSnapshot(previousSnapshot);
+    }
     return props;
   };
 
@@ -167,6 +186,10 @@ export async function createEmbeddedWorkPaneController<
   );
 
   if (!currentRenderWorkPane) {
+    disposed = true;
+    const snapshot = currentSnapshot;
+    currentSnapshot = undefined;
+    await disposeSnapshot(snapshot);
     return undefined;
   }
 
@@ -183,12 +206,26 @@ export async function createEmbeddedWorkPaneController<
     });
   };
 
-  return buildEmbeddedWorkPaneRenderOptions<HomeState>({
-    homeStatePatch: currentHomeStatePatch ?? {},
-    ...(currentContextLines ? { contextLines: currentContextLines } : {}),
-    renderWorkPane,
-    openEmbeddedWorkSession,
-  });
+  const dispose = async (): Promise<void> => {
+    if (disposed) return;
+    disposed = true;
+    const snapshot = currentSnapshot;
+    currentSnapshot = undefined;
+    currentRenderWorkPane = undefined;
+    currentContextLines = undefined;
+    currentHomeStatePatch = undefined;
+    await disposeSnapshot(snapshot);
+  };
+
+  return {
+    ...buildEmbeddedWorkPaneRenderOptions<HomeState>({
+      homeStatePatch: currentHomeStatePatch ?? {},
+      ...(currentContextLines ? { contextLines: currentContextLines } : {}),
+      renderWorkPane,
+      openEmbeddedWorkSession,
+    }),
+    dispose,
+  };
 }
 
 export function createSessionCenterDashboardRenderOptions<
@@ -248,6 +285,9 @@ export function createSessionCenterDashboardRenderOptions<
       : {}),
     ...(input.refreshHomeState
       ? { refreshHomeState: input.refreshHomeState }
+      : {}),
+    ...(input.embeddedWorkPane?.dispose
+      ? { dispose: input.embeddedWorkPane.dispose }
       : {}),
   };
 }

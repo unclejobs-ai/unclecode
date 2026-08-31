@@ -8,13 +8,27 @@ import {
   createQueueBuiltinResult,
   resolveLastCompletedTurn,
 } from "./work-shell-engine-builtins.js";
-import { isAgentConsoleTab } from "./work-shell-engine-commands.js";
 import { resolveWorkerBudget } from "./work-agent.js";
+import {
+  type BusySubmitDecision,
+  type QueueDrainStartDecision,
+  type QueueDrainStepDecision,
+  type QueuedSubmit,
+  isQueueItem,
+  parseBusySubmitDecision,
+  parseQueueDrainStartDecision,
+  parseQueueDrainStepDecision,
+  parseQueueLength,
+  parseQueueWriteResult,
+  parseQueuedSubmit,
+  parseQueuedSubmitList,
+} from "./work-shell-engine-queue-parse.js";
 import {
   executeInlineCommandSubmit,
   executeLocalCommandSubmit,
   executeSecureApiKeyEntrySubmit,
 } from "./work-shell-engine-command-runtime.js";
+import { resolveWorkShellBuiltinCommand } from "./work-shell-engine-commands.js";
 import {
   applyAuthIssueLinesToContextSummaryLines,
   reloadWorkShellContextState,
@@ -36,7 +50,18 @@ import {
   resolveWorkShellSubmitRoute,
   type WorkShellSubmitRoute,
 } from "./work-shell-engine-submit.js";
-import { createWorkShellSessionSnapshotInput } from "./work-shell-engine-persistence.js";
+import {
+  createWorkShellSessionSnapshotInput,
+  parseWorkShellReplaySafePauseCheckpoint,
+  type WorkShellSessionState,
+} from "./work-shell-engine-persistence.js";
+import {
+  CooperativePauseController,
+  type WorkShellPauseBoundary,
+  type WorkShellPauseReceipt,
+  type WorkShellPauseSnapshot,
+} from "./work-shell-pause-controller.js";
+import type { ExecutionPausePort } from "./execution-pause.js";
 import {
   buildWorkShellContextPacketPreviewLines,
   composeWorkShellTurnPromptFromPacket,
@@ -49,11 +74,20 @@ import {
   createInitialWorkShellEngineState,
   createWorkShellBusyStatePatch,
   createWorkShellTraceLinePatch,
+  createWorkShellTraceModePatch,
   resolveModeDefaultReasoning,
 } from "./work-shell-engine-state.js";
 import { runWorkShellContextAdviceEffects } from "./work-shell-engine-post-turns.js";
+import {
+  detectWorkShellUserLocale,
+  workShellLanguageInstruction,
+  type WorkShellUiLocale,
+} from "./work-shell-locale.js";
 import { applyWorkShellTraceEvent } from "./work-shell-engine-trace.js";
-import { applyTraceEventToAgentConsole } from "./work-shell-agent-console.js";
+import {
+  applyTraceEventToAgentConsole,
+  type AgentConsoleUsageRecorder,
+} from "./work-shell-agent-console.js";
 import { isExecutorScopedTraceEvent } from "./work-agent-lifecycle.js";
 import {
   clampAgentConsoleView,
@@ -73,16 +107,24 @@ import {
 } from "./work-shell-agent-console-state.js";
 import { runRustCommand, runRustCommandSync } from "./rust-command.js";
 import {
+  deleteQueuedAttachmentArtifacts,
+  persistQueuedAttachments,
+  restoreQueuedAttachments,
+  sweepQueuedAttachmentArtifacts,
+} from "./work-shell-queue-attachments.js";
+import {
   CONTEXT_DESK_COLLECTIONS,
   CONTEXT_DESK_GROUPS,
   CONTEXT_DESK_PANES,
   createAgentConsoleSnapshot,
   resolveContextDeskGroup,
   type AskUserQuestionRequest,
+  type AskUserQuestionAnswer,
   type AskUserQuestionResult,
 } from "@unclecode/contracts";
 import {
   formatWorkShellDecisionLines,
+  resolveWorkShellDecisionAnswers,
   resolveWorkShellDecisionReply,
 } from "./work-shell-decision.js";
 import type { WorkShellInteractionBridge } from "./work-shell-interaction-bridge.js";
@@ -110,7 +152,11 @@ import type {
 } from "@unclecode/contracts";
 import type { WorkAgentControlRuntime } from "./work-agent-run-controller.js";
 import type { WorkAgentTurnResult } from "./work-agent.js";
-import type { WorkShellSessionSnapshotInput } from "./work-shell-engine-persistence.js";
+import type {
+  WorkShellDurablePauseCheckpoint,
+  WorkShellReplaySafePauseCheckpoint,
+  WorkShellSessionSnapshotInput,
+} from "./work-shell-engine-persistence.js";
 import type {
   MemoryLineageAdapter,
   PromoteScopedMemoryInput,
@@ -151,177 +197,16 @@ export function formatAttachmentTraceLine(event: {
   ).trimEnd();
 }
 
-function parseQueuedSubmit(stdout: string): { readonly id: number; readonly line: string } | undefined {
-  const trimmed = stdout.trim();
-  if (!trimmed || trimmed === "null") {
-    return undefined;
-  }
-  const parsed: unknown = JSON.parse(trimmed);
-  if (typeof parsed !== "object" || parsed === null) {
-    throw new Error(`Invalid Rust queue response: ${trimmed}`);
-  }
-  const candidate = parsed as { id?: unknown; line?: unknown };
-  if (
-    typeof candidate.id !== "number" ||
-    !Number.isSafeInteger(candidate.id) ||
-    candidate.id <= 0 ||
-    typeof candidate.line !== "string"
-  ) {
-    throw new Error(`Invalid Rust queue response: ${trimmed}`);
-  }
-  return { id: candidate.id, line: candidate.line };
-}
-
-function parseQueueLength(stdout: string): number {
-  const trimmed = stdout.trim();
-  if (!trimmed) {
-    return 0;
-  }
-  const parsed: unknown = JSON.parse(trimmed);
-  if (typeof parsed !== "object" || parsed === null) {
-    throw new Error("Invalid Rust queue length response.");
-  }
-  const length = (parsed as { length?: unknown }).length;
-  if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0) {
-    throw new Error("Invalid Rust queue length response.");
-  }
-  return length;
-}
-
-function parseQueuedSubmitList(stdout: string): readonly { readonly id: number; readonly line: string }[] {
-  const trimmed = stdout.trim();
-  if (!trimmed) {
-    return [];
-  }
-  const parsed: unknown = JSON.parse(trimmed);
-  if (!Array.isArray(parsed)) {
-    throw new Error("Invalid Rust queue list response.");
-  }
-  return parsed.map((item) => {
-    if (typeof item !== "object" || item === null) {
-      throw new Error("Invalid Rust queue list response.");
-    }
-    const candidate = item as { id?: unknown; line?: unknown };
-    if (
-      typeof candidate.id !== "number" ||
-      !Number.isSafeInteger(candidate.id) ||
-      candidate.id <= 0 ||
-      typeof candidate.line !== "string"
-    ) {
-      throw new Error("Invalid Rust queue list response.");
-    }
-    return { id: candidate.id, line: candidate.line };
-  });
-}
-
-type BusySubmitDecision =
-  | { readonly action: "ignore" }
-  | { readonly action: "show_queue"; readonly line: string }
-  | { readonly action: "clear_queue"; readonly line: string; readonly message: string }
-  | { readonly action: "cancel_turn"; readonly line: string; readonly message: string }
-  | { readonly action: "reject_slash"; readonly line: string; readonly message: string }
-  | { readonly action: "open_agent_console"; readonly line: string; readonly tab: AgentConsoleTab }
-  | { readonly action: "queue"; readonly line: string; readonly displayIndex: number; readonly message: string };
-
-function parseBusySubmitDecision(stdout: string): BusySubmitDecision {
-  const parsed = JSON.parse(stdout.trim()) as Partial<BusySubmitDecision>;
-  if (parsed.action === "ignore") {
-    return { action: "ignore" };
-  }
-  if (parsed.action === "show_queue" && typeof parsed.line === "string") {
-    return { action: "show_queue", line: parsed.line };
-  }
-  if (parsed.action === "clear_queue" && typeof parsed.line === "string" && typeof parsed.message === "string") {
-    return { action: "clear_queue", line: parsed.line, message: parsed.message };
-  }
-  if (parsed.action === "cancel_turn" && typeof parsed.line === "string" && typeof parsed.message === "string") {
-    return { action: "cancel_turn", line: parsed.line, message: parsed.message };
-  }
-  if (parsed.action === "reject_slash" && typeof parsed.line === "string" && typeof parsed.message === "string") {
-    return { action: "reject_slash", line: parsed.line, message: parsed.message };
-  }
-  if (parsed.action === "open_agent_console" && typeof parsed.line === "string" && isAgentConsoleTab(parsed.tab)) {
-    return { action: "open_agent_console", line: parsed.line, tab: parsed.tab };
-  }
-  if (
-    parsed.action === "queue"
-    && typeof parsed.line === "string"
-    && typeof parsed.message === "string"
-    && typeof parsed.displayIndex === "number"
-    && Number.isSafeInteger(parsed.displayIndex)
-    && parsed.displayIndex > 0
-  ) {
-    return {
-      action: "queue",
-      line: parsed.line,
-      displayIndex: parsed.displayIndex,
-      message: parsed.message,
-    };
-  }
-  throw new Error("Invalid Rust busy submit response.");
-}
-
-type QueueDrainStartDecision = { readonly action: "skip" | "drain" };
-
-function parseQueueDrainStartDecision(stdout: string): QueueDrainStartDecision {
-  const parsed = JSON.parse(stdout.trim()) as Partial<QueueDrainStartDecision>;
-  if (parsed.action === "skip" || parsed.action === "drain") {
-    return { action: parsed.action };
-  }
-  throw new Error("Invalid Rust queue drain start response.");
-}
-
-type QueueDrainStepDecision =
-  | { readonly action: "empty"; readonly queuedCount: number }
-  | {
-      readonly action: "run";
-      readonly queuedCount: number;
-      readonly message: string;
-      readonly item: { readonly id: number; readonly line: string };
-    };
-
-function isQueueItem(value: unknown): value is { readonly id: number; readonly line: string } {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const candidate = value as { id?: unknown; line?: unknown };
-  return typeof candidate.id === "number"
-    && Number.isSafeInteger(candidate.id)
-    && candidate.id > 0
-    && typeof candidate.line === "string"
-    && candidate.line.length > 0;
-}
-
-function parseQueueDrainStepDecision(stdout: string): QueueDrainStepDecision {
-  const parsed = JSON.parse(stdout.trim()) as Partial<QueueDrainStepDecision>;
-  if (
-    parsed.action === "empty"
-    && typeof parsed.queuedCount === "number"
-    && Number.isSafeInteger(parsed.queuedCount)
-    && parsed.queuedCount === 0
-  ) {
-    return { action: "empty", queuedCount: 0 };
-  }
-  if (
-    parsed.action === "run"
-    && typeof parsed.queuedCount === "number"
-    && Number.isSafeInteger(parsed.queuedCount)
-    && parsed.queuedCount >= 0
-    && typeof parsed.message === "string"
-    && isQueueItem(parsed.item)
-  ) {
-    return {
-      action: "run",
-      queuedCount: parsed.queuedCount,
-      message: parsed.message,
-      item: parsed.item,
-    };
-  }
-  throw new Error("Invalid Rust queue drain step response.");
-}
+// Queue Rust stdout parsing moved to ./work-shell-engine-queue-parse.ts
+// (split 2026-08-18 — pure parsers, no engine-state dependency). The new
+// module owns: parseQueuedSubmit, parseQueueLength, parseQueuedSubmitList,
+// parseBusySubmitDecision, parseQueueDrainStartDecision,
+// parseQueueDrainStepDecision, isQueueItem, BusySubmitDecision,
+// QueueDrainStartDecision, QueueDrainStepDecision.
 import type { WorkShellReasoningConfig } from "./reasoning.js";
 
 export type WorkShellChatEntry = {
+  readonly id?: string;
   readonly role: "system" | "user" | "assistant" | "tool";
   readonly text: string;
 };
@@ -378,6 +263,9 @@ export type WorkShellEngineOptions<Reasoning extends WorkShellReasoningConfig> =
   readonly cwd: string;
   readonly contextSummaryLines: readonly string[];
   readonly initialTraceMode?: WorkShellTraceMode | undefined;
+  readonly initialUiLocale?: WorkShellUiLocale | undefined;
+  /** True makes the configured locale immutable; false keeps prose-driven per-turn detection active. */
+  readonly initialUiLocaleLocked?: boolean | undefined;
   readonly initialEntries?: readonly WorkShellChatEntry[] | undefined;
   readonly initialSessionSummary?: string | undefined;
   readonly initialLastSubmittedContextReceiptId?: string | undefined;
@@ -385,6 +273,7 @@ export type WorkShellEngineOptions<Reasoning extends WorkShellReasoningConfig> =
   readonly modelWindow?: number | undefined;
   readonly contextProfile?: ContextProfileId | undefined;
   readonly initialAgentConsole?: AgentConsoleSnapshot | undefined;
+  readonly initialPauseCheckpoint?: WorkShellReplaySafePauseCheckpoint | undefined;
   readonly interactionBridge?: WorkShellInteractionBridge | undefined;
 };
 
@@ -427,7 +316,14 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
    */
   readonly liveTraceLines: readonly string[];
   readonly traceMode: WorkShellTraceMode;
+  readonly uiLocale: WorkShellUiLocale;
+  readonly uiLocaleLocked: boolean;
   readonly composerMode: WorkShellComposerMode;
+  /** Immutable run identity captured when an agent-steer draft begins. */
+  readonly agentSteerTarget?: {
+    readonly kind: "agent-steer";
+    readonly agentRunId: string;
+  } | undefined;
   readonly isBusy: boolean;
   readonly busyStatus?: string | undefined;
   readonly currentTurnStartedAt?: number | undefined;
@@ -445,6 +341,8 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly modelWindow: number;
   readonly queuedCount: number;
   readonly queuePaused: boolean;
+  /** Turn suspension is independent from queue pause and AbortSignal cancellation. */
+  readonly turnLifecycle: WorkShellPauseSnapshot;
   readonly terminalColumns: number;
   readonly terminalRows?: number | undefined;
   // Context Inspector (Sprint 2): cursor highlight index into the navigable
@@ -467,8 +365,17 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
 };
 
 export interface WorkShellAgent<Attachment, TraceEvent, Reasoning extends WorkShellReasoningConfig> {
+  readonly supportsCooperativePause?: true | undefined;
   clear(): void;
-  runTurn(prompt: string, attachments?: readonly Attachment[], options?: { readonly signal?: AbortSignal | undefined }): Promise<WorkAgentTurnResult>;
+  runTurn(
+    prompt: string,
+    attachments?: readonly Attachment[],
+    options?: {
+      readonly signal?: AbortSignal | undefined;
+      readonly classificationPrompt?: string | undefined;
+      readonly pause?: ExecutionPausePort | undefined;
+    },
+  ): Promise<WorkAgentTurnResult>;
   updateRuntimeSettings(settings: { reasoning?: Reasoning | undefined; model?: string | undefined }): void;
   updateMode?(mode: string): void;
   setTraceListener(listener?: ((event: TraceEvent) => void) | undefined): void;
@@ -478,6 +385,7 @@ export interface WorkShellAgent<Attachment, TraceEvent, Reasoning extends WorkSh
    * as undelivered instead of pretending they were queued.
    */
   getAgentControlRuntime?(): WorkAgentControlRuntime | undefined;
+  getCanonicalPermissionRules?(): readonly import("./permission-scope.js").CanonicalPermissionRule[];
 }
 
 export type WorkShellEngineInput<
@@ -503,7 +411,10 @@ export type WorkShellEngineInput<
   ) => WorkShellPanel;
   buildInlineCommandPanel: (args: readonly string[], lines: readonly string[]) => WorkShellPanel;
   formatInlineCommandResultSummary: (args: readonly string[], lines: readonly string[]) => string;
-  formatAgentTraceLine: (event: TraceEvent | { readonly type: "bridge.published" | "memory.written"; readonly [key: string]: unknown }) => string;
+  formatAgentTraceLine: (
+    event: TraceEvent | { readonly type: "bridge.published" | "memory.written"; readonly [key: string]: unknown },
+    uiLocale?: WorkShellUiLocale,
+  ) => string;
   formatWorkShellError: (message: string) => string;
   listProjectBridgeLines: (cwd: string) => Promise<readonly string[]>;
   listScopedMemoryLines: (input: {
@@ -519,7 +430,7 @@ export type WorkShellEngineInput<
     sessionId: string;
     model: string;
     mode: string;
-    state: "running" | "idle" | "requires_action";
+    state: WorkShellSessionState;
     summary: string;
     traceMode?: WorkShellTraceMode | undefined;
   }) => Promise<void>;
@@ -712,7 +623,10 @@ export class WorkShellEngine<
   ) => WorkShellPanel;
   private readonly buildInlineCommandPanel: (args: readonly string[], lines: readonly string[]) => WorkShellPanel;
   private readonly formatInlineCommandResultSummary: (args: readonly string[], lines: readonly string[]) => string;
-  private readonly formatAgentTraceLine: (event: TraceEvent | { readonly type: "bridge.published" | "memory.written"; readonly [key: string]: unknown }) => string;
+  private readonly formatAgentTraceLine: (
+    event: TraceEvent | { readonly type: "bridge.published" | "memory.written"; readonly [key: string]: unknown },
+    uiLocale?: WorkShellUiLocale,
+  ) => string;
   private readonly formatWorkShellError: (message: string) => string;
   private readonly listProjectBridgeLines: (cwd: string) => Promise<readonly string[]>;
   private readonly listScopedMemoryLines: (input: {
@@ -728,10 +642,11 @@ export class WorkShellEngine<
     sessionId: string;
     model: string;
     mode: string;
-    state: "running" | "idle" | "requires_action";
+    state: WorkShellSessionState;
     summary: string;
     traceMode?: WorkShellTraceMode | undefined;
     agentConsole?: AgentConsoleSnapshot | undefined;
+    pauseCheckpoint?: WorkShellDurablePauseCheckpoint | undefined;
   }) => Promise<void>;
   private readonly resolveReasoningCommand: (
     input: string,
@@ -835,7 +750,6 @@ export class WorkShellEngine<
   private readonly refreshCondensedHistory?: (() => Promise<void>) | undefined;
   private readonly interactionBridge?: WorkShellInteractionBridge | undefined;
   private readonly subscribers = new Set<(state: WorkShellEngineState<Reasoning>) => void>();
-  private readonly queuedAttachments = new Map<number, readonly Attachment[]>();
   private readonly queueDrainSkipTurnEpochs = new Set<number>();
   private readonly pendingContextSuggestionInvalidations = new Set<string>();
   private contextSuggestionAcceptanceInFlight = false;
@@ -848,14 +762,28 @@ export class WorkShellEngine<
   private cachedContextPacket: ContextPacketView | undefined;
   private cachedInspectorSourceList: readonly InspectorSource[] = [];
   private activeTurnEpoch = 0;
+  private activeAttachmentRefs: readonly string[] = [];
   private activeTurnAbortController: AbortController | undefined;
+  private admittedRuntimeTurns = 0;
+  private cancelledAdmittedRuntimeTurns = 0;
+  private runtimeRevisionClock: { readonly value: number } | undefined;
+  private usageRecorder: AgentConsoleUsageRecorder | undefined;
+  private readonly activeTurnSettlements = new Set<Promise<void>>();
+  private lifecycleClosing = false;
+  private disposed = false;
   private queueAutoDrainPaused = false;
   private workBoardRebuildGeneration = 0;
-  private workBoardQueuedItemsSnapshot: readonly { readonly id: number; readonly line: string }[] = [];
+  private workBoardQueuedItemsSnapshot: readonly {
+    readonly id: number;
+    readonly line: string;
+    readonly attachmentCount?: number;
+  }[] = [];
   private lastCompletedTurnSnapshot:
     | { readonly user: string; readonly assistant: string }
     | undefined;
   private state: WorkShellEngineState<Reasoning>;
+  private readonly pauseController: CooperativePauseController;
+  private durablePauseCheckpoint: WorkShellDurablePauseCheckpoint | undefined;
   private pendingDecision: PendingDecision | undefined;
   /**
    * Lifecycle events reduce here first, in arrival order, so a burst is
@@ -866,10 +794,25 @@ export class WorkShellEngine<
   private agentConsolePublishTimer: NodeJS.Timeout | undefined;
   private agentConsolePersistTimer: NodeJS.Timeout | undefined;
   /**
-   * Tail of the ordered durable-write chain. Never rejects: a failed write is
-   * absorbed here so the next checkpoint still runs.
+   * One write may be active and one latest snapshot may be pending behind it.
+   * Every superseded caller settles with the latest pending write, so lifecycle
+   * bursts stay bounded without letting an older checkpoint win durable order.
    */
+  private pendingSessionSnapshotWrite: {
+    input: WorkShellSessionSnapshotInput;
+    promise: Promise<void>;
+    resolve: () => void;
+    reject: (error: unknown) => void;
+  } | undefined;
+  private sessionSnapshotWriteDrain: Promise<void> | undefined;
   private sessionSnapshotWriteQueue: Promise<void> = Promise.resolve();
+  private readonly sessionSnapshotWritesInFlight = new Set<Promise<void>>();
+  private sessionSnapshotWriteGeneration = 0;
+  private sessionSnapshotDurabilityFailure: {
+    generation: number;
+    error: Error;
+  } | undefined;
+  private disposal: Promise<void> | undefined;
 
   constructor(input: WorkShellEngineInput<Attachment, Reasoning, TraceEvent>) {
     this.agent = input.agent;
@@ -932,6 +875,20 @@ export class WorkShellEngine<
       contextSourceActionsEnabled: input.mutateContextSource !== undefined,
       contextAdviceActionsEnabled: input.resolveContextSuggestion !== undefined,
     };
+    const restoredPause = parseWorkShellReplaySafePauseCheckpoint(
+      input.options.initialPauseCheckpoint,
+      this.state.agentConsole.pendingDecision?.id,
+    );
+    this.durablePauseCheckpoint = restoredPause;
+    this.pauseController = new CooperativePauseController({
+      onStateChanged: (turnLifecycle) => this.setState({ turnLifecycle }),
+      ...(restoredPause
+        ? { initialPaused: { turnId: restoredPause.turnId, boundary: restoredPause.boundary } }
+        : {}),
+    });
+    if (restoredPause) {
+      this.state = { ...this.state, turnLifecycle: this.pauseController.snapshot() };
+    }
     this.lastCompletedTurnSnapshot = resolveLastCompletedTurn(
       input.options.initialEntries ?? this.state.entries,
     );
@@ -939,6 +896,61 @@ export class WorkShellEngine<
 
   getState(): WorkShellEngineState<Reasoning> {
     return this.state;
+  }
+
+  /** Stable identity used by the session store and the loopback control room. */
+  getSessionId(): string {
+    return this.sessionId;
+  }
+
+  getTurnLifecycle(): WorkShellPauseSnapshot {
+    return this.pauseController.snapshot();
+  }
+
+  bindRuntimeRevisionClock(clock: { readonly value: number }): void {
+    this.runtimeRevisionClock = clock;
+  }
+
+  /** Runtime-owner-only usage identity port; remote clients never receive it. */
+  bindRuntimeUsageRecorder(recorder: AgentConsoleUsageRecorder): void {
+    this.usageRecorder = recorder;
+  }
+
+  persistRuntimeRevision(revision: number): Promise<void> {
+    const lifecycle = this.pauseController.snapshot();
+    const state: WorkShellSessionState = lifecycle.state === "pause_pending" || lifecycle.state === "paused"
+      ? lifecycle.state
+      : this.pendingDecision
+        ? "requires_action"
+        : this.state.isBusy
+          ? "running"
+          : "idle";
+    return this.enqueueSessionSnapshotWrite(this.buildSessionSnapshotInput({
+      state,
+      summary: this.lastSessionSummary,
+      traceMode: this.state.traceMode,
+      ownerMutationRevision: revision,
+      ...(state === "paused" && this.durablePauseCheckpoint
+        ? { pauseCheckpoint: this.durablePauseCheckpoint }
+        : {}),
+    }));
+  }
+
+  requestTurnPause(): Promise<WorkShellPauseReceipt> {
+    const requested = this.pauseController.requestPause();
+    if (this.pendingDecision && this.pauseController.snapshot().state === "pause_pending") {
+      void this.pauseController.checkpoint(
+        "before_approval",
+        () => this.pauseCheckpointForEpoch(this.activeTurnEpoch, "before_approval"),
+      ).catch(() => undefined);
+    }
+    return requested;
+  }
+
+  resumeTurn(): boolean {
+    const resumed = this.pauseController.resume();
+    if (resumed) this.durablePauseCheckpoint = undefined;
+    return resumed;
   }
 
   updateTerminalColumns(columns: number): void {
@@ -961,7 +973,14 @@ export class WorkShellEngine<
   }
 
   private createWorkBoardPanel(
-    queuedItems: readonly { readonly id: number; readonly line: string }[],
+    queuedItems: readonly {
+      readonly id: number;
+      readonly line: string;
+      readonly attachmentCount?: number;
+      readonly createdAt?: number;
+      readonly status?: "pending" | "in-flight" | "requires-action";
+      readonly recoveryReason?: string | undefined;
+    }[],
   ): WorkShellPanel {
     return createQueueBuiltinResult(buildWorkShellQueueBuiltinInput({
       line: "/queue",
@@ -976,7 +995,14 @@ export class WorkShellEngine<
 
   private async rebuildWorkBoardPanel(): Promise<void> {
     const generation = ++this.workBoardRebuildGeneration;
-    let queuedItems: readonly { readonly id: number; readonly line: string }[] = [];
+    let queuedItems: readonly {
+      readonly id: number;
+      readonly line: string;
+      readonly attachmentCount?: number;
+      readonly createdAt?: number;
+      readonly status?: "pending" | "in-flight" | "requires-action";
+      readonly recoveryReason?: string | undefined;
+    }[] = [];
     try {
       queuedItems = await this.listQueuedSubmits();
     } catch {
@@ -1003,7 +1029,7 @@ export class WorkShellEngine<
     this.interactionBridge?.bind({
       ask: (request, signal) => this.openDecision(request, signal),
     });
-    this.clearResumedPendingDecision();
+    if (!this.durablePauseCheckpoint) this.clearResumedPendingDecision();
     // A lifecycle burst is one render, not one render per event: the console
     // reduction, the busy status, the trace buffer, and any verbose trace entry
     // are all staged and fanned out once per publish window.
@@ -1036,8 +1062,23 @@ export class WorkShellEngine<
     });
 
     try {
-      this.setQueuedCount(await this.loadQueuedSubmitCount());
-      await this.persistSessionSnapshot("idle", this.lastSessionSummary).catch(() => undefined);
+      const recovered = await this.recoverStaleQueuedSubmits();
+      await this.sweepQueuedAttachmentCleanup();
+      await this.refreshQueuedSubmitSnapshot();
+      if (recovered.length > 0) {
+        this.queueAutoDrainPaused = true;
+        this.setState({ queuePaused: true });
+      }
+      if (this.durablePauseCheckpoint) {
+        await this.enqueueSessionSnapshotWrite(this.buildSessionSnapshotInput({
+          state: "paused",
+          summary: this.lastSessionSummary,
+          traceMode: this.state.traceMode,
+          pauseCheckpoint: this.durablePauseCheckpoint,
+        })).catch(() => undefined);
+      } else {
+        await this.persistSessionSnapshot("idle", this.lastSessionSummary).catch(() => undefined);
+      }
 
       const contextState = await loadInitialWorkShellLifecycleState({
         cwd: this.options.cwd,
@@ -1050,6 +1091,13 @@ export class WorkShellEngine<
       });
 
       this.setState(contextState);
+      if (recovered.length > 0) {
+        const noun = recovered.length === 1 ? "follow-up" : "follow-ups";
+        this.appendEntries({
+          role: "system",
+          text: `Recovered ${recovered.length} interrupted queued ${noun} as requires action. Use /queue to retry or discard.`,
+        });
+      }
     } catch (error: unknown) {
       this.appendEntries({
         role: "system",
@@ -1058,13 +1106,98 @@ export class WorkShellEngine<
     }
   }
 
-  dispose(): void {
+  dispose(): Promise<void> {
+    this.lifecycleClosing = true;
+    if (this.disposal) return this.disposal;
+    this.disposed = true;
+    this.pauseController.cancel();
     this.agent.setTraceListener(undefined);
-    this.flushAgentConsole();
-    this.clearAgentConsoleTimers();
+    const finalCheckpoint = this.flushAgentConsole();
     this.agent.getAgentControlRuntime?.()?.clear("Work Shell closed.");
     this.settlePendingDecision({ status: "unavailable", reason: "Work Shell closed." });
     this.interactionBridge?.unbind("Work Shell closed.");
+    this.disposal = Promise.all([
+      finalCheckpoint,
+      ...this.sessionSnapshotWritesInFlight,
+    ]).then(() => {
+      if (this.sessionSnapshotDurabilityFailure) {
+        throw this.sessionSnapshotDurabilityFailure.error;
+      }
+    });
+    return this.disposal;
+  }
+
+  /**
+   * Owner-only async shutdown. Abort is only the request; returning requires
+   * the provider/tool continuation itself to have settled. A signal-deaf
+   * implementation is surfaced as an owner shutdown failure instead of being
+   * detached and leaked.
+   */
+  async shutdown(input: { readonly timeoutMs?: number | undefined } = {}): Promise<boolean> {
+    // Fence new work synchronously. The active settlement set includes the
+    // entire queue drain, so shutdown cannot dispose the engine in the idle
+    // gap between one acknowledged follow-up and the next claim.
+    this.lifecycleClosing = true;
+    const timeoutMs = Math.max(0, input.timeoutMs ?? 5_000);
+    if (this.state.isBusy) this.interruptTurn();
+    else this.activeTurnAbortController?.abort();
+    const deadline = Date.now() + timeoutMs;
+    let activeTurnFailure: unknown;
+    let hasActiveTurnFailure = false;
+    while (this.activeTurnSettlements.size > 0) {
+      const active = [...this.activeTurnSettlements];
+      const remaining = Math.max(0, deadline - Date.now());
+      const settled = await new Promise<readonly PromiseSettledResult<void>[] | undefined>((resolve) => {
+        const timer = setTimeout(() => resolve(undefined), remaining);
+        Promise.allSettled(active).then((results) => {
+          clearTimeout(timer);
+          resolve(results);
+        });
+      });
+      if (!settled) {
+        throw new Error("Work Shell shutdown did not settle the active provider/tool turn.");
+      }
+      if (!hasActiveTurnFailure) {
+        const rejected = settled.find(
+          (result): result is PromiseRejectedResult => result.status === "rejected",
+        );
+        if (rejected) {
+          activeTurnFailure = rejected.reason;
+          hasActiveTurnFailure = true;
+        }
+      }
+    }
+    const disposal = this.dispose();
+    const remaining = Math.max(0, deadline - Date.now());
+    const disposalOutcome = await new Promise<
+      | { readonly status: "settled" }
+      | { readonly status: "timed-out" }
+      | { readonly status: "rejected"; readonly reason: unknown }
+    >((resolve) => {
+      const timer = setTimeout(() => resolve({ status: "timed-out" }), remaining);
+      disposal.then(
+        () => {
+          clearTimeout(timer);
+          resolve({ status: "settled" });
+        },
+        (error: unknown) => {
+          clearTimeout(timer);
+          resolve({ status: "rejected", reason: error });
+        },
+      );
+    });
+    if (disposalOutcome.status === "timed-out") {
+      throw new Error("Work Shell shutdown did not settle durable session writes.");
+    }
+    if (hasActiveTurnFailure && disposalOutcome.status === "rejected") {
+      throw new AggregateError(
+        [activeTurnFailure, disposalOutcome.reason],
+        "Work Shell shutdown failed to settle active work and durable session writes.",
+      );
+    }
+    if (hasActiveTurnFailure) throw activeTurnFailure;
+    if (disposalOutcome.status === "rejected") throw disposalOutcome.reason;
+    return true;
   }
 
   // ---------------------------------------------------------------------
@@ -1084,7 +1217,12 @@ export class WorkShellEngine<
   }
 
   closeAgentConsole(): void {
-    this.setState({ agentConsoleView: closeAgentConsoleView(this.state.agentConsoleView) });
+    this.setState({
+      agentConsoleView: closeAgentConsoleView(this.state.agentConsoleView),
+      ...(this.state.composerMode === "agent-steer"
+        ? { composerMode: "default", agentSteerTarget: undefined }
+        : {}),
+    });
   }
 
   selectAgentConsoleTab(tab: AgentConsoleTab): void {
@@ -1171,22 +1309,30 @@ export class WorkShellEngine<
   }
 
   /** Enter the steer composer for the selected live run. */
-  beginAgentSteer(): void {
+  beginAgentSteer(agentRunId?: string): boolean {
     const view = this.state.agentConsoleView;
     const selection = resolveAgentConsoleSelection(view, this.state.agentConsole);
-    if (!view.open || selection?.tab !== "agents" || isSettledAgentRun(selection.run)) {
+    if (
+      !view.open
+      || selection?.tab !== "agents"
+      || (agentRunId !== undefined && selection.run.id !== agentRunId)
+      || isSettledAgentRun(selection.run)
+    ) {
       this.setState({
+        agentSteerTarget: undefined,
         agentConsoleView: settleAgentConsoleControl(view, {
           status: "rejected",
           message: "Select a running agent to steer.",
         }),
       });
-      return;
+      return false;
     }
     this.setState({
       composerMode: "agent-steer",
+      agentSteerTarget: { kind: "agent-steer", agentRunId: selection.run.id },
       agentConsoleView: settleAgentConsoleControl(view),
     });
+    return true;
   }
 
   /** Arm the cancel confirmation for the selected run. */
@@ -1242,16 +1388,15 @@ export class WorkShellEngine<
    * so a rejected or undeliverable steer cannot strand the operator in a mode
    * whose target has gone away.
    */
-  private async submitAgentSteer(value: string): Promise<void> {
-    const selection = resolveAgentConsoleSelection(
-      this.state.agentConsoleView,
-      this.state.agentConsole,
-    );
-    const receipt: AgentControlReceipt = selection?.tab === "agents"
-      ? await this.getAgentControlPort().steer(selection.run.id, value)
+  async submitAgentSteer(value: string): Promise<void> {
+    const target = this.state.agentSteerTarget;
+    // Consume the binding before awaiting so repeated Enter cannot deliver the
+    // same draft twice or observe a cursor that moved during remote queuing.
+    this.setState({ composerMode: "default", agentSteerTarget: undefined });
+    const receipt: AgentControlReceipt = target?.kind === "agent-steer"
+      ? await this.getAgentControlPort().steer(target.agentRunId, value)
       : { status: "rejected", message: "Select an agent run to steer." };
     this.setState({
-      composerMode: "default",
       agentConsoleView: settleAgentConsoleControl(this.state.agentConsoleView, receipt),
     });
   }
@@ -1268,7 +1413,7 @@ export class WorkShellEngine<
     const base = pending === undefined
       ? this.state.agentConsole
       : mergeAgentConsoleLifecycle(pending, this.state.agentConsole);
-    const next = applyTraceEventToAgentConsole(base, event);
+    const next = applyTraceEventToAgentConsole(base, event, this.usageRecorder);
     if (next === base) {
       return;
     }
@@ -1304,7 +1449,7 @@ export class WorkShellEngine<
     }
     this.agentConsolePersistTimer = setTimeout(() => {
       this.agentConsolePersistTimer = undefined;
-      void this.persistAgentConsoleSnapshot();
+      void this.persistAgentConsoleSnapshot().catch(() => undefined);
     }, AGENT_CONSOLE_PERSIST_INTERVAL_MS);
     this.agentConsolePersistTimer.unref();
   }
@@ -1321,14 +1466,17 @@ export class WorkShellEngine<
   }
 
   /** Publish and durably record whatever the coalescing windows still hold. */
-  private flushAgentConsole(): void {
+  private flushAgentConsole(): Promise<void> {
+    const hadPendingPublish = this.agentConsolePublishTimer !== undefined;
     const hadPendingWrite = this.agentConsolePersistTimer !== undefined;
-    if (this.agentConsolePublishTimer !== undefined || this.pendingAgentConsole !== undefined) {
+    this.clearAgentConsoleTimers();
+    if (hadPendingPublish || this.pendingAgentConsole !== undefined) {
       this.publishStagedTraceState();
     }
     if (hadPendingWrite) {
-      void this.persistAgentConsoleSnapshot();
+      return this.persistAgentConsoleSnapshot();
     }
+    return this.sessionSnapshotWriteQueue;
   }
 
   private clearAgentConsoleTimers(): void {
@@ -1352,15 +1500,11 @@ export class WorkShellEngine<
     const snapshot = this.state.agentConsole;
     const active = snapshot.agents.some((agent) => !isSettledAgentRun(agent))
       || snapshot.jobs.some((job) => !isSettledAsyncJob(job));
-    try {
-      await this.enqueueSessionSnapshotWrite(this.buildSessionSnapshotInput({
-        state: active ? "running" : "idle",
-        summary: this.lastSessionSummary,
-        traceMode: this.state.traceMode,
-      }));
-    } catch {
-      /* durable-write failure is retried by the next lifecycle event */
-    }
+    await this.enqueueSessionSnapshotWrite(this.buildSessionSnapshotInput({
+      state: active ? "running" : "idle",
+      summary: this.lastSessionSummary,
+      traceMode: this.state.traceMode,
+    }));
   }
 
   async openSessionsPanel(): Promise<void> {
@@ -1385,6 +1529,7 @@ export class WorkShellEngine<
     if (this.state.composerMode === "agent-steer") {
       this.setState({
         composerMode: "default",
+        agentSteerTarget: undefined,
         agentConsoleView: settleAgentConsoleControl(this.state.agentConsoleView),
       });
       return;
@@ -1439,6 +1584,41 @@ export class WorkShellEngine<
       contextInspectorDetailContent: undefined,
       contextInspectorDetailOffset: 0,
     });
+  }
+
+  /** Keyboard-owned Queue overlay mutations. IDs stay stable while rows move. */
+  async removeQueueItem(id: number): Promise<boolean> {
+    const removed = await this.removeQueuedSubmit(id);
+    await this.rebuildWorkBoardPanel();
+    return removed;
+  }
+
+  async moveQueueItem(id: number, direction: "up" | "down"): Promise<boolean> {
+    const moved = await this.moveQueuedSubmit(id, direction);
+    await this.rebuildWorkBoardPanel();
+    return moved;
+  }
+
+  async clearQueueItems(): Promise<void> {
+    await this.clearQueuedSubmits();
+    await this.rebuildWorkBoardPanel();
+  }
+
+  async resumeQueueItems(): Promise<void> {
+    await this.resumeQueuedSubmits();
+    await this.rebuildWorkBoardPanel();
+  }
+
+  async retryQueueItem(id: number): Promise<boolean> {
+    const retried = await this.retryQueuedSubmit(id);
+    await this.rebuildWorkBoardPanel();
+    return retried;
+  }
+
+  async discardQueueItem(id: number): Promise<boolean> {
+    const discarded = await this.discardQueuedSubmit(id);
+    await this.rebuildWorkBoardPanel();
+    return discarded;
   }
 
   /**
@@ -2119,16 +2299,27 @@ export class WorkShellEngine<
     return cursor < 0 || cursor >= sources.length ? undefined : sources[cursor];
   }
 
-  interruptTurn(): void {
+  /** Marks a remotely accepted submit before its long execution leaves the owner admission lane. */
+  admitRuntimeTurn(): void {
+    this.admittedRuntimeTurns += 1;
+  }
+
+  interruptTurn(): boolean {
     if (!this.state.isBusy) {
+      if (this.cancelledAdmittedRuntimeTurns < this.admittedRuntimeTurns) {
+        this.cancelledAdmittedRuntimeTurns += 1;
+        this.appendEntries({ role: "system", text: "Turn cancelled before it started." });
+        return true;
+      }
       this.appendEntries({ role: "system", text: "No active turn to interrupt." });
-      return;
+      return false;
     }
     const interruptedTurnEpoch = this.activeTurnEpoch;
     const interruptedIdleEpoch = interruptedTurnEpoch + 1;
     this.queueDrainSkipTurnEpochs.add(interruptedTurnEpoch);
     this.queueAutoDrainPaused = this.queuedCountCache > 0;
     this.activeTurnEpoch = interruptedIdleEpoch;
+    this.pauseController.cancel();
     this.activeTurnAbortController?.abort();
     const lastTurnDurationMs = this.state.currentTurnStartedAt === undefined
       ? undefined
@@ -2147,6 +2338,15 @@ export class WorkShellEngine<
       ...(lastTurnDurationMs !== undefined ? { lastTurnDurationMs } : {}),
     });
     void this.persistSessionSnapshotForEpoch(interruptedIdleEpoch, "idle", "Turn interrupted.").catch(() => undefined);
+    return true;
+  }
+
+  private consumeRuntimeTurnAdmission(): boolean {
+    if (this.admittedRuntimeTurns === 0) return true;
+    this.admittedRuntimeTurns -= 1;
+    if (this.cancelledAdmittedRuntimeTurns === 0) return true;
+    this.cancelledAdmittedRuntimeTurns -= 1;
+    return false;
   }
 
   private startActiveTurnAbortController(): AbortController {
@@ -2217,6 +2417,24 @@ export class WorkShellEngine<
     await this.persistSessionSnapshot("idle", this.lastSessionSummary).catch(() => undefined);
   }
 
+  /**
+   * Ctrl+O changes only the presentation of retained tool history. It shares
+   * `/minimal` and `/verbose`'s one durable traceMode field, but deliberately
+   * emits no synthetic transcript entries and opens no panel.
+   */
+  async toggleToolHistoryDisplay(): Promise<void> {
+    const traceMode: WorkShellTraceMode = this.state.traceMode === "verbose"
+      ? "minimal"
+      : "verbose";
+    this.setState(createWorkShellTraceModePatch({
+      state: this.state,
+      traceMode,
+      contextSummaryLines: this.currentContextSummaryLines,
+      buildContextPanel: this.buildContextPanel,
+    }));
+    await this.persistSessionSnapshot("idle", this.lastSessionSummary, traceMode).catch(() => undefined);
+  }
+
   private applyMode(mode: string): void {
     this.options = { ...this.options, mode };
     this.agent.updateMode?.(mode);
@@ -2251,10 +2469,15 @@ export class WorkShellEngine<
       });
     }
 
+    const normalizedRequest: AskUserQuestionRequest = {
+      ...request,
+      kind: request.kind === "security-approval" ? "security-approval" : "user-decision",
+    };
+
     const { promise, resolve } = createPromiseResolvers<AskUserQuestionResult>();
     let onAbort: () => void = () => {};
     const pending: PendingDecision = {
-      request,
+      request: normalizedRequest,
       settle: (result) => {
         if (this.pendingDecision !== pending) {
           return;
@@ -2284,24 +2507,24 @@ export class WorkShellEngine<
     this.setState({
       agentConsole: createAgentConsoleSnapshot({
         ...this.state.agentConsole,
-        pendingDecision: request,
+        pendingDecision: normalizedRequest,
       }),
       panel: {
         title: "Decision",
-        lines: formatWorkShellDecisionLines(request),
+        lines: formatWorkShellDecisionLines(normalizedRequest),
       },
     });
     void this.persistSessionSnapshot(
       "requires_action",
-      `Decision required: ${request.title?.trim() || request.id}`,
+      `Decision required: ${normalizedRequest.title?.trim() || normalizedRequest.id}`,
     ).catch(() => undefined);
     return promise;
   }
 
-  private handlePendingDecisionReply(value: string): void {
+  private handlePendingDecisionReply(value: string, decisionId: string): boolean {
     const pending = this.pendingDecision;
-    if (!pending) {
-      return;
+    if (!pending || pending.request.id !== decisionId) {
+      return false;
     }
     const reply = resolveWorkShellDecisionReply({
       request: pending.request,
@@ -2309,11 +2532,11 @@ export class WorkShellEngine<
     });
     if (reply.kind === "cancelled") {
       pending.settle({ status: "cancelled" });
-      return;
+      return true;
     }
     if (reply.kind === "answered") {
       pending.settle(reply.result);
-      return;
+      return true;
     }
     this.setState({
       panel: {
@@ -2321,37 +2544,80 @@ export class WorkShellEngine<
         lines: [...formatWorkShellDecisionLines(pending.request), `Input needed · ${reply.message}`],
       },
     });
+    return true;
   }
 
   /**
-   * One-key reply for the decision bar. `handlePendingDecisionReply` is void,
-   * so the range is validated up front: a pending decision with exactly one
-   * question and an in-range option index settles through the same reply
-   * path as a typed line, everything else is a no-op that keeps the decision
-   * pending (multi-question requests need typed `id: n` answers).
+   * Submit composer text to one exact pending decision. Routing may call Rust,
+   * so the identity is checked both before and after that await: text entered
+   * for A can never settle a replacement B that appears while classification
+   * is in flight.
    */
-  answerPendingDecisionByIndex(index: number): boolean {
+  async submitPendingDecisionText(value: string, decisionId: string): Promise<boolean> {
+    if (this.lifecycleClosing || this.disposed) return false;
+    const line = value.trim();
+    if (!line || this.pendingDecision?.request.id !== decisionId) return false;
+
+    let decision: BusySubmitDecision | undefined;
+    try {
+      decision = await this.resolveBusySubmitDecision(line);
+    } catch {
+      if (this.pendingDecision?.request.id !== decisionId) return false;
+      this.appendEntries({
+        role: "system",
+        text: this.formatWorkShellError(
+          "Console commands are unavailable. This line was read as an answer to the pending decision.",
+        ),
+      });
+    }
+    if (this.pendingDecision?.request.id !== decisionId) return false;
+    if (decision?.action === "open_agent_console") {
+      this.openAgentConsole(decision.tab);
+      return true;
+    }
+    return this.handlePendingDecisionReply(line, decisionId);
+  }
+
+  /**
+   * One-key reply for the decision bar. The range and decision identity are
+   * validated up front: a pending decision with exactly one question and an
+   * in-range option index settles through the same reply path as a typed line;
+   * everything else is a no-op that keeps the decision pending
+   * (multi-question requests need typed `id: n` answers).
+   */
+  answerPendingDecisionByIndex(index: number, decisionId: string): boolean {
     const pending = this.pendingDecision;
     const question = pending?.request.questions.length === 1
       ? pending.request.questions[0]
       : undefined;
-    if (!pending || !question) {
+    if (!pending || !question || pending.request.id !== decisionId) {
       return false;
     }
     if (!Number.isSafeInteger(index) || index < 1 || index > question.options.length) {
       return false;
     }
-    this.handlePendingDecisionReply(String(index));
+    return this.handlePendingDecisionReply(String(index), decisionId);
+  }
+
+  /** Settle one exact user decision without routing structured answers through chat input. */
+  answerPendingUserDecision(
+    decisionId: string,
+    answers: readonly AskUserQuestionAnswer[],
+  ): boolean {
+    const pending = this.pendingDecision;
+    if (!pending || pending.request.kind !== "user-decision") return false;
+    const result = resolveWorkShellDecisionAnswers({ request: pending.request, decisionId, answers });
+    if (!result) return false;
+    pending.settle(result);
     return true;
   }
 
   /** Esc on the decision bar: `/cancel` through the same settle guard. */
-  cancelPendingDecision(): boolean {
-    if (!this.pendingDecision) {
+  cancelPendingDecision(decisionId: string): boolean {
+    if (!this.pendingDecision || this.pendingDecision.request.id !== decisionId) {
       return false;
     }
-    this.handlePendingDecisionReply("/cancel");
-    return true;
+    return this.handlePendingDecisionReply("/cancel", decisionId);
   }
 
   private settlePendingDecision(result: AskUserQuestionResult): void {
@@ -2369,6 +2635,8 @@ export class WorkShellEngine<
     value: string,
     pendingAttachments?: readonly Attachment[],
   ): Promise<void> {
+    if (this.lifecycleClosing || this.disposed) return;
+    if (!this.consumeRuntimeTurnAdmission()) return;
     // The steer composer owns the whole submit: an empty line still leaves the
     // mode rather than falling through into the chat router.
     if (this.state.composerMode === "agent-steer") {
@@ -2380,32 +2648,10 @@ export class WorkShellEngine<
       return;
     }
     if (this.pendingDecision) {
-      // A pending decision must not lock the operator out of the console. Rust
-      // stays the authority on what a slash line means mid-turn, so the line is
-      // classified once here; only `open_agent_console` is handled early, and
-      // every other action — including ordinary answers — falls through to the
-      // decision untouched.
-      //
-      // Classification is a console convenience, never a gate on answering. If
-      // it fails, the operator still gets their answer through: dropping the
-      // line here would strand the run behind a question nothing can settle,
-      // and the console command that failed was never the point of the line.
-      let decision: BusySubmitDecision | undefined;
-      try {
-        decision = await this.resolveBusySubmitDecision(line);
-      } catch {
-        this.appendEntries({
-          role: "system",
-          text: this.formatWorkShellError(
-            "Console commands are unavailable. This line was read as an answer to the pending decision.",
-          ),
-        });
-      }
-      if (decision?.action === "open_agent_console") {
-        this.openAgentConsole(decision.tab);
-        return;
-      }
-      this.handlePendingDecisionReply(line);
+      // Decision text must carry an explicit identity through
+      // `submitPendingDecisionText`; generic prompt submission intentionally
+      // remains an ordinary prompt path and cannot target whichever decision
+      // happens to be current when a delayed call arrives.
       return;
     }
     if (this.state.isBusy) {
@@ -2422,6 +2668,19 @@ export class WorkShellEngine<
     });
     if (!route) {
       return;
+    }
+
+    if (
+      !this.state.uiLocaleLocked
+      && (route.kind === "chat" || route.kind === "prompt-command")
+    ) {
+      const turnLocale = detectWorkShellUserLocale(route.line);
+      if (turnLocale && turnLocale !== this.state.uiLocale) {
+        // Commit the turn language before preparation marks the shell busy so
+        // status text, composer guidance, and the provider instruction change
+        // together instead of switching only after the reply arrives.
+        this.setState({ uiLocale: turnLocale });
+      }
     }
 
     // Submitting a turn retires the Context Desk right away: the review is
@@ -2445,11 +2704,24 @@ export class WorkShellEngine<
       : this.activeTurnEpoch;
     this.activeTurnEpoch = turnEpoch;
 
-    await this.executeSubmitRoute(route, pendingAttachments, turnEpoch);
+    const execution = this.executeSubmitRoute(route, pendingAttachments, turnEpoch);
+    this.activeTurnSettlements.add(execution);
+    try {
+      await execution;
+    } finally {
+      this.activeTurnSettlements.delete(execution);
+    }
     if (this.shouldSkipQueueDrainAfterTurn(turnEpoch, route.kind)) {
       return;
     }
-    await this.drainQueuedSubmits();
+    if (this.lifecycleClosing || this.disposed) return;
+    const drain = this.drainQueuedSubmits();
+    this.activeTurnSettlements.add(drain);
+    try {
+      await drain;
+    } finally {
+      this.activeTurnSettlements.delete(drain);
+    }
   }
 
   private async executeSubmitRoute(
@@ -2468,8 +2740,9 @@ export class WorkShellEngine<
       case "prompt-command": {
         const abortController = this.startActiveTurnAbortController();
         this.beginSubmitPreparation();
+        const turnId = `turn-${this.sessionId}-${turnEpoch}`;
         try {
-          const turnId = `turn-${this.sessionId}-${turnEpoch}`;
+          if (!await this.pauseController.beginTurn(turnId, abortController.signal)) return;
           const prepared = await this.prepareProviderContext(turnId, isCurrentTurn);
           if (prepared === "blocked") {
             this.pauseQueueAfterProofBlock(turnEpoch);
@@ -2504,11 +2777,15 @@ export class WorkShellEngine<
             sessionId: this.sessionId,
             buildStatusPanel: this.buildStatusPanel,
             autoContinueOnPermissionStall: this.options.autoContinueOnPermissionStall,
-            runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => this.agent.runTurn(
-              contextPacket ? this.composeProviderPrompt(contextPacket, prompt) : prompt,
+            runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => this.runAgentTurnAtPauseBoundary({
+              turnEpoch,
+              prompt: contextPacket
+                ? this.composeProviderPrompt(contextPacket, prompt)
+                : this.decorateProviderPrompt(prompt),
+              classificationPrompt: prompt,
               attachments,
-              { signal: abortController.signal },
-            ),
+              signal: abortController.signal,
+            }),
             isTurnActive: isCurrentTurn,
             publishContextBridge: this.publishContextBridge,
             writeScopedMemory: this.writeScopedMemory,
@@ -2546,6 +2823,10 @@ export class WorkShellEngine<
             && contextReceipt
             && isCurrentTurn()
           ) {
+            // Context advice is deliberately supersedable by the next user
+            // turn. Finish the durable provider turn before awaiting it so a
+            // second turn never inherits the previous cooperative lifecycle.
+            await this.finishCooperativeTurn(turnEpoch);
             await this.refreshContextAdvice(
               contextReceipt,
               contextPacket,
@@ -2553,6 +2834,7 @@ export class WorkShellEngine<
             );
           }
         } finally {
+          await this.finishCooperativeTurn(turnEpoch);
           this.clearActiveTurnAbortController(abortController);
           this.clearSubmitPreparationIfStillPending(isCurrentTurn);
         }
@@ -2567,8 +2849,9 @@ export class WorkShellEngine<
       case "chat": {
         const abortController = this.startActiveTurnAbortController();
         this.beginSubmitPreparation();
+        const turnId = `turn-${this.sessionId}-${turnEpoch}`;
         try {
-          const turnId = `turn-${this.sessionId}-${turnEpoch}`;
+          if (!await this.pauseController.beginTurn(turnId, abortController.signal)) return;
           const preflight = await resolveWorkShellChatPreflight({
             line: route.line,
             cwd: this.options.cwd,
@@ -2625,11 +2908,15 @@ export class WorkShellEngine<
             sessionId: this.sessionId,
             buildStatusPanel: this.buildStatusPanel,
             autoContinueOnPermissionStall: this.options.autoContinueOnPermissionStall,
-            runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => this.agent.runTurn(
-              contextPacket ? this.composeProviderPrompt(contextPacket, prompt) : prompt,
+            runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => this.runAgentTurnAtPauseBoundary({
+              turnEpoch,
+              prompt: contextPacket
+                ? this.composeProviderPrompt(contextPacket, prompt)
+                : this.decorateProviderPrompt(prompt),
+              classificationPrompt: prompt,
               attachments,
-              { signal: abortController.signal },
-            ),
+              signal: abortController.signal,
+            }),
             isTurnActive: isCurrentTurn,
             publishContextBridge: this.publishContextBridge,
             writeScopedMemory: this.writeScopedMemory,
@@ -2667,6 +2954,10 @@ export class WorkShellEngine<
             && contextReceipt
             && isCurrentTurn()
           ) {
+            // Context advice is deliberately supersedable by the next user
+            // turn. Finish the durable provider turn before awaiting it so a
+            // second turn never inherits the previous cooperative lifecycle.
+            await this.finishCooperativeTurn(turnEpoch);
             await this.refreshContextAdvice(
               contextReceipt,
               contextPacket,
@@ -2674,6 +2965,7 @@ export class WorkShellEngine<
             );
           }
         } finally {
+          await this.finishCooperativeTurn(turnEpoch);
           this.clearActiveTurnAbortController(abortController);
           this.clearSubmitPreparationIfStillPending(isCurrentTurn);
         }
@@ -2693,6 +2985,11 @@ export class WorkShellEngine<
       case "clear_queue":
         await this.handleBuiltinSubmit(decision.line, { kind: "queue-clear" });
         return;
+      case "queue_command": {
+        const command = resolveWorkShellBuiltinCommand(decision.line);
+        if (command) await this.handleBuiltinSubmit(decision.line, command);
+        return;
+      }
       case "cancel_turn":
         this.interruptTurn();
         return;
@@ -2705,48 +3002,107 @@ export class WorkShellEngine<
         this.appendEntries({ role: "system", text: decision.message });
         return;
       case "queue": {
-        const item = await this.pushQueuedSubmit(decision.line);
+        await this.pushQueuedSubmit(decision.line, pendingAttachments ?? []);
         this.setQueuedCount(decision.displayIndex);
-        if (pendingAttachments && pendingAttachments.length > 0) {
-          this.queuedAttachments.set(item.id, pendingAttachments);
-        }
-        this.appendEntries({ role: "system", text: decision.message });
+        // Queue lifecycle belongs to the Queue view/status projection. Adding
+        // enqueue notices to the conversation creates duplicate history and
+        // makes a settled follow-up look like assistant/user transcript data.
         return;
       }
     }
   }
 
   private async drainQueuedSubmits(): Promise<void> {
+    if (this.lifecycleClosing || this.disposed) return;
     const start = await this.resolveQueueDrainStartDecision();
-    if (start.action === "skip") {
+    if (this.lifecycleClosing || this.disposed || start.action === "skip") {
       return;
     }
     this.drainingQueue = true;
     try {
-      while ((await this.resolveQueueDrainContinueDecision()).action === "drain") {
-        const next = (await this.listQueuedSubmits())[0];
-        const step = await this.resolveQueueDrainStepDecision(next);
-        if (step.action === "empty") {
-          this.setQueuedCount(step.queuedCount);
+      while (!this.lifecycleClosing && !this.disposed) {
+        const continuation = await this.resolveQueueDrainContinueDecision();
+        if (this.lifecycleClosing || this.disposed || continuation.action !== "drain") break;
+        const next = await this.claimQueuedSubmit();
+        if (this.lifecycleClosing || this.disposed) {
+          if (next) await this.returnQueuedSubmitClaim(next.id);
           break;
         }
-        this.setQueuedCount(step.queuedCount);
-        const pendingAttachments = this.queuedAttachments.get(step.item.id);
-        this.appendEntries({ role: "system", text: step.message });
-        await this.handleSubmit(step.item.line, pendingAttachments);
-        if (this.queueAutoDrainPaused) {
+        const step = await this.resolveQueueDrainStepDecision(next);
+        if (step.action === "empty") {
           this.setQueuedCount(await this.loadQueuedSubmitCount());
           break;
         }
-        const popped = await this.popQueuedSubmit();
-        if (!popped || popped.id !== step.item.id) {
-          throw new Error("Rust queue changed while a queued turn was running.");
+        if (this.lifecycleClosing || this.disposed) {
+          await this.returnQueuedSubmitClaim(step.item.id);
+          break;
         }
-        this.queuedAttachments.delete(step.item.id);
+        this.setQueuedCount(await this.loadQueuedSubmitCount());
+        let pendingAttachments: readonly Attachment[];
+        try {
+          pendingAttachments = await restoreQueuedAttachments<Attachment>(
+            this.queueCommandCwd(),
+            step.item.attachments,
+          );
+        } catch (error) {
+          const reason = this.formatWorkShellError(
+            error instanceof Error ? error.message : String(error),
+          );
+          await this.quarantineQueuedSubmit(step.item.id, reason);
+          this.workBoardQueuedItemsSnapshot = await this.listQueuedSubmits();
+          this.setQueuedCount(await this.loadQueuedSubmitCount());
+          this.queueAutoDrainPaused = true;
+          this.setState({ queuePaused: true });
+          this.appendEntries({
+            role: "system",
+            text: `Queued follow-up #${step.item.id} requires action: ${reason}`,
+          });
+          break;
+        }
+        if (this.lifecycleClosing || this.disposed) {
+          await this.returnQueuedSubmitClaim(step.item.id);
+          break;
+        }
+        try {
+          await this.handleSubmit(step.item.line, pendingAttachments);
+          if (this.lifecycleClosing || this.disposed) {
+            await this.returnQueuedSubmitClaim(step.item.id);
+            break;
+          }
+          if (this.queueAutoDrainPaused) {
+            await this.nackQueuedSubmit(step.item.id);
+            this.setQueuedCount(await this.loadQueuedSubmitCount());
+            break;
+          }
+        } catch (error) {
+          await this.nackQueuedSubmit(step.item.id);
+          this.setQueuedCount(await this.loadQueuedSubmitCount());
+          throw error;
+        }
+        let acknowledged: QueuedSubmit | undefined;
+        try {
+          acknowledged = await this.ackQueuedSubmit(step.item.id);
+        } catch (error) {
+          await this.nackQueuedSubmit(step.item.id);
+          this.setQueuedCount(await this.loadQueuedSubmitCount());
+          throw error;
+        }
+        if (!acknowledged) {
+          throw new Error("Rust queue lost its in-flight claim before acknowledgement.");
+        }
+        await this.sweepQueuedAttachmentCleanup();
       }
     } finally {
       this.drainingQueue = false;
     }
+  }
+
+  private async returnQueuedSubmitClaim(id: number): Promise<void> {
+    const returned = await this.nackQueuedSubmit(id);
+    if (!returned) {
+      throw new Error(`Rust queue lost in-flight follow-up #${id} during shutdown recovery.`);
+    }
+    this.setQueuedCount(await this.loadQueuedSubmitCount());
   }
 
   private pauseQueueAfterProofBlock(turnEpoch: number): void {
@@ -2814,6 +3170,7 @@ export class WorkShellEngine<
       listAvailableSkills: this.listAvailableSkills,
       loadNamedSkill: this.loadNamedSkill,
       toolLines: this.toolLines,
+      listCanonicalPermissionRules: () => this.agent.getCanonicalPermissionRules?.() ?? [],
       clearAgent: () => this.agent.clear(),
       interruptTurn: () => this.interruptTurn(),
       updateRuntimeSettings: (settings) => this.agent.updateRuntimeSettings(settings),
@@ -2833,6 +3190,9 @@ export class WorkShellEngine<
         return queuedItems;
       },
       clearQueuedItems: () => this.clearQueuedSubmits(),
+      removeQueuedItem: (id) => this.removeQueuedSubmit(id),
+      moveQueuedItem: (id, direction) => this.moveQueuedSubmit(id, direction),
+      resumeQueuedItems: () => this.resumeQueuedSubmits(),
       appendEntries: (...entries) => this.appendEntries(...entries),
       setState: (patch) => this.setState(patch),
       persistSessionSnapshot: (state, summary, traceMode) => this.persistSessionSnapshot(state, summary, traceMode),
@@ -2912,9 +3272,11 @@ export class WorkShellEngine<
    * the same reasoning override, receipt pointer, and console projection.
    */
   private buildSessionSnapshotInput(input: {
-    readonly state: "running" | "idle" | "requires_action";
+    readonly state: WorkShellSessionState;
     readonly summary: string;
     readonly traceMode: WorkShellTraceMode;
+    readonly pauseCheckpoint?: WorkShellDurablePauseCheckpoint | undefined;
+    readonly ownerMutationRevision?: number | undefined;
   }): WorkShellSessionSnapshotInput {
     const overrideReasoningEffort =
       this.state.reasoning.support.status === "supported" &&
@@ -2924,6 +3286,9 @@ export class WorkShellEngine<
         this.state.reasoning.effort === "high")
         ? this.state.reasoning.effort
         : undefined;
+    const durableAgentConsole = this.pendingAgentConsole === undefined
+      ? this.state.agentConsole
+      : mergeAgentConsoleLifecycle(this.pendingAgentConsole, this.state.agentConsole);
     return createWorkShellSessionSnapshotInput({
       cwd: this.options.cwd,
       sessionId: this.sessionId,
@@ -2932,15 +3297,21 @@ export class WorkShellEngine<
       state: input.state,
       summary: input.summary,
       traceMode: input.traceMode,
+      uiLocale: this.state.uiLocale,
       reasoningEffort: overrideReasoningEffort,
       lastSubmittedContextReceiptId: this.lastSubmittedContextReceiptId,
+      ownerMutationRevision: input.ownerMutationRevision ?? this.runtimeRevisionClock?.value,
       entries: this.state.entries,
-      agentConsole: this.state.agentConsole,
+      agentConsole: createAgentConsoleSnapshot({
+        ...durableAgentConsole,
+        securityApprovals: this.agent.getCanonicalPermissionRules?.() ?? [],
+      }),
+      ...(input.pauseCheckpoint ? { pauseCheckpoint: input.pauseCheckpoint } : {}),
     });
   }
 
   private async persistSessionSnapshot(
-    state: "running" | "idle" | "requires_action",
+    state: WorkShellSessionState,
     summary: string,
     traceMode = this.state.traceMode,
   ): Promise<void> {
@@ -2961,19 +3332,73 @@ export class WorkShellEngine<
    * queue itself absorbs it and stays usable for the next write.
    */
   private enqueueSessionSnapshotWrite(input: WorkShellSessionSnapshotInput): Promise<void> {
-    const write = this.sessionSnapshotWriteQueue.then(
-      () => this.persistWorkShellSessionSnapshot(input),
+    if (this.pendingSessionSnapshotWrite) {
+      this.pendingSessionSnapshotWrite.input = input;
+      return this.pendingSessionSnapshotWrite.promise;
+    }
+    let resolveWrite!: () => void;
+    let rejectWrite!: (error: unknown) => void;
+    const write = new Promise<void>((resolve, reject) => {
+      resolveWrite = resolve;
+      rejectWrite = reject;
+    });
+    const generation = ++this.sessionSnapshotWriteGeneration;
+    this.sessionSnapshotWritesInFlight.add(write);
+    void write.then(
+      () => {
+        this.sessionSnapshotWritesInFlight.delete(write);
+        if (
+          this.sessionSnapshotDurabilityFailure
+          && this.sessionSnapshotDurabilityFailure.generation <= generation
+        ) {
+          this.sessionSnapshotDurabilityFailure = undefined;
+        }
+      },
+      (error: unknown) => {
+        this.sessionSnapshotWritesInFlight.delete(write);
+        if (
+          !this.sessionSnapshotDurabilityFailure
+          || this.sessionSnapshotDurabilityFailure.generation <= generation
+        ) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.sessionSnapshotDurabilityFailure = {
+            generation,
+            error: new Error(message.slice(0, 1_024) || "Durable session write failed."),
+          };
+        }
+      },
     );
-    this.sessionSnapshotWriteQueue = write.then(
-      () => undefined,
-      () => undefined,
-    );
+    this.pendingSessionSnapshotWrite = {
+      input,
+      promise: write,
+      resolve: resolveWrite,
+      reject: rejectWrite,
+    };
+    if (!this.sessionSnapshotWriteDrain) {
+      const drain = this.drainSessionSnapshotWrites();
+      this.sessionSnapshotWriteDrain = drain;
+      this.sessionSnapshotWriteQueue = drain;
+    }
     return write;
+  }
+
+  private async drainSessionSnapshotWrites(): Promise<void> {
+    while (this.pendingSessionSnapshotWrite) {
+      const pending = this.pendingSessionSnapshotWrite;
+      this.pendingSessionSnapshotWrite = undefined;
+      try {
+        await this.persistWorkShellSessionSnapshot(pending.input);
+        pending.resolve();
+      } catch (error: unknown) {
+        pending.reject(error);
+      }
+    }
+    this.sessionSnapshotWriteDrain = undefined;
   }
 
   private async persistSessionSnapshotForEpoch(
     turnEpoch: number,
-    state: "running" | "idle" | "requires_action",
+    state: WorkShellSessionState,
     summary: string,
     traceMode = this.state.traceMode,
   ): Promise<void> {
@@ -2983,13 +3408,155 @@ export class WorkShellEngine<
     await this.persistSessionSnapshot(state, summary, traceMode);
   }
 
-  private async pushQueuedSubmit(line: string): Promise<{ readonly id: number; readonly line: string }> {
-    const stdout = await runRustCommand(["rust", "queue", "push-json", this.sessionId, line], this.queueCommandCwd());
-    const item = parseQueuedSubmit(stdout);
-    if (!item) {
-      throw new Error("Rust queue push did not return an item.");
+  private pauseCheckpointForEpoch(
+    turnEpoch: number,
+    boundary: WorkShellPauseBoundary,
+  ): Promise<void> {
+    if (turnEpoch !== this.activeTurnEpoch) return Promise.resolve();
+    const lifecycle = this.pauseController.snapshot();
+    const turnId = lifecycle.turnId;
+    if (!turnId) return Promise.reject(new Error("Pause checkpoint lost the active turn identity."));
+    const console = this.state.agentConsole;
+    const graph = console.workGraph;
+    const activeNode = graph?.nodes.find((node) => node.status === "running" || node.status === "requires_action");
+    const artifactRefs = [...new Set([
+      ...(activeNode?.artifactRefs ?? []),
+      ...(graph?.nodes.flatMap((node) => node.artifactRefs) ?? []),
+    ])].filter((ref) => ref.trim().length > 0).slice(0, 64);
+    const pauseCheckpoint: WorkShellDurablePauseCheckpoint = {
+      turnId,
+      boundary,
+      ...(activeNode ? { activeNode: { id: activeNode.id, attempt: activeNode.attempt } } : {}),
+      ...(graph ? {
+        currentStage: graph.currentStage,
+        gateStatus: graph.gateStatus,
+        iteration: graph.iteration,
+      } : console.qualityReview ? {
+        ...(console.qualityReview.currentStage ? { currentStage: console.qualityReview.currentStage } : {}),
+        gateStatus: console.qualityReview.latestDecision,
+        ...(console.qualityReview.iteration !== undefined ? { iteration: console.qualityReview.iteration } : {}),
+      } : {}),
+      ...(console.pendingDecision?.id ? { decisionId: console.pendingDecision.id } : {}),
+      ...(this.lastSubmittedContextReceiptId ? { contextReceiptId: this.lastSubmittedContextReceiptId } : {}),
+      attachmentRefs: this.activeAttachmentRefs,
+      artifactRefs,
+    };
+    this.durablePauseCheckpoint = pauseCheckpoint;
+    this.lastSessionSummary = `Turn paused at ${boundary}.`;
+    return this.enqueueSessionSnapshotWrite(this.buildSessionSnapshotInput({
+      state: "paused",
+      summary: this.lastSessionSummary,
+      traceMode: this.state.traceMode,
+      pauseCheckpoint,
+    }));
+  }
+
+  private executionPausePort(turnEpoch: number): ExecutionPausePort {
+    const persist = (snapshot: WorkShellPauseSnapshot) => this.pauseCheckpointForEpoch(
+      turnEpoch,
+      snapshot.boundary ?? "before_completion",
+    );
+    return {
+      checkpoint: (boundary) => this.pauseController.checkpoint(boundary, persist),
+      runNonInterruptible: (operation, run) => this.pauseController.runNonInterruptible(
+        operation,
+        run,
+        persist,
+      ),
+    };
+  }
+
+  private async runAgentTurnAtPauseBoundary(input: {
+    readonly turnEpoch: number;
+    readonly prompt: string;
+    readonly classificationPrompt: string;
+    readonly attachments?: readonly Attachment[] | undefined;
+    readonly signal: AbortSignal;
+  }): Promise<WorkAgentTurnResult> {
+    this.activeAttachmentRefs = (input.attachments ?? []).map((attachment, index) => {
+      const value = attachment as unknown as Record<string, unknown>;
+      const label = [value.type, value.mimeType, value.displayName]
+        .filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+        .join(":");
+      return (label || `attachment-${index + 1}`).slice(0, 256);
+    }).slice(0, 32);
+    const run = () => this.agent.runTurn(
+      input.prompt,
+      input.attachments,
+      {
+        signal: input.signal,
+        classificationPrompt: input.classificationPrompt,
+        pause: this.executionPausePort(input.turnEpoch),
+      },
+    );
+    try {
+      if (this.agent.supportsCooperativePause) return await run();
+      return await this.pauseController.runNonInterruptible(
+        "provider.request",
+        run,
+        (snapshot) => this.pauseCheckpointForEpoch(
+          input.turnEpoch,
+          snapshot.boundary ?? "after_provider",
+        ),
+      );
+    } finally {
+      this.activeAttachmentRefs = [];
     }
-    return item;
+  }
+
+  private async finishCooperativeTurn(turnEpoch: number): Promise<void> {
+    if (turnEpoch !== this.activeTurnEpoch) return;
+    await this.pauseController.checkpoint(
+      "before_completion",
+      () => this.pauseCheckpointForEpoch(turnEpoch, "before_completion"),
+    );
+    this.pauseController.complete();
+  }
+
+  private async pushQueuedSubmit(
+    line: string,
+    attachments: readonly Attachment[],
+  ): Promise<QueuedSubmit> {
+    const cwd = this.queueCommandCwd();
+    const createdAt = Date.now();
+    const requireAccepted = (stdout: string) => {
+      const result = parseQueueWriteResult(stdout);
+      if (!result.accepted) {
+        const { code, actual, limit } = result.error;
+        throw new Error(`Queue rejected ${code}: actual ${actual}, limit ${limit}.`);
+      }
+      return result;
+    };
+    const attachmentArtifacts = await persistQueuedAttachments(
+      cwd,
+      this.sessionId,
+      attachments,
+      async (artifacts) => {
+        requireAccepted(await runRustCommand(
+          ["rust", "queue", "validate-envelope-json", this.sessionId],
+          cwd,
+          JSON.stringify({ line, createdAt, attachments: artifacts }),
+        ));
+      },
+    );
+    try {
+      const stdout = await runRustCommand(
+        ["rust", "queue", "push-envelope-json", this.sessionId],
+        cwd,
+        JSON.stringify({ line, createdAt, attachments: attachmentArtifacts }),
+      );
+      const item = requireAccepted(stdout).item;
+      if (!item) {
+        throw new Error("Rust queue push did not return an item.");
+      }
+      return item;
+    } catch (error) {
+      await deleteQueuedAttachmentArtifacts(
+        cwd,
+        attachmentArtifacts.map((artifact) => artifact.ref),
+      );
+      throw error;
+    }
   }
 
   private async resolveBusySubmitDecision(line: string): Promise<BusySubmitDecision> {
@@ -3042,27 +3609,117 @@ export class WorkShellEngine<
     return parseQueueDrainStepDecision(stdout);
   }
 
-  private async popQueuedSubmit(): Promise<{ readonly id: number; readonly line: string } | undefined> {
-    const stdout = await runRustCommand(["rust", "queue", "pop-json", this.sessionId], this.queueCommandCwd());
+  private async claimQueuedSubmit(): Promise<QueuedSubmit | undefined> {
+    const stdout = await runRustCommand(["rust", "queue", "claim-json", this.sessionId], this.queueCommandCwd());
     return parseQueuedSubmit(stdout);
+  }
+
+  private async ackQueuedSubmit(id: number): Promise<QueuedSubmit | undefined> {
+    return parseQueuedSubmit(await runRustCommand(
+      ["rust", "queue", "ack-json", this.sessionId, String(id)],
+      this.queueCommandCwd(),
+    ));
+  }
+
+  private async nackQueuedSubmit(id: number): Promise<QueuedSubmit | undefined> {
+    return parseQueuedSubmit(await runRustCommand(
+      ["rust", "queue", "nack-json", this.sessionId, String(id)],
+      this.queueCommandCwd(),
+    ));
+  }
+
+  private async quarantineQueuedSubmit(id: number, reason: string): Promise<QueuedSubmit | undefined> {
+    return parseQueuedSubmit(await runRustCommand(
+      ["rust", "queue", "quarantine-json", this.sessionId, String(id)],
+      this.queueCommandCwd(),
+      reason,
+    ));
+  }
+
+  private async retryQueuedSubmit(id: number): Promise<boolean> {
+    const item = parseQueuedSubmit(await runRustCommand(
+      ["rust", "queue", "retry-json", this.sessionId, String(id)],
+      this.queueCommandCwd(),
+    ));
+    await this.refreshQueuedSubmitSnapshot();
+    return item !== undefined;
+  }
+
+  private async discardQueuedSubmit(id: number): Promise<boolean> {
+    const item = parseQueuedSubmit(await runRustCommand(
+      ["rust", "queue", "discard-json", this.sessionId, String(id)],
+      this.queueCommandCwd(),
+    ));
+    if (!item) return false;
+    await this.sweepQueuedAttachmentCleanup();
+    await this.refreshQueuedSubmitSnapshot();
+    return true;
   }
 
   private async clearQueuedSubmits(): Promise<void> {
     await runRustCommand(["rust", "queue", "clear", this.sessionId], this.queueCommandCwd());
-    this.setQueuedCount(0);
-    this.workBoardQueuedItemsSnapshot = [];
-    this.queuedAttachments.clear();
+    await this.sweepQueuedAttachmentCleanup();
+    const queueSnapshot = await this.refreshQueuedSubmitSnapshot();
+    this.queueAutoDrainPaused = queueSnapshot.some((item) => item.status === "requires-action");
+    this.queueDrainSkipTurnEpochs.clear();
+    this.setState({ queuePaused: this.queueAutoDrainPaused });
+  }
+
+  private async removeQueuedSubmit(id: number): Promise<boolean> {
+    const item = parseQueuedSubmit(await runRustCommand(
+      ["rust", "queue", "remove-json", this.sessionId, String(id)],
+      this.queueCommandCwd(),
+    ));
+    if (!item) return false;
+    await this.sweepQueuedAttachmentCleanup();
+    await this.refreshQueuedSubmitSnapshot();
+    return true;
+  }
+
+  private async moveQueuedSubmit(id: number, direction: "up" | "down"): Promise<boolean> {
+    const item = parseQueuedSubmit(await runRustCommand(
+      ["rust", "queue", "move-json", this.sessionId, String(id), direction],
+      this.queueCommandCwd(),
+    ));
+    if (!item) return false;
+    this.workBoardQueuedItemsSnapshot = await this.listQueuedSubmits();
+    return true;
+  }
+
+  private async resumeQueuedSubmits(): Promise<void> {
     this.queueAutoDrainPaused = false;
     this.queueDrainSkipTurnEpochs.clear();
     this.setState({ queuePaused: false });
+    if (!this.state.isBusy) await this.drainQueuedSubmits();
   }
 
   private async loadQueuedSubmitCount(): Promise<number> {
     return parseQueueLength(await runRustCommand(["rust", "queue", "len-json", this.sessionId], this.queueCommandCwd()));
   }
 
-  private async listQueuedSubmits(): Promise<readonly { readonly id: number; readonly line: string }[]> {
-    return parseQueuedSubmitList(await runRustCommand(["rust", "queue", "list", this.sessionId], this.queueCommandCwd()));
+  private async recoverStaleQueuedSubmits(): Promise<readonly QueuedSubmit[]> {
+    return parseQueuedSubmitList(await runRustCommand(
+      ["rust", "queue", "recover-json", this.sessionId],
+      this.queueCommandCwd(),
+    ));
+  }
+
+  private async sweepQueuedAttachmentCleanup(): Promise<void> {
+    await sweepQueuedAttachmentArtifacts(this.queueCommandCwd(), this.sessionId).catch(() => undefined);
+  }
+
+  private async refreshQueuedSubmitSnapshot(): Promise<readonly QueuedSubmit[]> {
+    const snapshot = await this.listQueuedSubmits();
+    this.workBoardQueuedItemsSnapshot = snapshot;
+    this.setQueuedCount(snapshot.filter((item) => item.status === "pending").length);
+    return snapshot;
+  }
+
+  private async listQueuedSubmits(): Promise<readonly QueuedSubmit[]> {
+    return parseQueuedSubmitList(await runRustCommand(
+      ["rust", "queue", "list", this.sessionId],
+      this.queueCommandCwd(),
+    ));
   }
 
   private queueCommandCwd(): string {
@@ -3338,11 +3995,18 @@ export class WorkShellEngine<
   }
 
   private composeProviderPrompt(packet: ContextPacketView, userPrompt: string): string {
+    const providerPrompt = this.resolvePromptManifest
+      ? this.resolvePromptManifest({ packet, userPrompt }).providerPrompt
+      : composeWorkShellTurnPromptFromPacket({ packet, userPrompt });
+    return this.decorateProviderPrompt(providerPrompt);
+  }
 
-    if (this.resolvePromptManifest) {
-      return this.resolvePromptManifest({ packet, userPrompt }).providerPrompt;
-    }
-    return composeWorkShellTurnPromptFromPacket({ packet, userPrompt });
+  private decorateProviderPrompt(providerPrompt: string): string {
+    // `handleSubmit` resolves the locale from the operator's route before the
+    // shell becomes busy. Do not re-detect from generated prompt-command prose
+    // here: bare /review and /commit prompts are internally English even when
+    // the user's active UI and response language are Korean.
+    return `${workShellLanguageInstruction(this.state.uiLocale)}\n\n${providerPrompt}`;
   }
 
   private async refreshContextPacket(

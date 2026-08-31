@@ -16,6 +16,11 @@ import {
 import { createToolRuntime } from "./tools.js";
 import { resolveModeExecutionPolicyProfile } from "./tool-executor.js";
 import {
+  createCanonicalPermissionRuleStore,
+  type CanonicalPermissionRule,
+  type CanonicalPermissionRuleStore,
+} from "./permission-scope.js";
+import {
   createWorkShellInteractionBridge,
   type WorkShellInteractionBridge,
 } from "./work-shell-interaction-bridge.js";
@@ -41,11 +46,16 @@ type RuntimeProviderArgs = {
   systemPrompt?: string;
   openAIRuntime?: "api" | "codex";
   openAIAccountId?: string | null;
+  baseUrl?: string;
   interactionBridge?: WorkShellInteractionBridge;
   mode?: string;
 };
 
 export type RuntimeCodingAgentOptions = RuntimeProviderArgs & {
+  /** Canonical Always rules restored from the current session checkpoint. */
+  initialPermissionRules?: readonly CanonicalPermissionRule[] | undefined;
+  /** Quality critic/promote capability boundary: advertise and execute no tools. */
+  toolAccess?: "full" | "none";
   providerOverride?: RuntimeProvider;
   /**
    * Builds the LLM provider with access to the agent's tool runtime. Used by
@@ -53,6 +63,18 @@ export type RuntimeCodingAgentOptions = RuntimeProviderArgs & {
    * the provider's own turn loop.
    */
   providerOverrideFactory?: (context: { toolRuntime: ToolRuntime }) => RuntimeProvider;
+};
+
+const READ_ONLY_QUALITY_TOOL_RUNTIME: ToolRuntime = {
+  definitions: [],
+  executor: {
+    async execute() {
+      return {
+        isError: true,
+        content: "Quality review is read-only; tools are unavailable.",
+      };
+    },
+  },
 };
 
 export class RuntimeCodingAgent
@@ -72,6 +94,7 @@ export class RuntimeCodingAgent
   // updateMode() without rebuilding the runtime or the provider.
   private readonly policyProfile: { current: ExecutionPolicyProfile };
   private readonly runtimeMode: { current: string };
+  private readonly permissionRuleStore: CanonicalPermissionRuleStore;
 
   constructor(args: RuntimeCodingAgentOptions) {
     const interactionBridge = args.interactionBridge ?? createWorkShellInteractionBridge();
@@ -82,17 +105,25 @@ export class RuntimeCodingAgent
     const profileRef = {
       current: resolveModeExecutionPolicyProfile({ mode: modeRef.current, envShellOptIn }),
     };
-    const toolRuntime = createToolRuntime({
-      interactionBridge,
-      policyProfile: () => profileRef.current,
-      runtimeMode: () => modeRef.current,
-      webSearch: {
-        provider: args.provider,
-        apiKey: args.apiKey,
-        model: args.model,
-        ...(args.openAIRuntime ? { openAIRuntime: args.openAIRuntime } : {}),
-      },
-    });
+    const permissionRuleStore = createCanonicalPermissionRuleStore(args.initialPermissionRules ?? []);
+    const toolRuntime = args.toolAccess === "none"
+      ? READ_ONLY_QUALITY_TOOL_RUNTIME
+      : createToolRuntime({
+          interactionBridge,
+          policyProfile: () => profileRef.current,
+          runtimeMode: () => modeRef.current,
+          permissionRuleStore,
+          ...(args.provider === "deepseek"
+            ? {}
+            : {
+                webSearch: {
+                  provider: args.provider,
+                  apiKey: args.apiKey,
+                  model: args.model,
+                  ...(args.openAIRuntime ? { openAIRuntime: args.openAIRuntime } : {}),
+                },
+              }),
+        });
     const runtimeProvider = args.providerOverride
       ?? args.providerOverrideFactory?.({ toolRuntime })
       ?? createRuntimeProvider({
@@ -104,6 +135,7 @@ export class RuntimeCodingAgent
         ...(args.systemPrompt ? { systemPrompt: args.systemPrompt } : {}),
         ...(args.openAIRuntime ? { openAIRuntime: args.openAIRuntime } : {}),
         ...(args.openAIAccountId !== undefined ? { openAIAccountId: args.openAIAccountId } : {}),
+        ...(args.baseUrl ? { baseUrl: args.baseUrl } : {}),
         toolRuntime,
       });
     super({
@@ -116,6 +148,7 @@ export class RuntimeCodingAgent
     this.envShellOptIn = envShellOptIn;
     this.policyProfile = profileRef;
     this.runtimeMode = modeRef;
+    this.permissionRuleStore = permissionRuleStore;
   }
 
   updateMode(mode: string): void {
@@ -128,6 +161,10 @@ export class RuntimeCodingAgent
 
   getExecutionPolicyProfile(): ExecutionPolicyProfile {
     return this.policyProfile.current;
+  }
+
+  getCanonicalPermissionRules(): readonly CanonicalPermissionRule[] {
+    return this.permissionRuleStore.list();
   }
 
   refreshAuthToken(apiKey: string): void {

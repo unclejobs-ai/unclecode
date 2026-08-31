@@ -1,6 +1,6 @@
 use crate::http_transport::describe_proxy_policy_fields;
 use crate::model_registry::{openai_reasoning_support, provider_model_catalog};
-use crate::ux_text::{display_width, pad_display_width, truncate_display_width};
+use crate::ux_text::truncate_display_width;
 use serde_json::{json, Value};
 
 pub fn build_ux_panel_json(kind: &str, input_json: &str) -> Result<String, String> {
@@ -355,10 +355,6 @@ fn queue_panel(input: &Value) -> Value {
         .filter(|value| !value.is_empty());
     let mode = str_field(input, "mode").filter(|value| !value.is_empty());
     let worker_budget = input.get("workerBudget").and_then(Value::as_u64);
-    let queued_count = input
-        .get("queuedCount")
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as usize;
     let queued_items = input
         .get("queuedItems")
         .and_then(Value::as_array)
@@ -371,15 +367,49 @@ fn queue_panel(input: &Value) -> Value {
                     if line.is_empty() {
                         return None;
                     }
-                    Some((id, compact_preview(line, 28)))
+                    let attachment_count = item
+                        .get("attachmentCount")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let status = item
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("pending");
+                    let created_at = item.get("createdAt").and_then(Value::as_u64).unwrap_or(0);
+                    let recovery_reason = str_field(item, "recoveryReason")
+                        .map(str::trim)
+                        .filter(|reason| !reason.is_empty())
+                        .map(str::to_string);
+                    Some((
+                        id,
+                        compact_preview(line, 28),
+                        attachment_count,
+                        status.to_string(),
+                        created_at,
+                        recovery_reason,
+                    ))
                 })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let total_count = queued_items.len();
+    let pending_count = queued_items
+        .iter()
+        .filter(|(_, _, _, status, _, _)| status == "pending")
+        .count();
+    let in_flight_count = queued_items
+        .iter()
+        .filter(|(_, _, _, status, _, _)| status == "in-flight")
+        .count();
+    let requires_action_count = queued_items
+        .iter()
+        .filter(|(_, _, _, status, _, _)| status == "requires-action")
+        .count();
     let terminal_columns = input
         .get("terminalColumns")
         .and_then(Value::as_u64)
         .unwrap_or(100) as usize;
+    let now_ms = input.get("nowMs").and_then(Value::as_u64);
     let queue_paused = bool_field_default(input, "queuePaused", false);
     let blocked_reason = str_field(input, "blockedReason")
         .map(str::trim)
@@ -387,283 +417,84 @@ fn queue_panel(input: &Value) -> Value {
     let active_prompt_preview = str_field(input, "activePromptPreview")
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let last_completed_turn = parse_last_completed_turn(input);
-
-    let mut lines = build_work_board_status_lines(is_busy, busy_status, mode, worker_budget);
-    lines.push(String::new());
-    lines.push("Board".to_string());
-    lines.extend(build_work_board_grid_lines(
-        WorkBoardInput {
-            is_busy,
-            busy_status,
-            queued_count,
-            queued_items: &queued_items,
-            queue_paused,
-            blocked_reason,
-            active_prompt_preview,
-            last_completed_turn: last_completed_turn.as_deref(),
-        },
-        terminal_columns,
-    ));
-    lines.extend([
-        String::new(),
-        "Steer".to_string(),
-        if is_busy {
-            "Enter queues follow-up · Ctrl+C/Esc interrupt · /queue clear drops".to_string()
-        } else {
-            "Start a turn first; queued follow-ups run in order after it finishes.".to_string()
-        },
-        if queue_paused && queued_count > 0 {
-            "Queue paused after interrupt · send a new message to resume or /queue clear to drop."
-                .to_string()
-        } else {
-            "/queue, /queue clear, /cancel, /agents, /jobs, /todo work while busy; other slash commands are not queued."
-                .to_string()
-        },
-        "/queue clear drops queued follow-ups without stopping the active turn.".to_string(),
-    ]);
-
-    json!({ "title": "Work board", "lines": lines })
-}
-
-struct WorkBoardInput<'a> {
-    is_busy: bool,
-    busy_status: Option<&'a str>,
-    queued_count: usize,
-    queued_items: &'a [(u64, String)],
-    queue_paused: bool,
-    blocked_reason: Option<&'a str>,
-    active_prompt_preview: Option<&'a str>,
-    last_completed_turn: Option<&'a str>,
-}
-
-fn parse_last_completed_turn(input: &Value) -> Option<String> {
-    let turn = input.get("lastCompletedTurn")?;
-    let user = turn.get("user").and_then(Value::as_str)?.trim();
-    let assistant = turn.get("assistant").and_then(Value::as_str)?.trim();
-    if user.is_empty() || assistant.is_empty() {
-        return None;
-    }
-    Some(format!(
-        "{} → {}",
-        compact_preview(user, 24),
-        compact_preview(assistant, 32)
-    ))
-}
-
-fn build_work_board_status_lines(
-    is_busy: bool,
-    busy_status: Option<&str>,
-    mode: Option<&str>,
-    worker_budget: Option<u64>,
-) -> Vec<String> {
-    let mut parts = Vec::new();
-    parts.push(if is_busy {
-        "State · running".to_string()
-    } else {
-        "State · idle".to_string()
-    });
-    if let Some(mode) = mode {
-        parts.push(mode.to_string());
-    }
-    if let Some(worker_budget) = worker_budget {
-        parts.push(format!("workers {worker_budget}"));
+    let state = if queue_paused {
+        "Paused"
     } else if is_busy {
-        if let Some(detail) = busy_status {
-            parts.push(detail.to_string());
-        }
-    }
-    vec![parts.join(" · ")]
-}
-
-fn build_work_board_grid_lines(input: WorkBoardInput<'_>, terminal_columns: usize) -> Vec<String> {
-    let queued = build_work_board_column(
-        "Queued",
-        input.queued_count,
-        build_queued_board_rows(input.queued_count, input.queued_items),
-    );
-    let running = build_work_board_column(
-        "Running",
-        usize::from(input.is_busy),
-        build_running_board_rows(
-            input.is_busy,
-            input.busy_status,
-            input.active_prompt_preview,
-        ),
-    );
-    let blocked = build_work_board_column(
-        "Blocked",
-        work_board_blocked_count(input.queue_paused, input.queued_count, input.blocked_reason),
-        build_blocked_board_rows(input.queue_paused, input.queued_count, input.blocked_reason),
-    );
-    let done_count = usize::from(input.last_completed_turn.is_some());
-    let done = build_work_board_column(
-        "Done",
-        done_count,
-        build_done_board_rows(input.last_completed_turn),
-    );
-
-    if terminal_columns >= 100 {
-        format_work_board_four_columns(&[queued, running, blocked, done], 22)
+        "Running"
     } else {
-        format_work_board_two_by_two(&[queued, running, blocked, done], 36)
-    }
-}
-
-struct WorkBoardColumn {
-    label: String,
-    rows: Vec<String>,
-}
-
-fn build_work_board_column(label: &str, count: usize, rows: Vec<String>) -> WorkBoardColumn {
-    WorkBoardColumn {
-        label: format!("{label} · {count}"),
-        rows,
-    }
-}
-
-fn build_queued_board_rows(queued_count: usize, queued_items: &[(u64, String)]) -> Vec<String> {
-    if queued_count == 0 {
-        return vec!["—".to_string()];
-    }
-    let mut rows = queued_items
-        .iter()
-        .take(3)
-        .map(|(id, line)| format!("#{id} {line}"))
-        .collect::<Vec<_>>();
-    if queued_count > rows.len() {
-        rows.push(format!("+{} more", queued_count - rows.len()));
-    }
-    rows
-}
-
-fn build_running_board_rows(
-    is_busy: bool,
-    busy_status: Option<&str>,
-    active_prompt_preview: Option<&str>,
-) -> Vec<String> {
-    if !is_busy {
-        return vec!["—".to_string()];
-    }
-    let mut rows = vec![format!("⠋ {}", busy_status.unwrap_or("active turn"))];
+        "Idle"
+    };
+    let mut lines = vec![format!(
+        "{state} · {total_count} total · {pending_count} pending · {in_flight_count} in flight · {requires_action_count} requires action"
+    )];
     if let Some(preview) = active_prompt_preview {
-        rows.push(compact_preview(preview, 28));
+        lines.push(format!(
+            "Current turn · {}",
+            compact_preview(preview, terminal_columns.saturating_sub(18).max(12))
+        ));
     }
-    rows
-}
-
-fn work_board_blocked_count(
-    queue_paused: bool,
-    queued_count: usize,
-    blocked_reason: Option<&str>,
-) -> usize {
-    if blocked_reason.is_some() {
-        return 1;
-    }
-    if queue_paused && queued_count > 0 {
-        return 1;
-    }
-    0
-}
-
-fn build_blocked_board_rows(
-    queue_paused: bool,
-    queued_count: usize,
-    blocked_reason: Option<&str>,
-) -> Vec<String> {
     if let Some(reason) = blocked_reason {
-        return vec![compact_preview(reason, 28)];
-    }
-    if queue_paused && queued_count > 0 {
-        return vec![format!("pause · {queued_count} queued")];
-    }
-    vec!["—".to_string()]
-}
-
-fn build_done_board_rows(last_completed_turn: Option<&str>) -> Vec<String> {
-    last_completed_turn
-        .map(|line| vec![line.to_string()])
-        .unwrap_or_else(|| vec!["—".to_string()])
-}
-
-fn format_work_board_four_columns(columns: &[WorkBoardColumn; 4], col_width: usize) -> Vec<String> {
-    let header = join_board_row(
-        &[
-            columns[0].label.as_str(),
-            columns[1].label.as_str(),
-            columns[2].label.as_str(),
-            columns[3].label.as_str(),
-        ],
-        col_width,
-    );
-    let row_count = columns
-        .iter()
-        .map(|column| column.rows.len())
-        .max()
-        .unwrap_or(1);
-    let mut lines = vec![header];
-    for row_index in 0..row_count {
-        lines.push(join_board_row(
-            &[
-                column_row_or_dash(&columns[0], row_index).as_str(),
-                column_row_or_dash(&columns[1], row_index).as_str(),
-                column_row_or_dash(&columns[2], row_index).as_str(),
-                column_row_or_dash(&columns[3], row_index).as_str(),
-            ],
-            col_width,
+        lines.push(format!(
+            "Pause reason · {}",
+            compact_preview(reason, terminal_columns.saturating_sub(18).max(12))
         ));
     }
-    lines
-}
-
-fn format_work_board_two_by_two(columns: &[WorkBoardColumn; 4], col_width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    for pair in [(0, 1), (2, 3)] {
-        lines.push(join_board_row(
-            &[
-                columns[pair.0].label.as_str(),
-                columns[pair.1].label.as_str(),
-            ],
-            col_width,
-        ));
-        let row_count = columns[pair.0].rows.len().max(columns[pair.1].rows.len());
-        for row_index in 0..row_count {
-            lines.push(join_board_row(
-                &[
-                    column_row_or_dash(&columns[pair.0], row_index).as_str(),
-                    column_row_or_dash(&columns[pair.1], row_index).as_str(),
-                ],
-                col_width,
+    lines.push(String::new());
+    if queued_items.is_empty() {
+        lines.push("Queue empty · new messages run immediately".to_string());
+    } else {
+        for (index, (id, preview, attachment_count, status, created_at, recovery_reason)) in
+            queued_items.iter().enumerate()
+        {
+            let position = if index == 0 {
+                "Next".to_string()
+            } else {
+                format!("#{}", index + 1)
+            };
+            let attachments = if *attachment_count == 0 {
+                String::new()
+            } else {
+                format!(
+                    " · {attachment_count} attachment{}",
+                    if *attachment_count == 1 { "" } else { "s" }
+                )
+            };
+            let status_label = match status.as_str() {
+                "in-flight" => "in flight",
+                "requires-action" => "requires action",
+                _ => "pending",
+            };
+            let wait = now_ms
+                .filter(|now| *created_at > 0 && *now >= *created_at)
+                .map(|now| format!(" · wait {}s", now.saturating_sub(*created_at) / 1_000))
+                .unwrap_or_default();
+            let recovery = recovery_reason
+                .as_ref()
+                .map(|reason| format!(" · {}", compact_preview(reason, 32)))
+                .unwrap_or_default();
+            lines.push(format!(
+                "{position} · id {id} · {status_label}{wait} · {preview}{attachments}{recovery}"
             ));
         }
-        if pair.0 == 0 {
-            lines.push(String::new());
-        }
     }
-    lines
-}
-
-fn column_row_or_dash(column: &WorkBoardColumn, row_index: usize) -> String {
-    column
-        .rows
-        .get(row_index)
-        .cloned()
-        .unwrap_or_else(|| "—".to_string())
-}
-
-fn join_board_row(cells: &[&str], col_width: usize) -> String {
-    cells
-        .iter()
-        .map(|cell| pad_board_cell(cell, col_width))
-        .collect::<Vec<_>>()
-        .join(" │ ")
-}
-
-fn pad_board_cell(text: &str, width: usize) -> String {
-    if display_width(text) >= width {
-        return compact_preview(text, width);
+    lines.extend([
+        String::new(),
+        "↑/↓ select · Shift+↑/↓ reorder · d remove".to_string(),
+        "c clear pending · r resume · t retry · x discard · Esc close".to_string(),
+        "/queue remove <id> · /queue move <id> up|down".to_string(),
+        "/queue clear · /queue resume".to_string(),
+        "Queue = user follow-ups · /todo = Plan/PDCA · /agents or /jobs = parallel work"
+            .to_string(),
+    ]);
+    if is_busy {
+        lines.push(
+            "Enter queues one follow-up exactly once; Esc interrupts and pauses this list."
+                .to_string(),
+        );
     }
-    pad_display_width(text, width)
+    let _ = (busy_status, mode, worker_budget);
+
+    json!({ "title": "Queue · follow-ups", "lines": lines })
 }
 
 fn context_panel(input: &Value) -> Value {
@@ -980,7 +811,8 @@ fn help_panel() -> Value {
             "/ starts commands. Tab completes.",
             "/context, /reasoning, /model, /sessions, /reload",
             "/doctor, /auth status, /auth login, /auth key, /mcp list, /mode status",
-            "/research <topic>, /research status, /review, /commit",
+            "/research <topic>, /research status, /review or /scc (Quality Engine), /scc review [focus]",
+            "/commit drafts a Lore-protocol commit message",
             "/mmbridge context, /mmbridge review, /mmbridge gate, /mmbridge handoff, /mmbridge doctor",
             "/queue, /cancel, /skills, /skill <name>, /memories, /harness, /clear, /help, /exit",
             "/remember [session|project|user|agent] <text>",
@@ -2084,7 +1916,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builds_work_board_with_backlog_and_steer_copy() {
+    fn builds_ordered_follow_up_queue_with_mutation_help() {
         let panel = queue_panel(&json!({
             "isBusy": true,
             "busyStatus": "thinking",
@@ -2094,33 +1926,34 @@ mod tests {
             "terminalColumns": 100,
             "activePromptPreview": "first active turn",
             "queuedItems": [
-                {"id": 1, "line": "first queued follow-up"},
+                {"id": 1, "line": "first queued follow-up", "attachmentCount": 2},
                 {"id": 2, "line": "second queued follow-up"}
             ]
         }));
         let lines = panel.get("lines").and_then(Value::as_array).expect("lines");
         assert_eq!(
             panel.get("title").and_then(Value::as_str),
-            Some("Work board")
+            Some("Queue · follow-ups")
         );
-        assert!(lines.iter().any(|line| line.as_str() == Some("Board")));
+        assert!(lines
+            .iter()
+            .any(|line| line.as_str().is_some_and(|value| value
+                .contains("Running · 2 total · 2 pending · 0 in flight · 0 requires action"))));
+        assert!(lines
+            .iter()
+            .any(|line| line.as_str().is_some_and(|value| value
+                .contains("Next · id 1 · pending · first queued")
+                && value.contains("2 attachments"))));
         assert!(lines.iter().any(|line| line
             .as_str()
-            .is_some_and(|value| value.contains("Queued · 2"))));
+            .is_some_and(|value| value.contains("#2 · id 2 · pending · second queued"))));
         assert!(lines.iter().any(|line| line
             .as_str()
-            .is_some_and(|value| value.contains("Running · 1"))));
-        assert!(lines.iter().any(|line| line
-            .as_str()
-            .is_some_and(|value| value.contains("#1 first queued"))));
-        assert!(lines.iter().any(|line| line == "Steer"));
-        assert!(lines.iter().any(|line| line
-            .as_str()
-            .is_some_and(|value| value.contains("Enter queues follow-up"))));
+            .is_some_and(|value| value.contains("↑/↓ select") && value.contains("d remove"))));
     }
 
     #[test]
-    fn builds_work_board_queue_paused_blocked_column() {
+    fn builds_paused_queue_with_explicit_reason_and_resume() {
         let panel = queue_panel(&json!({
             "isBusy": false,
             "queuePaused": true,
@@ -2132,19 +1965,72 @@ mod tests {
             ]
         }));
         let lines = panel.get("lines").and_then(Value::as_array).expect("lines");
+        assert!(lines
+            .iter()
+            .any(|line| line.as_str().is_some_and(|value| value
+                .contains("Paused · 2 total · 2 pending · 0 in flight · 0 requires action"))));
         assert!(lines.iter().any(|line| line
             .as_str()
-            .is_some_and(|value| value.contains("Blocked · 1"))));
-        assert!(lines.iter().any(|line| line
-            .as_str()
-            .is_some_and(|value| value.contains("pause · 2 queued"))));
-        assert!(lines.iter().any(|line| line
-            .as_str()
-            .is_some_and(|value| value.contains("Queue paused after interrupt"))));
+            .is_some_and(|value| value.contains("c clear pending · r resume"))));
     }
 
     #[test]
-    fn builds_work_board_two_by_two_layout_at_80_columns() {
+    fn queue_rows_show_age_status_and_recovery_actions() {
+        let panel = queue_panel(&json!({
+            "isBusy": false,
+            "queuedCount": 1,
+            "nowMs": 16_000,
+            "queuedItems": [
+                {
+                    "id": 7,
+                    "line": "첨부 파일을 다시 확인해 주세요",
+                    "createdAt": 1_000,
+                    "status": "requires-action",
+                    "recoveryReason": "attachment hash mismatch",
+                    "attachmentCount": 1
+                },
+                {
+                    "id": 8,
+                    "line": "실행 중이던 요청",
+                    "createdAt": 11_000,
+                    "status": "in-flight"
+                }
+            ]
+        }));
+        let text = panel["lines"]
+            .as_array()
+            .expect("lines")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("id 7 · requires action · wait 15s"));
+        assert!(text.contains("attachment hash mismatch"));
+        assert!(text.contains("id 8 · in flight · wait 5s"));
+        assert!(text.contains("t retry · x discard"));
+    }
+
+    #[test]
+    fn queue_header_derives_pending_and_recovery_counts_from_the_same_snapshot() {
+        let panel = queue_panel(&json!({
+            "isBusy": false,
+            "queuedCount": 0,
+            "queuedItems": [
+                {"id": 7, "line": "waiting for recovery", "status": "requires-action"},
+                {"id": 8, "line": "claimed before crash", "status": "in-flight"},
+                {"id": 9, "line": "ready next", "status": "pending"}
+            ]
+        }));
+        let header = panel["lines"][0].as_str().expect("header");
+        assert_eq!(
+            header,
+            "Idle · 3 total · 1 pending · 1 in flight · 1 requires action"
+        );
+        assert!(!header.contains("0 follow-ups"));
+    }
+
+    #[test]
+    fn keeps_queue_separate_from_completed_plan_work_at_80_columns() {
         let panel = queue_panel(&json!({
             "isBusy": true,
             "busyStatus": "thinking",
@@ -2156,16 +2042,13 @@ mod tests {
         let lines = panel.get("lines").and_then(Value::as_array).expect("lines");
         assert!(lines.iter().any(|line| line
             .as_str()
-            .is_some_and(|value| value.contains("Queued · 1"))));
-        assert!(!lines.iter().any(|line| line.as_str().is_some_and(|value| {
-            value.contains("Queued · 1") && value.contains("Done · 1")
+            .is_some_and(|value| value.contains("Next · id 1"))));
+        assert!(!lines.iter().any(|line| line
+            .as_str()
+            .is_some_and(|value| { value.contains("Done") || value.contains("hi → hello") })));
+        assert!(lines.iter().any(|line| line.as_str().is_some_and(|value| {
+            value.contains("Queue = user follow-ups") && value.contains("/todo = Plan/PDCA")
         })));
-        assert!(lines.iter().any(|line| line
-            .as_str()
-            .is_some_and(|value| value.contains("Done · 1"))));
-        assert!(lines.iter().any(|line| line
-            .as_str()
-            .is_some_and(|value| value.contains("hi → hello"))));
     }
 
     #[test]

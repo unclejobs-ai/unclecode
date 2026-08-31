@@ -2,9 +2,42 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { applyTraceEventToAgentConsole } from "@unclecode/orchestrator";
+import { parseAgentConsoleSnapshot } from "@unclecode/contracts";
+import { createUsageRecorder } from "./usage-recorder-fixture.mjs";
 
 const initialConsole = Object.freeze({ profileId: "build", activity: [], agents: [], jobs: [] });
 const TEST_USAGE_ROUTE = { provider: "openai", model: "gpt-5.6-sol" };
+
+test("plugin diagnostics retain canonical trust and exit status through console persistence", () => {
+  const projected = applyTraceEventToAgentConsole(initialConsole, {
+    type: "plugin.diagnostic",
+    level: "high-signal",
+    runId: "run-plugin-roundtrip",
+    source: "cached",
+    trustLane: "cached-external",
+    pluginId: "cached-reviewer",
+    pluginName: "cached-reviewer",
+    hookName: "runClassified",
+    status: "error",
+    errorName: "PluginHookError",
+    errorMessage: `Failed in /tmp/private/plugin.mjs api_key=raw-secret ${"z".repeat(400)}`,
+    exitStatus: "17",
+    dedupeKey: `sha256:${"b".repeat(64)}`,
+    startedAt: 101,
+  });
+  const resumed = parseAgentConsoleSnapshot(JSON.parse(JSON.stringify(projected)));
+  const [diagnostic] = resumed?.pluginDiagnostics ?? [];
+
+  assert.equal(diagnostic?.source, "cached");
+  assert.equal(diagnostic?.trustLane, "cached-external");
+  assert.equal(diagnostic?.pluginName, "cached-reviewer");
+  assert.equal(diagnostic?.hookName, "runClassified");
+  assert.equal(diagnostic?.exitStatus, "17");
+  assert.match(diagnostic?.errorMessage ?? "", /\[PATH\]/);
+  assert.match(diagnostic?.errorMessage ?? "", /api_key=\[REDACTED\]/);
+  assert.ok(Array.from(diagnostic?.errorMessage ?? "").length <= 240);
+  assert.doesNotMatch(JSON.stringify(resumed), /private|raw-secret/);
+});
 
 test("tool activity reducer records a safe lifecycle without raw tool output", () => {
   const running = applyTraceEventToAgentConsole(initialConsole, {
@@ -93,6 +126,7 @@ test("work lifecycle reducer projects the proposed graph and correlated task sta
     applyTraceEventToAgentConsole(initialConsole, {
       type: "work.proposed",
       graphId: "invalid",
+      startedAt: 1,
       graph: {
         id: "invalid",
         approval: "pending",
@@ -105,6 +139,7 @@ test("work lifecycle reducer projects the proposed graph and correlated task sta
   const proposed = applyTraceEventToAgentConsole(initialConsole, {
     type: "work.proposed",
     graphId: "goal-1",
+    startedAt: 2,
     graph: {
       id: "goal-1",
       goal: "Ship authentication",
@@ -143,6 +178,218 @@ test("work lifecycle reducer projects the proposed graph and correlated task sta
       status: "completed",
     }),
     running,
+  );
+});
+
+function proposalReplayEvent(graphId = "goal-proposal-replay", startedAt = 10) {
+  return {
+    type: "work.proposed",
+    graphId,
+    startedAt,
+    graph: {
+      id: graphId,
+      qualityProfile: "deep",
+      currentStage: "plan",
+      gateStatus: "unproven",
+      iteration: 0,
+      approval: "pending",
+      nodes: [{
+        id: "task-1",
+        title: "Implement auth",
+        prompt: "private executor assignment",
+        status: "proposed",
+        dependsOn: [],
+        fileOwnership: ["src/auth.ts"],
+        acceptanceCriteria: ["tests pass"],
+        evidenceRefs: [],
+        stage: "work",
+        role: "worker",
+        attempt: 0,
+        artifactRefs: [],
+        reviewRequired: true,
+      }],
+    },
+  };
+}
+
+test("an exact work proposal replay preserves snapshot identity", () => {
+  const originalProposal = proposalReplayEvent();
+  const proposed = applyTraceEventToAgentConsole(initialConsole, originalProposal);
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(proposed, structuredClone(originalProposal)),
+    proposed,
+    "an exact serialized replay must not create snapshot churn",
+  );
+});
+
+test("a completed work graph rejects stale proposals but accepts a newer iteration", () => {
+  const originalProposal = proposalReplayEvent();
+  const proposed = applyTraceEventToAgentConsole(initialConsole, originalProposal);
+  const completed = applyTraceEventToAgentConsole(proposed, {
+    type: "quality.completed",
+    runId: "run-proposal-replay",
+    graphId: "goal-proposal-replay",
+    profile: "deep",
+    stage: "promote",
+    iteration: 0,
+    decision: "unproven",
+    startedAt: 20,
+  });
+  assert.equal(completed.workGraph?.currentStage, "promote");
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(completed, structuredClone(originalProposal)),
+    completed,
+    "replaying the original proposal after completion must not regress the graph",
+  );
+
+  const newerProposal = structuredClone(originalProposal);
+  newerProposal.graph.iteration = 1;
+  newerProposal.graph.currentStage = "work";
+  newerProposal.graph.nodes[0].attempt = 1;
+  const refined = applyTraceEventToAgentConsole(completed, newerProposal);
+  assert.notStrictEqual(refined, completed);
+  assert.equal(refined.workGraph?.iteration, 1);
+  assert.equal(refined.workGraph?.currentStage, "work");
+  assert.equal(refined.workGraph?.nodes[0]?.attempt, 1);
+
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(refined, structuredClone(originalProposal)),
+    refined,
+    "an older proposal must not replace the active iteration",
+  );
+});
+
+test("a newer cross-graph proposal rejects replay of its superseded predecessor", () => {
+  const proposalA = proposalReplayEvent("graph-a", 100);
+  const proposalB = proposalReplayEvent("graph-b", 200);
+  const graphA = applyTraceEventToAgentConsole(initialConsole, proposalA);
+  const graphB = applyTraceEventToAgentConsole(graphA, proposalB);
+
+  assert.equal(graphB.workGraph?.id, "graph-b");
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(graphB, structuredClone(proposalA)),
+    graphB,
+    "A -> B -> replay A must retain B without snapshot churn",
+  );
+});
+
+test("work proposal sequence outranks timestamps and rejects an equal sequence", () => {
+  const proposalA = { ...proposalReplayEvent("graph-sequence-a", 200), sequence: 7 };
+  const proposalB = { ...proposalReplayEvent("graph-sequence-b", 100), sequence: 8 };
+  const graphA = applyTraceEventToAgentConsole(initialConsole, proposalA);
+  const graphB = applyTraceEventToAgentConsole(graphA, proposalB);
+  const restored = parseAgentConsoleSnapshot(JSON.parse(JSON.stringify(graphB)));
+
+  assert.equal(graphB.workGraph?.id, "graph-sequence-b", "the owner sequence is authoritative");
+  assert.equal(restored?.workProposalOrder?.sequence, 8);
+  assert.ok(restored);
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(restored, {
+      ...proposalReplayEvent("graph-sequence-c", 300),
+      sequence: 8,
+    }),
+    restored,
+    "a sequence already consumed by another proposal is not later",
+  );
+});
+
+test("an established work proposal sequence rejects an unsequenced timestamp bypass", () => {
+  const sequenced = applyTraceEventToAgentConsole(initialConsole, {
+    ...proposalReplayEvent("graph-sequenced", 100),
+    sequence: 9,
+  });
+
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(
+      sequenced,
+      proposalReplayEvent("graph-unsequenced-newer-time", 1_000),
+    ),
+    sequenced,
+  );
+});
+
+test("a work proposal with malformed ordering metadata is rejected", () => {
+  const current = applyTraceEventToAgentConsole(
+    initialConsole,
+    proposalReplayEvent("graph-order-valid", 100),
+  );
+  for (const startedAt of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.strictEqual(
+      applyTraceEventToAgentConsole(
+        current,
+        proposalReplayEvent(`graph-order-invalid-${startedAt}`, startedAt),
+      ),
+      current,
+    );
+  }
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(current, {
+      ...proposalReplayEvent("graph-sequence-invalid", 200),
+      sequence: -1,
+    }),
+    current,
+  );
+});
+
+test("equal-time proposal ordering survives snapshot serialization", () => {
+  const proposalA = proposalReplayEvent("graph-tie-a", 500);
+  const proposalB = proposalReplayEvent("graph-tie-b", 500);
+  const graphA = applyTraceEventToAgentConsole(initialConsole, proposalA);
+  const graphB = applyTraceEventToAgentConsole(graphA, proposalB);
+  const restored = parseAgentConsoleSnapshot(JSON.parse(JSON.stringify(graphB)));
+
+  assert.ok(restored);
+  assert.equal(restored.workGraph?.id, "graph-tie-b");
+  assert.deepEqual(restored.workProposalOrder, {
+    graphId: "graph-tie-b",
+    iteration: 0,
+    startedAt: 500,
+    superseded: [{ graphId: "graph-tie-a", iteration: 0 }],
+  });
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(restored, structuredClone(proposalA)),
+    restored,
+    "the bounded superseded identity survives restart",
+  );
+});
+
+test("work proposal superseded identities stay bounded without reopening an older timestamp", () => {
+  let snapshot = initialConsole;
+  for (let index = 0; index < 40; index += 1) {
+    snapshot = applyTraceEventToAgentConsole(
+      snapshot,
+      { ...proposalReplayEvent(`graph-bounded-${index}`, index), sequence: index },
+    );
+  }
+
+  assert.equal(snapshot.workGraph?.id, "graph-bounded-39");
+  assert.equal(snapshot.workProposalOrder?.superseded.length, 32);
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(snapshot, proposalReplayEvent("graph-bounded-0", 0)),
+    snapshot,
+  );
+});
+
+test("an evicted equal-time proposal cannot reopen a saturated legacy tie", () => {
+  let snapshot = initialConsole;
+  for (let index = 0; index < 34; index += 1) {
+    snapshot = applyTraceEventToAgentConsole(
+      snapshot,
+      proposalReplayEvent(`graph-equal-bounded-${index}`, 700),
+    );
+  }
+
+  assert.equal(snapshot.workGraph?.id, "graph-equal-bounded-33");
+  assert.equal(snapshot.workProposalOrder?.superseded.length, 32);
+  assert.equal(snapshot.workProposalOrder?.unsequencedTieSaturated, true);
+  const restored = parseAgentConsoleSnapshot(JSON.parse(JSON.stringify(snapshot)));
+  assert.ok(restored);
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(
+      restored,
+      proposalReplayEvent("graph-equal-bounded-0", 700),
+    ),
+    restored,
   );
 });
 
@@ -192,6 +439,7 @@ test("agent lifecycle reducer correlates queued jobs, runs, and terminal status"
 });
 
 test("usage reducer attributes cache telemetry once per provider event", () => {
+  const recorder = createUsageRecorder();
   const queued = applyTraceEventToAgentConsole(initialConsole, {
     type: "job.queued",
     jobId: "job-1",
@@ -220,55 +468,31 @@ test("usage reducer attributes cache telemetry once per provider event", () => {
     cacheSavingsUsd: 0.004,
     costUsd: 0.01,
   };
-  const recorded = applyTraceEventToAgentConsole(running, usageEvent);
-  const replayed = applyTraceEventToAgentConsole(recorded, usageEvent);
+  const recorded = applyTraceEventToAgentConsole(running, usageEvent, recorder);
+  const replayed = applyTraceEventToAgentConsole(recorded, usageEvent, recorder);
   const { agentRunId, ...unscopedUsageEvent } = usageEvent;
   const mainRecorded = applyTraceEventToAgentConsole(replayed, {
     ...unscopedUsageEvent,
     eventId: "usage-main",
     cacheReadTokens: 500,
-  });
+  }, recorder);
 
   assert.deepEqual(recorded.agents[0]?.usage, {
-    eventIds: ["usage-1"],
     inputTokens: 1_000,
     outputTokens: 200,
     cacheReadTokens: 750,
     cacheWriteTokens: 50,
     cacheSavingsUsd: 0.004,
     costUsd: 0.01,
-    routes: [{
-      provider: "openai",
-      model: "gpt-5.6-sol",
-      eventIds: ["usage-1"],
-      inputTokens: 1_000,
-      outputTokens: 200,
-      cacheReadTokens: 750,
-      cacheWriteTokens: 50,
-      cacheSavingsUsd: 0.004,
-      costUsd: 0.01,
-    }],
   });
   assert.deepEqual(replayed.agents[0]?.usage, recorded.agents[0]?.usage);
   assert.deepEqual(mainRecorded.mainUsage, {
-    eventIds: ["usage-main"],
     inputTokens: 1_000,
     outputTokens: 200,
     cacheReadTokens: 500,
     cacheWriteTokens: 50,
     cacheSavingsUsd: 0.004,
     costUsd: 0.01,
-    routes: [{
-      provider: "openai",
-      model: "gpt-5.6-sol",
-      eventIds: ["usage-main"],
-      inputTokens: 1_000,
-      outputTokens: 200,
-      cacheReadTokens: 500,
-      cacheWriteTokens: 50,
-      cacheSavingsUsd: 0.004,
-      costUsd: 0.01,
-    }],
   });
   const switchedModel = applyTraceEventToAgentConsole(mainRecorded, {
     type: "usage.recorded",
@@ -278,16 +502,16 @@ test("usage reducer attributes cache telemetry once per provider event", () => {
     inputTokens: 300,
     cacheReadTokens: 200,
     costUsd: 0.005,
-  });
+  }, recorder);
   assert.deepEqual(
-    switchedModel.mainUsage?.routes?.map((route) => [
+    switchedModel.totalUsage?.routes?.map((route) => [
       route.provider,
       route.model,
       route.inputTokens,
       route.cacheReadTokens,
     ]),
     [
-      ["openai", "gpt-5.6-sol", 1_000, 500],
+      ["openai", "gpt-5.6-sol", 2_000, 1_250],
       ["anthropic", "claude-sonnet-4-6", 300, 200],
     ],
   );
@@ -306,7 +530,8 @@ test("usage reducer rejects live measurements without provider and model", () =>
   assert.strictEqual(missingRoute, initialConsole);
 });
 
-test("usage reducer retains every replay identity behind lifetime totals", () => {
+test("usage reducer keeps replay identity in the owner ledger, not the projection", () => {
+  const recorder = createUsageRecorder();
   let snapshot = initialConsole;
   for (let index = 0; index < 300; index += 1) {
     snapshot = applyTraceEventToAgentConsole(snapshot, {
@@ -314,16 +539,16 @@ test("usage reducer retains every replay identity behind lifetime totals", () =>
       ...TEST_USAGE_ROUTE,
       eventId: `usage-long-${index}`,
       inputTokens: 1,
-    });
+    }, recorder);
   }
   const replayed = applyTraceEventToAgentConsole(snapshot, {
     type: "usage.recorded",
     ...TEST_USAGE_ROUTE,
     eventId: "usage-long-0",
     inputTokens: 1,
-  });
-  assert.strictEqual(replayed, snapshot);
-  assert.equal(snapshot.mainUsage?.eventIds.length, 300);
+  }, recorder);
+  assert.deepEqual(replayed, snapshot);
+  assert.doesNotMatch(JSON.stringify(snapshot), /eventIds/);
   assert.equal(snapshot.mainUsage?.inputTokens, 300);
 });
 
@@ -636,6 +861,7 @@ test("tool reducer scopes activity and current intent to the owning agent run", 
 });
 
 test("usage reducer ignores zero, negative, and non-finite counters", () => {
+  const recorder = createUsageRecorder();
   const running = applyTraceEventToAgentConsole(queuedRuntimeConsole, startedRuntimeRun);
   const noisy = applyTraceEventToAgentConsole(running, {
     type: "usage.recorded",
@@ -648,10 +874,14 @@ test("usage reducer ignores zero, negative, and non-finite counters", () => {
     cacheWriteTokens: 1.5,
     cacheSavingsUsd: Number.POSITIVE_INFINITY,
     costUsd: 0,
-  });
+  }, recorder);
   assert.deepEqual(noisy.agents[0]?.usage, {
-    eventIds: ["usage-noisy"],
-    routes: [{ ...TEST_USAGE_ROUTE, eventIds: ["usage-noisy"] }],
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    cacheSavingsUsd: 0,
+    costUsd: 0,
   });
 
   const real = applyTraceEventToAgentConsole(noisy, {
@@ -661,17 +891,14 @@ test("usage reducer ignores zero, negative, and non-finite counters", () => {
     agentRunId: "run-1",
     inputTokens: 12,
     costUsd: 0.5,
-  });
+  }, recorder);
   assert.deepEqual(real.agents[0]?.usage, {
-    eventIds: ["usage-noisy", "usage-real"],
     inputTokens: 12,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    cacheSavingsUsd: 0,
     costUsd: 0.5,
-    routes: [{
-      ...TEST_USAGE_ROUTE,
-      eventIds: ["usage-noisy", "usage-real"],
-      inputTokens: 12,
-      costUsd: 0.5,
-    }],
   });
 
   const zeroed = applyTraceEventToAgentConsole(real, {
@@ -681,17 +908,14 @@ test("usage reducer ignores zero, negative, and non-finite counters", () => {
     agentRunId: "run-1",
     inputTokens: 0,
     costUsd: 0,
-  });
+  }, recorder);
   assert.deepEqual(zeroed.agents[0]?.usage, {
-    eventIds: ["usage-noisy", "usage-real", "usage-zero"],
     inputTokens: 12,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    cacheSavingsUsd: 0,
     costUsd: 0.5,
-    routes: [{
-      ...TEST_USAGE_ROUTE,
-      eventIds: ["usage-noisy", "usage-real", "usage-zero"],
-      inputTokens: 12,
-      costUsd: 0.5,
-    }],
   });
 
   assert.strictEqual(
@@ -701,7 +925,7 @@ test("usage reducer ignores zero, negative, and non-finite counters", () => {
       eventId: "usage-orphan",
       agentRunId: "run-absent",
       inputTokens: 5,
-    }),
+    }, recorder),
     real,
     "usage for an unknown run is dropped",
   );
@@ -711,7 +935,7 @@ test("usage reducer ignores zero, negative, and non-finite counters", () => {
       ...TEST_USAGE_ROUTE,
       agentRunId: "run-1",
       inputTokens: 5,
-    }),
+    }, recorder),
     real,
     "usage without a dedupe identity is dropped",
   );
@@ -1071,6 +1295,7 @@ test("tool reducer keeps a call's established agent owner", () => {
 });
 
 test("usage reducer routes one provider event id to exactly one ledger", () => {
+  const recorder = createUsageRecorder();
   let console = applyTraceEventToAgentConsole(initialConsole, queuedRuntimeJob);
   console = applyTraceEventToAgentConsole(console, {
     ...queuedRuntimeJob,
@@ -1078,7 +1303,7 @@ test("usage reducer routes one provider event id to exactly one ledger", () => {
     jobId: "job-2",
     label: "Sweep cache",
     queuedAt: 11,
-  });
+  }, recorder);
   console = applyTraceEventToAgentConsole(console, startedRuntimeRun);
   const ready = applyTraceEventToAgentConsole(console, {
     ...startedRuntimeRun,
@@ -1095,14 +1320,14 @@ test("usage reducer routes one provider event id to exactly one ledger", () => {
     eventId: "usage-1",
     agentRunId: "run-1",
     inputTokens: 10,
-  });
+  }, recorder);
   assert.strictEqual(
     applyTraceEventToAgentConsole(scoped, {
       type: "usage.recorded",
       ...TEST_USAGE_ROUTE,
       eventId: "usage-1",
       inputTokens: 10,
-    }),
+    }, recorder),
     scoped,
     "a run-scoped event id cannot be re-charged to main usage",
   );
@@ -1113,7 +1338,7 @@ test("usage reducer routes one provider event id to exactly one ledger", () => {
       eventId: "usage-1",
       agentRunId: "run-2",
       inputTokens: 10,
-    }),
+    }, recorder),
     scoped,
     "a run-scoped event id cannot be re-charged to another run",
   );
@@ -1123,7 +1348,7 @@ test("usage reducer routes one provider event id to exactly one ledger", () => {
     ...TEST_USAGE_ROUTE,
     eventId: "usage-2",
     inputTokens: 7,
-  });
+  }, recorder);
   assert.strictEqual(
     applyTraceEventToAgentConsole(main, {
       type: "usage.recorded",
@@ -1131,13 +1356,14 @@ test("usage reducer routes one provider event id to exactly one ledger", () => {
       eventId: "usage-2",
       agentRunId: "run-1",
       inputTokens: 7,
-    }),
+    }, recorder),
     main,
     "a main-charged event id cannot be re-charged to a run",
   );
 });
 
 test("usage reducer rejects a present but malformed scope instead of charging main usage", () => {
+  const recorder = createUsageRecorder();
   const running = applyTraceEventToAgentConsole(queuedRuntimeConsole, startedRuntimeRun);
 
   const malformedScopes = ["   ", "", 42, null, {}, undefined];
@@ -1149,7 +1375,7 @@ test("usage reducer rejects a present but malformed scope instead of charging ma
         eventId: `usage-bad-${index}`,
         agentRunId,
         inputTokens: 5,
-      }),
+      }, recorder),
       running,
       `a present but invalid scope (${JSON.stringify(agentRunId)}) must not charge main usage`,
     );
@@ -1160,11 +1386,14 @@ test("usage reducer rejects a present but malformed scope instead of charging ma
     ...TEST_USAGE_ROUTE,
     eventId: "usage-absent",
     inputTokens: 5,
-  });
+  }, recorder);
   assert.deepEqual(absent.mainUsage, {
-    eventIds: ["usage-absent"],
     inputTokens: 5,
-    routes: [{ ...TEST_USAGE_ROUTE, eventIds: ["usage-absent"], inputTokens: 5 }],
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    cacheSavingsUsd: 0,
+    costUsd: 0,
   });
 
   const explicitlyUndefined = applyTraceEventToAgentConsole(running, {
@@ -1173,7 +1402,7 @@ test("usage reducer rejects a present but malformed scope instead of charging ma
     eventId: "usage-undefined",
     agentRunId: undefined,
     inputTokens: 5,
-  });
+  }, recorder);
   assert.strictEqual(
     explicitlyUndefined,
     running,
@@ -1184,6 +1413,7 @@ test("usage reducer rejects a present but malformed scope instead of charging ma
 });
 
 test("usage reducer still books a settled run's closing measurement", () => {
+  const recorder = createUsageRecorder();
   const running = applyTraceEventToAgentConsole(queuedRuntimeConsole, startedRuntimeRun);
   const settled = applyTraceEventToAgentConsole(running, {
     type: "agent.run.settled",
@@ -1204,23 +1434,21 @@ test("usage reducer still books a settled run's closing measurement", () => {
     agentRunId: "run-1",
     inputTokens: 42,
     costUsd: 0.02,
-  });
+  }, recorder);
   assert.deepEqual(closing.agents[0]?.usage, {
-    eventIds: ["usage-closing"],
     inputTokens: 42,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    cacheSavingsUsd: 0,
     costUsd: 0.02,
-    routes: [{
-      ...TEST_USAGE_ROUTE,
-      eventIds: ["usage-closing"],
-      inputTokens: 42,
-      costUsd: 0.02,
-    }],
   });
   assert.equal(closing.agents[0]?.status, "completed");
   assert.equal(closing.mainUsage, undefined, "a settled run's usage never falls through to main");
 });
 
 test("usage reducer refuses measurements it could not persist", () => {
+  const recorder = createUsageRecorder();
   const running = applyTraceEventToAgentConsole(queuedRuntimeConsole, startedRuntimeRun);
 
   assert.strictEqual(
@@ -1230,7 +1458,7 @@ test("usage reducer refuses measurements it could not persist", () => {
       eventId: "usage-huge",
       agentRunId: "run-1",
       inputTokens: Number.MAX_SAFE_INTEGER + 2,
-    }),
+    }, recorder),
     running,
     "a token count past the safe-integer range is rejected outright",
   );
@@ -1241,7 +1469,7 @@ test("usage reducer refuses measurements it could not persist", () => {
     eventId: "usage-near",
     agentRunId: "run-1",
     inputTokens: Number.MAX_SAFE_INTEGER - 1,
-  });
+  }, recorder);
   assert.equal(near.agents[0]?.usage?.inputTokens, Number.MAX_SAFE_INTEGER - 1);
   assert.ok(Number.isSafeInteger(near.agents[0]?.usage?.inputTokens));
   assert.strictEqual(
@@ -1251,7 +1479,7 @@ test("usage reducer refuses measurements it could not persist", () => {
       eventId: "usage-tip",
       agentRunId: "run-1",
       inputTokens: 10,
-    }),
+    }, recorder),
     near,
     "a token total that would leave the safe-integer range is rejected",
   );
@@ -1262,7 +1490,7 @@ test("usage reducer refuses measurements it could not persist", () => {
     eventId: "usage-heavy",
     agentRunId: "run-1",
     costUsd: 1e308,
-  });
+  }, recorder);
   assert.equal(heavy.agents[0]?.usage?.costUsd, 1e308);
   assert.ok(Number.isFinite(heavy.agents[0]?.usage?.costUsd));
   assert.strictEqual(
@@ -1272,7 +1500,7 @@ test("usage reducer refuses measurements it could not persist", () => {
       eventId: "usage-heavier",
       agentRunId: "run-1",
       costUsd: 1e308,
-    }),
+    }, recorder),
     heavy,
     "a monetary total that would stop being finite is rejected",
   );
@@ -1374,6 +1602,7 @@ test("work lifecycle reducer keeps terminal node statuses monotonic", () => {
   const proposed = applyTraceEventToAgentConsole(initialConsole, {
     type: "work.proposed",
     graphId: "goal-1",
+    startedAt: 3,
     graph: {
       id: "goal-1",
       approval: "pending",
@@ -1437,6 +1666,385 @@ test("work lifecycle reducer keeps terminal node statuses monotonic", () => {
     completed,
     "an unknown node changes nothing",
   );
+});
+
+test("quality traces project stage, gate, iteration, node attempt, and artifacts into resume state", () => {
+  const proposed = applyTraceEventToAgentConsole(initialConsole, {
+    type: "work.proposed",
+    graphId: "goal-quality",
+    startedAt: 4,
+    graph: {
+      id: "goal-quality",
+      qualityProfile: "standard",
+      currentStage: "plan",
+      gateStatus: "unproven",
+      iteration: 0,
+      approval: "approved",
+      nodes: [{
+        id: "task-1",
+        title: "Implement auth",
+        prompt: "private executor assignment",
+        status: "running",
+        dependsOn: [],
+        fileOwnership: ["src/auth.ts"],
+        acceptanceCriteria: ["tests pass"],
+        evidenceRefs: [],
+        stage: "work",
+        role: "worker",
+        attempt: 0,
+        artifactRefs: [],
+        reviewRequired: true,
+      }],
+    },
+  });
+  const started = applyTraceEventToAgentConsole(proposed, {
+    type: "quality.stage_started",
+    runId: "run-quality",
+    graphId: "goal-quality",
+    profile: "standard",
+    stage: "work",
+    iteration: 1,
+    nodeId: "task-1",
+    nodeAttempt: 1,
+    startedAt: 10,
+  });
+  const gated = applyTraceEventToAgentConsole(started, {
+    type: "quality.gate_evaluated",
+    runId: "run-quality",
+    graphId: "goal-quality",
+    profile: "standard",
+    stage: "work",
+    iteration: 2,
+    decision: "refine",
+    nodeId: "task-1",
+    nodeAttempt: 2,
+    artifactRefs: [".unclecode/artifacts/run-quality/task-1-attempt-2.json"],
+    artifactHash: "sha256:worker-v2",
+    reviewedArtifactHash: "sha256:manifest-reviewed",
+    currentArtifactHash: "sha256:manifest-current",
+    evidenceRefs: ["evidence:test-output"],
+    failures: ["critic found stale behavior"],
+    reason: "Critic found stale behavior in the Korean queue path.",
+    refineCount: 1,
+    pivotCount: 0,
+    provider: "anthropic",
+    model: "claude-review",
+    route: "frontier",
+    reviewerRunId: "review-run-critic-2",
+    stale: false,
+    independentVerification: true,
+    startedAt: 20,
+  });
+  assert.ok(gated.qualityReview, "quality review must be projected before persistence");
+  const resumed = parseAgentConsoleSnapshot(JSON.parse(JSON.stringify(gated)));
+
+  assert.equal(resumed?.workGraph?.currentStage, "work");
+  assert.equal(resumed?.workGraph?.gateStatus, "refine");
+  assert.equal(resumed?.workGraph?.iteration, 2);
+  assert.equal(resumed?.workGraph?.nodes[0]?.attempt, 2);
+  assert.deepEqual(resumed?.workGraph?.nodes[0]?.artifactRefs, [
+    ".unclecode/artifacts/run-quality/task-1-attempt-2.json",
+  ]);
+  assert.deepEqual(resumed?.qualityReview, {
+    runId: "run-quality",
+    graphId: "goal-quality",
+    profile: "standard",
+    currentStage: "work",
+    iteration: 2,
+    refineCount: 1,
+    pivotCount: 0,
+    latestDecision: "refine",
+    history: [{
+      event: "gate",
+      stage: "work",
+      decision: "refine",
+      iteration: 2,
+      reason: "Critic found stale behavior in the Korean queue path.",
+      failures: ["critic found stale behavior"],
+      evidenceRefs: ["evidence:test-output"],
+      artifactRefs: [".unclecode/artifacts/run-quality/task-1-attempt-2.json"],
+      artifactHash: "sha256:worker-v2",
+      reviewedArtifactHash: "sha256:manifest-reviewed",
+      currentArtifactHash: "sha256:manifest-current",
+      reviewerId: "work:anthropic:claude-review",
+      reviewerRunId: "review-run-critic-2",
+      provider: "anthropic",
+      model: "claude-review",
+      route: "frontier",
+      independentVerification: true,
+      stale: false,
+      startedAt: 20,
+    }],
+  });
+
+  const requested = applyTraceEventToAgentConsole(resumed, {
+    type: "quality.refine_requested",
+    runId: "run-quality",
+    graphId: "goal-quality",
+    profile: "standard",
+    stage: "work",
+    iteration: 3,
+    decision: "refine",
+    count: 2,
+    limit: 3,
+    reason: "Same plan, another bounded correction.",
+    startedAt: 25,
+  });
+  const resumedRequest = parseAgentConsoleSnapshot(JSON.parse(JSON.stringify(requested)));
+  assert.equal(resumedRequest?.qualityReview?.refineCount, 2);
+  assert.equal(resumedRequest?.qualityReview?.history.at(-1)?.event, "refine");
+  assert.equal(resumedRequest?.qualityReview?.history.at(-1)?.count, 2);
+  assert.equal(resumedRequest?.qualityReview?.history.at(-1)?.limit, 3);
+
+  const completed = applyTraceEventToAgentConsole(resumed, {
+    type: "quality.completed",
+    runId: "run-quality",
+    graphId: "goal-quality",
+    profile: "standard",
+    stage: "promote",
+    iteration: 3,
+    decision: "unproven",
+    startedAt: 30,
+    completedAt: 31,
+  });
+  assert.equal(completed.workGraph?.currentStage, "promote");
+  assert.equal(completed.workGraph?.gateStatus, "unproven");
+  assert.equal(completed.workGraph?.iteration, 3);
+  assert.equal(completed.qualityReview?.history.length, 2);
+  assert.equal(completed.qualityReview?.history.at(-1)?.event, "completed");
+  assert.equal(completed.qualityReview?.latestDecision, "unproven");
+});
+
+test("quality completion preserves only proven critic provenance and bounded artifacts", () => {
+  const criticStarted = applyTraceEventToAgentConsole(initialConsole, {
+    type: "quality.stage_started",
+    runId: "run-quality-terminal",
+    graphId: "goal-quality-terminal",
+    profile: "deep",
+    stage: "critic",
+    iteration: 3,
+    startedAt: 10,
+  });
+  const criticGate = applyTraceEventToAgentConsole(criticStarted, {
+    type: "quality.gate_evaluated",
+    runId: "run-quality-terminal",
+    graphId: "goal-quality-terminal",
+    profile: "deep",
+    stage: "critic",
+    iteration: 3,
+    decision: "proceed",
+    evidenceRefs: ["run.json", "critic.json"],
+    artifactRefs: ["critic-artifact.json"],
+    artifactHash: "sha256:verified",
+    reviewedArtifactHash: "sha256:verified",
+    currentArtifactHash: "sha256:verified",
+    provider: "anthropic",
+    model: "claude-review",
+    route: "frontier",
+    reviewerRunId: "critic-run-3",
+    independentVerification: true,
+    stale: false,
+    startedAt: 20,
+  });
+  const promoteStarted = applyTraceEventToAgentConsole(criticGate, {
+    type: "quality.stage_started",
+    runId: "run-quality-terminal",
+    graphId: "goal-quality-terminal",
+    profile: "deep",
+    stage: "promote",
+    iteration: 3,
+    startedAt: 30,
+  });
+  const completed = applyTraceEventToAgentConsole(promoteStarted, {
+    type: "quality.completed",
+    runId: "run-quality-terminal",
+    graphId: "goal-quality-terminal",
+    profile: "deep",
+    stage: "promote",
+    iteration: 3,
+    decision: "proceed",
+    evidenceRefs: ["run.json"],
+    independentVerification: true,
+    startedAt: 40,
+  });
+  const terminal = completed.qualityReview?.history.at(-1);
+  assert.equal(terminal?.independentVerification, true);
+  assert.equal(terminal?.reviewerRunId, "critic-run-3");
+  assert.equal(terminal?.provider, "anthropic");
+  assert.equal(terminal?.model, "claude-review");
+  assert.equal(terminal?.route, "frontier");
+  assert.equal(terminal?.artifactHash, "sha256:verified");
+  assert.deepEqual(terminal?.artifactRefs, [
+    "run.json",
+    "critic-artifact.json",
+    "critic.json",
+  ]);
+
+  const staleGate = applyTraceEventToAgentConsole(criticStarted, {
+    type: "quality.gate_evaluated",
+    runId: "run-quality-terminal",
+    graphId: "goal-quality-terminal",
+    profile: "deep",
+    stage: "critic",
+    iteration: 3,
+    decision: "proceed",
+    reviewerRunId: "critic-run-stale",
+    independentVerification: true,
+    stale: true,
+    startedAt: 21,
+  });
+  const stalePromote = applyTraceEventToAgentConsole(staleGate, {
+    type: "quality.stage_started",
+    runId: "run-quality-terminal",
+    graphId: "goal-quality-terminal",
+    profile: "deep",
+    stage: "promote",
+    iteration: 3,
+    startedAt: 31,
+  });
+  const unproven = applyTraceEventToAgentConsole(stalePromote, {
+    type: "quality.completed",
+    runId: "run-quality-terminal",
+    graphId: "goal-quality-terminal",
+    profile: "deep",
+    stage: "promote",
+    iteration: 3,
+    decision: "unproven",
+    independentVerification: true,
+    startedAt: 41,
+  }).qualityReview?.history.at(-1);
+  assert.equal(unproven?.independentVerification, false);
+  assert.equal(unproven?.reviewerRunId, undefined);
+  assert.deepEqual(unproven?.artifactRefs, []);
+});
+
+test("quality projection is idempotent across live and restored trace replay", () => {
+  const stage = {
+    type: "quality.stage_started",
+    runId: "run-replay",
+    graphId: "graph-replay",
+    profile: "deep",
+    stage: "work",
+    iteration: 0,
+    startedAt: 10,
+  };
+  let snapshot = applyTraceEventToAgentConsole(initialConsole, stage);
+  assert.strictEqual(applyTraceEventToAgentConsole(snapshot, stage), snapshot);
+
+  const events = [
+    {
+      type: "quality.gate_evaluated",
+      runId: "run-replay",
+      graphId: "graph-replay",
+      profile: "deep",
+      stage: "work",
+      iteration: 0,
+      decision: "proceed",
+      artifactHash: "sha256:worker",
+      startedAt: 20,
+    },
+    {
+      type: "quality.refine_requested",
+      runId: "run-replay",
+      graphId: "graph-replay",
+      profile: "deep",
+      stage: "critic",
+      iteration: 1,
+      decision: "refine",
+      count: 1,
+      limit: 3,
+      startedAt: 30,
+    },
+    {
+      type: "quality.pivot_requested",
+      runId: "run-replay",
+      graphId: "graph-replay",
+      profile: "deep",
+      stage: "critic",
+      iteration: 2,
+      decision: "pivot",
+      count: 1,
+      limit: 2,
+      startedAt: 40,
+    },
+    {
+      type: "quality.completed",
+      runId: "run-replay",
+      graphId: "graph-replay",
+      profile: "deep",
+      stage: "promote",
+      iteration: 2,
+      decision: "unproven",
+      startedAt: 50,
+    },
+  ];
+
+  for (const event of events) {
+    snapshot = applyTraceEventToAgentConsole(snapshot, event);
+    assert.strictEqual(applyTraceEventToAgentConsole(snapshot, event), snapshot);
+    const restored = parseAgentConsoleSnapshot(JSON.parse(JSON.stringify(snapshot)));
+    assert.ok(restored);
+    assert.strictEqual(applyTraceEventToAgentConsole(restored, event), restored);
+  }
+  assert.deepEqual(snapshot.qualityReview?.history.map(({ event }) => event), [
+    "gate", "refine", "pivot", "completed",
+  ]);
+});
+
+test("quality projection cannot regress a stage or overwrite same-iteration completion", () => {
+  const critic = applyTraceEventToAgentConsole(initialConsole, {
+    type: "quality.stage_started",
+    runId: "run-monotonic",
+    graphId: "graph-monotonic",
+    profile: "deep",
+    stage: "critic",
+    iteration: 3,
+    startedAt: 30,
+  });
+  const promote = applyTraceEventToAgentConsole(critic, {
+    type: "quality.stage_started",
+    runId: "run-monotonic",
+    graphId: "graph-monotonic",
+    profile: "deep",
+    stage: "promote",
+    iteration: 3,
+    startedAt: 40,
+  });
+
+  for (const stage of ["work", "critic"]) {
+    assert.strictEqual(applyTraceEventToAgentConsole(promote, {
+      type: "quality.stage_started",
+      runId: "run-monotonic",
+      graphId: "graph-monotonic",
+      profile: "deep",
+      stage,
+      iteration: 3,
+      startedAt: 20,
+    }), promote);
+  }
+
+  const completed = applyTraceEventToAgentConsole(promote, {
+    type: "quality.completed",
+    runId: "run-monotonic",
+    graphId: "graph-monotonic",
+    profile: "deep",
+    stage: "promote",
+    iteration: 3,
+    decision: "unproven",
+    startedAt: 50,
+  });
+  assert.strictEqual(applyTraceEventToAgentConsole(completed, {
+    type: "quality.gate_evaluated",
+    runId: "run-monotonic",
+    graphId: "graph-monotonic",
+    profile: "deep",
+    stage: "promote",
+    iteration: 3,
+    decision: "block",
+    startedAt: 60,
+  }), completed);
+  assert.equal(completed.qualityReview?.currentStage, "promote");
+  assert.equal(completed.qualityReview?.latestDecision, "unproven");
 });
 
 test("agent lifecycle reducer accepts run events only against the job the run owns", () => {

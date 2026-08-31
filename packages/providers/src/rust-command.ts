@@ -10,18 +10,19 @@ let cachedRustEntrypoint: { command: string; argsPrefix: string[]; runCwd?: stri
 
 export type RunRustCommandOptions = {
   readonly signal?: AbortSignal | undefined;
+  readonly forceKillDelayMs?: number | undefined;
 };
 
-function killChildProcess(child: ReturnType<typeof spawn>): void {
+function signalChildProcess(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {
   if (process.platform !== "win32" && child.pid) {
     try {
-      process.kill(-child.pid);
+      process.kill(-child.pid, signal);
       return;
     } catch {
       // Fall back to killing the direct child if process-group signalling is unavailable.
     }
   }
-  child.kill();
+  child.kill(signal);
 }
 
 function findWorkspaceRoot(start: string): string | undefined {
@@ -104,6 +105,37 @@ function findRustEntrypoint(): { command: string; argsPrefix: string[]; runCwd?:
   return cachedRustEntrypoint;
 }
 
+function resolveLauncherEnvironment(): NodeJS.ProcessEnv {
+  const keys = process.platform === "win32"
+    ? ["PATH", "PATHEXT", "SystemRoot", "ComSpec"]
+    : ["PATH"];
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of keys) {
+    const value = process.env[key];
+    if (value !== undefined) {
+      env[key] = value;
+    }
+  }
+  return env;
+}
+
+function resolveChildEnvironment(env: NodeJS.ProcessEnv, cwd: string): NodeJS.ProcessEnv {
+  const childEnv: NodeJS.ProcessEnv = {};
+  for (const source of [resolveLauncherEnvironment(), env, { UNCLECODE_WORK_CWD: cwd }]) {
+    for (const [key, value] of Object.entries(source)) {
+      if (process.platform === "win32") {
+        for (const existingKey of Object.keys(childEnv)) {
+          if (existingKey.toLowerCase() === key.toLowerCase()) {
+            delete childEnv[existingKey];
+          }
+        }
+      }
+      childEnv[key] = value;
+    }
+  }
+  return childEnv;
+}
+
 export async function runRustCommand(
   args: readonly string[],
   cwd: string,
@@ -112,7 +144,7 @@ export async function runRustCommand(
   options: RunRustCommandOptions = {},
 ): Promise<string> {
   const rust = findRustEntrypoint();
-  const childEnv = { ...process.env, ...env, UNCLECODE_WORK_CWD: cwd };
+  const childEnv = resolveChildEnvironment(env, cwd);
   if (stdin !== undefined) {
     return await new Promise((resolvePromise, reject) => {
       if (options.signal?.aborted) {
@@ -127,6 +159,8 @@ export async function runRustCommand(
         stdio: ["pipe", "pipe", "pipe"],
       });
       let settled = false;
+      let aborted = false;
+      let forceTimer: NodeJS.Timeout | undefined;
       let stdout = "";
       let stderr = "";
       const settle = (kind: "resolve" | "reject", value: string | Error) => {
@@ -134,6 +168,7 @@ export async function runRustCommand(
           return;
         }
         settled = true;
+        if (forceTimer) clearTimeout(forceTimer);
         options.signal?.removeEventListener("abort", onAbort);
         if (kind === "resolve") {
           resolvePromise(String(value));
@@ -142,8 +177,15 @@ export async function runRustCommand(
         reject(value);
       };
       const onAbort = () => {
-        killChildProcess(child);
-        settle("reject", createAbortError());
+        if (aborted) return;
+        aborted = true;
+        signalChildProcess(child, "SIGTERM");
+        forceTimer = setTimeout(() => {
+          if (child.exitCode === null && child.signalCode === null) {
+            signalChildProcess(child, "SIGKILL");
+          }
+        }, Math.max(0, options.forceKillDelayMs ?? 2_000));
+        forceTimer.unref();
       };
       options.signal?.addEventListener("abort", onAbort, { once: true });
       child.stdout.setEncoding("utf8");
@@ -156,6 +198,10 @@ export async function runRustCommand(
       });
       child.on("error", (error) => settle("reject", error));
       child.on("close", (code) => {
+        if (aborted) {
+          settle("reject", createAbortError());
+          return;
+        }
         if (code === 0) {
           settle("resolve", stdout);
           return;
@@ -196,7 +242,7 @@ export function runRustCommandSync(
   stdin?: string,
 ): string {
   const rust = findRustEntrypoint();
-  const childEnv = { ...process.env, ...env, UNCLECODE_WORK_CWD: cwd };
+  const childEnv = resolveChildEnvironment(env, cwd);
   try {
     return execFileSync(rust.command, [...rust.argsPrefix, ...args], {
       cwd: rust.runCwd ?? cwd,

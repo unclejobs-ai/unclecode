@@ -121,7 +121,7 @@ async function captureDashboardFrame(initialView, columns = 120) {
         Box,
         { flexDirection: "column" },
         React.createElement(Text, null, "Work composer"),
-        React.createElement(Text, null, "Ctrl+O context"),
+        React.createElement(Text, null, "Ctrl+O tool history"),
       ),
   });
 
@@ -300,7 +300,7 @@ async function captureDashboardAfterInputs(inputs, options = {}) {
 
   const calls = [];
   let workPaneLabel = "Work composer";
-  let workPaneContext = "Ctrl+O context";
+  let workPaneContext = "Ctrl+O tool history";
   const element = createDashboardElement({
     workspaceRoot: process.cwd(),
     modeLabel: "default",
@@ -379,14 +379,14 @@ function OpenSessionsOnMount(props) {
     Box,
     { flexDirection: "column" },
     React.createElement(Text, null, "Work composer"),
-    React.createElement(Text, null, "Ctrl+O context"),
+    React.createElement(Text, null, "Ctrl+O tool history"),
   );
 }
 
 test("dashboard renders distinct Work, History, and MCP pages", async () => {
   const work = await captureDashboardFrame("work");
   assert.match(work, /Work composer/);
-  assert.match(work, /Ctrl\+O context/);
+  assert.match(work, /Ctrl\+O tool history/);
 
   const history = await captureDashboardFrame("sessions");
   assert.match(history, /work context/);
@@ -439,7 +439,7 @@ test("History Enter resumes the selected conversation through the embedded Work 
   );
 });
 
-test("session center number keys expose all three Ctrl+O sections", async () => {
+test("session center number keys expose all three top-level sections", async () => {
   const work = await runDashboardInputScenario("1");
   assert.match(work.frame, /Work detail/);
   assert.match(work.frame, /W\s+Work/);
@@ -474,7 +474,7 @@ test("session center shortcuts only fire actions visible in the active palette",
   assert.match(visibleMcp.frame, /ran mcp-list/);
 });
 
-test("embedded session center keeps numeric tabs and three shortcut actions working from Ctrl+O History", async () => {
+test("embedded session center keeps numeric tabs and three shortcut actions working from History", async () => {
   const mcp = await captureDashboardAfterInputs(["3"]);
   assert.match(mcp.output, /MCP detail/);
   assert.match(mcp.output, /Selected server/);
@@ -488,7 +488,7 @@ test("embedded session center keeps numeric tabs and three shortcut actions work
 
   const work = await captureDashboardAfterInputs(["1"]);
   assert.match(work.output, /Work composer/);
-  assert.match(work.output, /Ctrl\+O context/);
+  assert.match(work.output, /Ctrl\+O tool history/);
 
   const mcpShortcut = await captureDashboardAfterInputs(["m"]);
   assert.match(mcpShortcut.output, /MCP detail/);
@@ -502,7 +502,7 @@ test("embedded session center keeps numeric tabs and three shortcut actions work
   assert.match(workShortcut.output, /Work composer/);
 });
 
-test("embedded work Ctrl+O opens History even when context refresh fails", async () => {
+test("embedded work can explicitly open History even when context refresh fails", async () => {
   const opened = await captureDashboardAfterInputs([], {
     props: {
       initialView: "work",
@@ -519,7 +519,7 @@ test("embedded work Ctrl+O opens History even when context refresh fails", async
   assert.doesNotMatch(
     opened.output,
     /Work context is automatic/,
-    "Ctrl+O from Work pane must open History, not the removed Context/research view",
+    "the explicit session request must open History, not the removed Context/research view",
   );
   assert.ok(
     opened.output.lastIndexOf("Conversation") >

@@ -225,7 +225,7 @@ fn query_provider(
 ) -> Result<ModelResponse, String> {
     let messages_json = serde_json::to_string(messages).map_err(|error| error.to_string())?;
     let raw = match input.runtime.as_str() {
-        "openai" => run_openai_chat_query_json(
+        "openai" | "deepseek" => run_openai_chat_query_json(
             &input.api_key,
             &input.model,
             "",

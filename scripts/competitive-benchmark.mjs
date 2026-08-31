@@ -13,6 +13,13 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  RuntimeOwnerClient,
+  defaultRuntimeOwnerPaths,
+  probeRuntimeOwner,
+  processStartIdentity,
+  readRuntimeOwnerLease,
+} from "@unclecode/server";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.resolve(path.dirname(SCRIPT_PATH), "..");
@@ -25,6 +32,10 @@ const DEFAULT_REPORT_PATH = path.join(
   "latest.json",
 );
 const OUTPUT_CAP_BYTES = 64 * 1024;
+const OWNER_POLL_INTERVAL_MS = 50;
+const OWNER_STOP_TIMEOUT_MS = 5_000;
+const MAX_BENCHMARK_APPROVALS = 32;
+const OWNER_SESSION_DISCOVERY_TIMEOUT_MS = 2_000;
 
 export function buildWindowsTreeKillArgs(pid) {
   if (!Number.isSafeInteger(pid) || pid <= 0) {
@@ -57,6 +68,8 @@ const BENCHMARK_ENV_KEYS = [
   "XDG_DATA_HOME",
   "XDG_CACHE_HOME",
   "CODEX_HOME",
+  "PI_CODING_AGENT_DIR",
+  "OMP_PROFILE",
   "OPENAI_API_KEY",
   "OPENAI_BASE_URL",
   "OPENAI_API_BASE_URL",
@@ -112,8 +125,47 @@ export function validateBenchmarkSuite(suite) {
         validateRelativePath(check.path, `check path for ${task.id}`);
       }
     }
+    const approvalPolicy = task.approvalPolicy ?? { tools: [], shellCommands: [] };
+    if (
+      !Array.isArray(approvalPolicy.tools)
+      || approvalPolicy.tools.some((tool) => tool !== "write_file")
+      || !Array.isArray(approvalPolicy.shellCommands)
+      || approvalPolicy.shellCommands.some((command) => typeof command !== "string")
+    ) {
+      throw new Error(`Benchmark task ${task.id} has an unsafe approval policy`);
+    }
+    const checkedCommands = new Set(task.checks
+      .filter((check) => check.kind === "command")
+      .map((check) => [check.command, ...(check.args ?? [])].join(" ")));
+    const fixturePaths = new Set(Object.keys(task.files));
+    if (
+      approvalPolicy.shellCommands.some((command) =>
+        !benchmarkShellCommandIsFixtureScoped(command, checkedCommands, fixturePaths)
+      )
+    ) {
+      throw new Error(
+        `Benchmark task ${task.id} may approve only exact checked commands or fixture-scoped hashes`,
+      );
+    }
   }
   return suite;
+}
+
+function benchmarkShellCommandIsFixtureScoped(command, checkedCommands, fixturePaths) {
+  if (typeof command !== "string" || command.length === 0) return false;
+  const clauses = command.split(" && ");
+  if (clauses.join(" && ") !== command) return false;
+  return clauses.every((clause) => {
+    if (!/^[A-Za-z0-9_./-]+(?: [A-Za-z0-9_./-]+)*$/u.test(clause)) return false;
+    if (checkedCommands.has(clause)) return true;
+    const tokens = clause.split(" ");
+    if (tokens.length < 2 || tokens.some((token) => token.length === 0)) return false;
+    const [program, ...files] = tokens;
+    if (program !== "sha256sum" && !(program === "shasum" && files.shift() === "-a" && files.shift() === "256")) {
+      return false;
+    }
+    return files.length > 0 && files.every((file) => fixturePaths.has(file));
+  });
 }
 
 export async function evaluateBenchmarkChecks(workspace, checks) {
@@ -172,6 +224,211 @@ export function buildBenchmarkSummary(results) {
   return summary;
 }
 
+export function formatBenchmarkFailureSummary(report) {
+  return report.results
+    .filter((result) => result.status !== "pass")
+    .map((result) => {
+      const failedChecks = (result.checks ?? [])
+        .filter((check) => !check.passed)
+        .map((check) => check.detail)
+        .filter(Boolean);
+      const detail = failedChecks.length > 0 ? ` (${failedChecks.join("; ")})` : "";
+      return `${result.system}/${result.taskId}: ${result.status}${detail}`;
+    });
+}
+
+export function benchmarkProcessResult(report, reportPath) {
+  const failureSummary = [];
+  if (!existsSync(reportPath)) failureSummary.push(`report missing: ${reportPath}`);
+  failureSummary.push(...formatBenchmarkFailureSummary(report));
+  const cleanup = report.runtimeOwnerCleanup;
+  if (
+    cleanup?.status !== "pass"
+    || cleanup.leaseRemoved !== true
+    || cleanup.listenerClosed !== true
+  ) {
+    failureSummary.push(
+      `runtime owner cleanup: ${cleanup?.detail ?? "cleanup evidence missing or incomplete"}`,
+    );
+  }
+  const complete = report.summary.total > 0
+    && report.summary.pass === report.summary.total
+    && report.results.length === report.summary.total;
+  if (!complete && failureSummary.length === 0) {
+    failureSummary.push(
+      `summary mismatch: ${report.summary.pass}/${report.summary.total} required cases passed`,
+    );
+  }
+  return {
+    exitCode: complete && failureSummary.length === 0 ? 0 : 1,
+    failureSummary,
+  };
+}
+
+function exactWorkspace(left, right) {
+  return path.resolve(left) === path.resolve(right);
+}
+
+function pendingDecisionFromState(state) {
+  const pending = state?.agentConsole?.pendingDecision;
+  return pending && typeof pending === "object" ? pending : undefined;
+}
+
+function terminalState(state) {
+  const lifecycle = state?.turnLifecycle?.state;
+  return pendingDecisionFromState(state) === undefined
+    && state?.isBusy !== true
+    && (lifecycle === "completed" || lifecycle === "cancelled");
+}
+
+function approvalIsAllowed(pending, approvalPolicy) {
+  if (pending?.kind !== "security-approval" || typeof pending.id !== "string") return false;
+  if (
+    typeof pending.title === "string"
+    && approvalPolicy.tools.some((tool) => pending.title === `Security approval · ${tool}`)
+  ) {
+    return true;
+  }
+  const question = pending.questions?.[0]?.question;
+  return typeof question === "string"
+    && approvalPolicy.shellCommands.some((command) =>
+      question.includes(`Exact command: ${JSON.stringify(command)}.`)
+    );
+}
+
+export async function driveUncleCodeBenchmarkApprovals(input) {
+  const sleep = input.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const deadline = Date.now() + input.timeoutMs;
+  const discoveryDeadline = Math.min(
+    deadline,
+    Date.now() + (input.sessionDiscoveryTimeoutMs ?? OWNER_SESSION_DISCOVERY_TIMEOUT_MS),
+  );
+  let approvals = 0;
+  while (Date.now() <= deadline) {
+    const sessions = await input.client.listRuntimeSessions();
+    const session = sessions.find((candidate) => exactWorkspace(candidate.projectPath, input.workspace));
+    if (!session) {
+      if (Date.now() >= discoveryDeadline) {
+        return {
+          status: "completed",
+          approvals,
+          detail: "no active session remained for the exact benchmark workspace",
+        };
+      }
+      await sleep(OWNER_POLL_INTERVAL_MS);
+      continue;
+    }
+    const stateResult = await input.client.readEngineState(session.sessionId);
+    if (!stateResult.ok || !stateResult.state) {
+      return { status: "failed", detail: `benchmark owner session ${session.sessionId} became unavailable` };
+    }
+    const pending = pendingDecisionFromState(stateResult.state);
+    if (pending) {
+      if (!approvalIsAllowed(pending, input.approvalPolicy)) {
+        return {
+          status: "blocked",
+          detail: `refused non-benchmark approval ${pending.id} (${pending.title ?? "untitled"})`,
+          sessionId: session.sessionId,
+        };
+      }
+      if (approvals >= MAX_BENCHMARK_APPROVALS) {
+        return { status: "blocked", detail: "benchmark approval limit exceeded", sessionId: session.sessionId };
+      }
+      const approved = await input.client.control({
+        sessionId: session.sessionId,
+        action: "approve",
+        expectedRevision: stateResult.revision,
+        idempotencyKey: `benchmark-approval-${pending.id}`,
+        payload: { decision: "approve_once", decisionId: pending.id },
+      });
+      if (!approved.ok) {
+        if (approved.code === "revision_conflict") continue;
+        return {
+          status: "blocked",
+          detail: `benchmark approval was rejected: ${approved.message}`,
+          sessionId: session.sessionId,
+        };
+      }
+      approvals += 1;
+      continue;
+    }
+    if (terminalState(stateResult.state)) {
+      await input.client.releaseRuntimeSession(session.sessionId);
+      return {
+        status: stateResult.state.turnLifecycle?.state === "cancelled" ? "cancelled" : "completed",
+        approvals,
+        sessionId: session.sessionId,
+      };
+    }
+    await sleep(OWNER_POLL_INTERVAL_MS);
+  }
+  return { status: "not_found", detail: "timed out waiting for the exact benchmark owner session" };
+}
+
+async function connectBenchmarkOwner(home, timeoutMs = 2_000) {
+  const { leasePath } = defaultRuntimeOwnerPaths(home);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    const lease = await readRuntimeOwnerLease(leasePath);
+    if (lease && await probeRuntimeOwner(lease)) {
+      return RuntimeOwnerClient.connect(lease);
+    }
+    await new Promise((resolve) => setTimeout(resolve, OWNER_POLL_INTERVAL_MS));
+  }
+  return undefined;
+}
+
+export async function stopBenchmarkRuntimeOwner(home) {
+  const { leasePath } = defaultRuntimeOwnerPaths(home);
+  const lease = await readRuntimeOwnerLease(leasePath);
+  if (!lease) {
+    return { status: "pass", ownerFound: false, leaseRemoved: true, listenerClosed: true };
+  }
+  const exactProcess = await processStartIdentity(lease.pid) === lease.processStartId;
+  if (!exactProcess && !await probeRuntimeOwner(lease)) {
+    rmSync(leasePath, { force: true });
+    return {
+      status: "pass",
+      ownerFound: true,
+      leaseRemoved: !existsSync(leasePath),
+      listenerClosed: true,
+      detail: "removed a stale isolated benchmark-owner lease without signalling its mismatched PID",
+    };
+  }
+  if (exactProcess) process.kill(lease.pid, "SIGTERM");
+  const deadline = Date.now() + OWNER_STOP_TIMEOUT_MS;
+  while (Date.now() <= deadline) {
+    const alive = await processStartIdentity(lease.pid) === lease.processStartId;
+    const current = await readRuntimeOwnerLease(leasePath);
+    if (!alive && current === null && !await probeRuntimeOwner(lease)) {
+      return { status: "pass", ownerFound: true, leaseRemoved: true, listenerClosed: true };
+    }
+    await new Promise((resolve) => setTimeout(resolve, OWNER_POLL_INTERVAL_MS));
+  }
+  if (await processStartIdentity(lease.pid) === lease.processStartId) {
+    process.kill(lease.pid, "SIGKILL");
+  }
+  const killDeadline = Date.now() + OWNER_STOP_TIMEOUT_MS;
+  while (Date.now() <= killDeadline) {
+    const alive = await processStartIdentity(lease.pid) === lease.processStartId;
+    const listenerClosed = !await probeRuntimeOwner(lease);
+    if (!alive && listenerClosed) {
+      rmSync(leasePath, { force: true });
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, OWNER_POLL_INTERVAL_MS));
+  }
+  const leaseRemoved = await readRuntimeOwnerLease(leasePath) === null;
+  const listenerClosed = !await probeRuntimeOwner(lease);
+  return {
+    status: leaseRemoved && listenerClosed ? "pass" : "fail",
+    ownerFound: true,
+    leaseRemoved,
+    listenerClosed,
+    detail: `leaseRemoved=${leaseRemoved} listenerClosed=${listenerClosed}`,
+  };
+}
+
 export async function runCompetitiveBenchmark(options = {}) {
   const suitePath = path.resolve(options.suitePath ?? DEFAULT_SUITE_PATH);
   const reportPath = path.resolve(options.reportPath ?? DEFAULT_REPORT_PATH);
@@ -186,18 +443,45 @@ export async function runCompetitiveBenchmark(options = {}) {
   const model = options.model ?? "gpt-5.6-sol";
   const startedAt = new Date().toISOString();
   const root = mkdtempSync(path.join(tmpdir(), "unclecode-competitive-benchmark-"));
+  const isolatedHome = path.join(root, "home");
+  mkdirSync(isolatedHome, { recursive: true });
   const results = [];
+  let runtimeOwnerCleanup = {
+    status: "pass",
+    ownerFound: false,
+    leaseRemoved: true,
+    listenerClosed: true,
+  };
   try {
     for (const system of systems) {
       for (const task of suite.tasks) {
         const workspace = path.join(root, system, task.id);
         materializeFixture(workspace, task.files);
-        const profile = buildSystemProfile(system, workspace, task.prompt, model);
+        const profile = buildSystemProfile(system, workspace, task, model, {
+          isolatedHome,
+          sessionStoreRoot: path.join(root, "state"),
+        });
         const execution = await runCommand(profile.command, profile.args, {
           cwd: profile.cwd,
           env: profile.env,
           timeoutMs: task.timeoutMs,
         });
+        let ownerSettlement;
+        if (system === "unclecode" && execution.code === 0 && !execution.timedOut) {
+          const client = await connectBenchmarkOwner(isolatedHome);
+          ownerSettlement = client
+            ? await driveUncleCodeBenchmarkApprovals({
+                client,
+                workspace,
+                approvalPolicy: task.approvalPolicy ?? { tools: [], shellCommands: [] },
+                timeoutMs: task.timeoutMs,
+              })
+            : {
+                status: "completed",
+                approvals: 0,
+                detail: "no isolated runtime owner remained after the command completed",
+              };
+        }
         let status;
         let checks = [];
         if (execution.errorCode === "ENOENT") {
@@ -208,6 +492,8 @@ export async function runCompetitiveBenchmark(options = {}) {
           status = BLOCKED_OUTPUT_PATTERN.test(`${execution.stdout}\n${execution.stderr}`)
             ? "blocked"
             : "fail";
+        } else if (ownerSettlement && ownerSettlement.status !== "completed") {
+          status = "blocked";
         } else {
           checks = await evaluateBenchmarkChecks(workspace, task.checks);
           status = checks.every((check) => check.passed) ? "pass" : "fail";
@@ -222,6 +508,7 @@ export async function runCompetitiveBenchmark(options = {}) {
           signal: execution.signal,
           timedOut: execution.timedOut,
           checks,
+          ...(ownerSettlement ? { ownerSettlement } : {}),
           outputExcerpt: sanitizeBenchmarkOutput(
             `${execution.stdout}\n${execution.stderr}`,
             profile.env,
@@ -231,6 +518,7 @@ export async function runCompetitiveBenchmark(options = {}) {
       }
     }
   } finally {
+    runtimeOwnerCleanup = await stopBenchmarkRuntimeOwner(isolatedHome);
     if (!options.keepWorkspaces) {
       rmSync(root, { recursive: true, force: true });
     }
@@ -253,11 +541,12 @@ export async function runCompetitiveBenchmark(options = {}) {
     },
     summary: buildBenchmarkSummary(results),
     results,
+    runtimeOwnerCleanup,
     disclosure: [
       "Only executed systems are scored; unavailable or unauthenticated systems remain explicit.",
       "No score is inferred from feature lists, marketing claims, or an agent's prose response.",
       "Provider conformance is reported separately by scripts/provider-conformance.mjs.",
-      "Benchmark children receive only runtime, locale, Codex-home, and OpenAI transport variables; tool-specific parent environment is not inherited.",
+      "Benchmark children receive only runtime, locale, explicit provider-auth roots, and OpenAI transport variables; unrelated tool-specific parent environment is not inherited.",
     ],
   };
   mkdirSync(path.dirname(reportPath), { recursive: true });
@@ -265,8 +554,15 @@ export async function runCompetitiveBenchmark(options = {}) {
   return { report, reportPath };
 }
 
-function buildSystemProfile(system, workspace, prompt, model) {
+export function buildSystemProfile(system, workspace, task, model, isolation = {}) {
+  const prompt = task.prompt;
   if (system === "unclecode") {
+    const codexHome = process.env.CODEX_HOME
+      ?? (process.env.HOME ? path.join(process.env.HOME, ".codex") : undefined);
+    const ompAgentDir = process.env.PI_CODING_AGENT_DIR?.trim()
+      || (process.env.HOME ? path.join(process.env.HOME, ".omp", "agent") : undefined);
+    const openAICredentialsPath = process.env.UNCLECODE_OPENAI_CREDENTIALS_PATH?.trim()
+      || (codexHome ? path.join(codexHome, "auth.json") : undefined);
     return {
       command: path.join(REPO_ROOT, "target", "debug", "unclecode"),
       args: [
@@ -283,6 +579,17 @@ function buildSystemProfile(system, workspace, prompt, model) {
       ],
       cwd: workspace,
       env: buildBenchmarkEnvironment(process.env, {
+        HOME: isolation.isolatedHome,
+        USERPROFILE: isolation.isolatedHome,
+        XDG_CONFIG_HOME: path.join(isolation.isolatedHome, ".config"),
+        XDG_DATA_HOME: path.join(isolation.isolatedHome, ".local", "share"),
+        XDG_CACHE_HOME: path.join(isolation.isolatedHome, ".cache"),
+        UNCLECODE_SESSION_STORE_ROOT: isolation.sessionStoreRoot,
+        ...(codexHome ? { CODEX_HOME: codexHome } : {}),
+        ...(ompAgentDir ? { PI_CODING_AGENT_DIR: ompAgentDir } : {}),
+        ...(openAICredentialsPath
+          ? { UNCLECODE_OPENAI_CREDENTIALS_PATH: openAICredentialsPath }
+          : {}),
         UNCLECODE_ALLOW_DESTRUCTIVE: "1",
         UNCLECODE_ALLOW_RUN_SHELL: "1",
       }),
@@ -533,8 +840,10 @@ async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options === null) return;
   const { report, reportPath } = await runCompetitiveBenchmark(options);
+  const processResult = benchmarkProcessResult(report, reportPath);
   if (options.json) {
     console.log(JSON.stringify(report, null, 2));
+    process.exitCode = processResult.exitCode;
     return;
   }
   console.log(`Competitive benchmark: ${report.summary.pass}/${report.summary.total} passed`);
@@ -542,6 +851,11 @@ async function main() {
     console.log(`${result.system.padEnd(12)} ${result.taskId.padEnd(34)} ${result.status.padEnd(11)} ${result.durationMs}ms`);
   }
   console.log(`Report: ${path.relative(REPO_ROOT, reportPath)}`);
+  if (processResult.failureSummary.length > 0) {
+    console.error("Competitive benchmark failed:");
+    for (const failure of processResult.failureSummary) console.error(`- ${failure}`);
+  }
+  process.exitCode = processResult.exitCode;
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === SCRIPT_PATH) {

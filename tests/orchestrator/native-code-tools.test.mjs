@@ -10,6 +10,8 @@ import {
   createToolRuntime,
   createWorkShellInteractionBridge,
 } from "@unclecode/orchestrator";
+import { LspJsonRpcClient } from "../../packages/orchestrator/src/lsp-client.ts";
+import { waitForOwnedProcessGroupExit } from "../../packages/orchestrator/src/process-group-settlement.ts";
 
 function writeFakeLanguageServer(root) {
   const serverPath = path.join(root, "fake-lsp.mjs");
@@ -109,6 +111,367 @@ function fakeServerResolver(serverPath) {
     ? { id: "fake-typescript", command: process.execPath, args: [serverPath], languageId: "typescript" }
     : undefined;
 }
+
+async function waitForFile(filePath, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      return readFileSync(filePath, "utf8").trim();
+    } catch {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  }
+  throw new Error(`Timed out waiting for ${filePath}`);
+}
+
+function processExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+async function waitForProcessExit(pid, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!processExists(pid)) return;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for process ${pid} to exit`);
+}
+
+function writeStubbornTool(root, name) {
+  const executable = path.join(root, `${name}.mjs`);
+  const descendantExecutable = path.join(root, `${name}-descendant.mjs`);
+  const pidPath = path.join(root, `${name}.pid`);
+  const descendantPidPath = path.join(root, `${name}-descendant.pid`);
+  const descendantReadyPath = path.join(root, `${name}-descendant.ready`);
+  const termPath = path.join(root, `${name}.term`);
+  const readyPath = path.join(root, `${name}.ready`);
+  writeFileSync(descendantExecutable, `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+process.on("SIGTERM", () => {});
+writeFileSync(${JSON.stringify(descendantReadyPath)}, "ready");
+setInterval(() => {}, 1000);
+`);
+  chmodSync(descendantExecutable, 0o755);
+  writeFileSync(executable, `#!/usr/bin/env node
+import { existsSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+process.on("SIGTERM", () => writeFileSync(${JSON.stringify(termPath)}, "term"));
+process.stdin.resume();
+const descendant = spawn(process.execPath, [${JSON.stringify(descendantExecutable)}], { stdio: "ignore" });
+writeFileSync(${JSON.stringify(descendantPidPath)}, String(descendant.pid));
+const readyTimer = setInterval(() => {
+  if (existsSync(${JSON.stringify(descendantReadyPath)})) {
+    writeFileSync(${JSON.stringify(readyPath)}, "ready", { flag: "wx" });
+    clearInterval(readyTimer);
+  }
+}, 10);
+setInterval(() => {}, 1000);
+`);
+  chmodSync(executable, 0o755);
+  return { executable, pidPath, descendantPidPath, descendantReadyPath, termPath, readyPath };
+}
+
+function writeLeaderExitsFirstTool(root, name, options = {}) {
+  const executable = path.join(root, `${name}.mjs`);
+  const descendantExecutable = path.join(root, `${name}-descendant.mjs`);
+  const pidPath = path.join(root, `${name}.pid`);
+  const descendantPidPath = path.join(root, `${name}-descendant.pid`);
+  const descendantReadyPath = path.join(root, `${name}-descendant.ready`);
+  const readyPath = path.join(root, `${name}.ready`);
+  writeFileSync(descendantExecutable, `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+process.on("SIGTERM", () => {});
+writeFileSync(${JSON.stringify(descendantReadyPath)}, "ready");
+setInterval(() => {}, 1000);
+`);
+  chmodSync(descendantExecutable, 0o755);
+  writeFileSync(executable, `#!/usr/bin/env node
+import { existsSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+const descendant = spawn(process.execPath, [${JSON.stringify(descendantExecutable)}], {
+  stdio: ${JSON.stringify(options.inheritPipes ? ["ignore", "inherit", "inherit"] : "ignore")},
+});
+writeFileSync(${JSON.stringify(descendantPidPath)}, String(descendant.pid));
+const readyTimer = setInterval(() => {
+  if (!existsSync(${JSON.stringify(descendantReadyPath)})) return;
+  clearInterval(readyTimer);
+  writeFileSync(${JSON.stringify(readyPath)}, "ready");
+  process.stdout.write(${JSON.stringify(options.stdout ?? "[]")}, () => process.exit(${options.exitCode ?? 0}));
+}, 10);
+`);
+  chmodSync(executable, 0o755);
+  return { executable, pidPath, descendantPidPath, readyPath };
+}
+
+function writeLeaderExitsFirstLanguageServer(root, name) {
+  const executable = path.join(root, `${name}.mjs`);
+  const descendantExecutable = path.join(root, `${name}-descendant.mjs`);
+  const pidPath = path.join(root, `${name}.pid`);
+  const descendantPidPath = path.join(root, `${name}-descendant.pid`);
+  const descendantReadyPath = path.join(root, `${name}-descendant.ready`);
+  const readyPath = path.join(root, `${name}.ready`);
+  writeFileSync(descendantExecutable, `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+process.on("SIGTERM", () => {});
+writeFileSync(${JSON.stringify(descendantReadyPath)}, "ready");
+setInterval(() => {}, 1000);
+`);
+  chmodSync(descendantExecutable, 0o755);
+  writeFileSync(executable, `#!/usr/bin/env node
+import { existsSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+const descendant = spawn(process.execPath, [${JSON.stringify(descendantExecutable)}], { stdio: "ignore" });
+writeFileSync(${JSON.stringify(descendantPidPath)}, String(descendant.pid));
+const readyTimer = setInterval(() => {
+  if (!existsSync(${JSON.stringify(descendantReadyPath)})) return;
+  clearInterval(readyTimer);
+  writeFileSync(${JSON.stringify(readyPath)}, "ready");
+}, 10);
+let buffer = Buffer.alloc(0);
+function send(message) {
+  const body = Buffer.from(JSON.stringify(message));
+  process.stdout.write(\`Content-Length: \${body.length}\\r\\n\\r\\n\`);
+  process.stdout.write(body);
+}
+process.stdin.on("data", (chunk) => {
+  buffer = Buffer.concat([buffer, chunk]);
+  while (true) {
+    const headerEnd = buffer.indexOf("\\r\\n\\r\\n");
+    if (headerEnd < 0) return;
+    const match = /Content-Length:\\s*(\\d+)/i.exec(buffer.subarray(0, headerEnd).toString("ascii"));
+    if (!match) process.exit(2);
+    const length = Number(match[1]);
+    const bodyStart = headerEnd + 4;
+    if (buffer.length < bodyStart + length) return;
+    const message = JSON.parse(buffer.subarray(bodyStart, bodyStart + length).toString("utf8"));
+    buffer = buffer.subarray(bodyStart + length);
+    if (message.method === "initialize") {
+      send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+    } else if (message.method === "shutdown") {
+      process.exit(0);
+    } else if (message.method === "crash") {
+      process.exit(0);
+    }
+  }
+});
+`);
+  chmodSync(executable, 0o755);
+  return { executable, pidPath, descendantPidPath, readyPath };
+}
+
+test("process-group settlement treats EPERM as pending until ESRCH", {
+  skip: process.platform === "win32" ? "POSIX process groups only" : false,
+}, async () => {
+  const probes = ["EPERM", "EPERM", "ESRCH"];
+  let waits = 0;
+  await waitForOwnedProcessGroupExit({
+    processGroupId: 4242,
+    timeoutMs: 1_000,
+    label: "injected",
+    probe() {
+      const error = new Error("injected probe");
+      error.code = probes.shift();
+      throw error;
+    },
+    wait: async () => { waits += 1; },
+  });
+  assert.equal(waits, 2);
+  assert.deepEqual(probes, []);
+});
+
+test("ast_search settles descendants after the process-group leader exits normally", {
+  skip: process.platform === "win32" ? "POSIX process groups only" : false,
+  timeout: 5_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "unclecode-ast-leader-exit-"));
+  let pid;
+  let descendantPid;
+  try {
+    const fixture = writeLeaderExitsFirstTool(root, "ast-success");
+    const ast = createAstToolRegistry({ executable: fixture.executable, forceKillDelayMs: 50 });
+    const invocation = ast.handlers.ast_search({ pattern: "$A", path: "." }, root);
+    pid = Number(await waitForFile(fixture.pidPath));
+    await waitForFile(fixture.readyPath);
+    descendantPid = Number(await waitForFile(fixture.descendantPidPath));
+
+    assert.deepEqual(JSON.parse((await invocation).content), { matches: [], count: 0, truncated: false });
+    assert.equal(processExists(pid), false, "normal AST completion must reap the group leader");
+    assert.equal(processExists(descendantPid), false, "normal AST completion must terminate surviving descendants");
+  } finally {
+    if (pid && processExists(pid)) process.kill(-pid, "SIGKILL");
+    if (descendantPid && processExists(descendantPid)) process.kill(descendantPid, "SIGKILL");
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("ast_search settles from leader exit when a descendant inherits its output pipes", {
+  skip: process.platform === "win32" ? "POSIX process groups only" : false,
+  timeout: 5_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "unclecode-ast-inherited-pipes-"));
+  let pid;
+  let descendantPid;
+  let settlementTimer;
+  try {
+    const fixture = writeLeaderExitsFirstTool(root, "ast-inherited-pipes", { inheritPipes: true });
+    const ast = createAstToolRegistry({ executable: fixture.executable, forceKillDelayMs: 50 });
+    const invocation = ast.handlers.ast_search({ pattern: "$A", path: "." }, root);
+    pid = Number(await waitForFile(fixture.pidPath));
+    await waitForFile(fixture.readyPath);
+    descendantPid = Number(await waitForFile(fixture.descendantPidPath));
+    await waitForProcessExit(pid);
+
+    const result = await Promise.race([
+      invocation,
+      new Promise((_, reject) => {
+        settlementTimer = setTimeout(
+          () => reject(new Error("AST settlement waited for inherited output pipes to close")),
+          1_500,
+        );
+      }),
+    ]);
+    assert.deepEqual(JSON.parse(result.content), { matches: [], count: 0, truncated: false });
+    assert.equal(processExists(pid), false, "AST completion must leave the group leader reaped");
+    assert.equal(processExists(descendantPid), false, "AST completion must terminate the pipe-owning descendant");
+  } finally {
+    if (settlementTimer) clearTimeout(settlementTimer);
+    if (pid && processExists(pid)) process.kill(-pid, "SIGKILL");
+    if (descendantPid && processExists(descendantPid)) process.kill(descendantPid, "SIGKILL");
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("ast_search abort settles descendants after the process-group leader exits first", {
+  skip: process.platform === "win32" ? "POSIX process groups only" : false,
+  timeout: 5_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "unclecode-ast-leader-abort-"));
+  let pid;
+  let descendantPid;
+  try {
+    const fixture = writeLeaderExitsFirstTool(root, "ast-abort");
+    const abortController = new AbortController();
+    const ast = createAstToolRegistry({ executable: fixture.executable, forceKillDelayMs: 50 });
+    const invocation = ast.handlers.ast_search(
+      { pattern: "$A", path: "." },
+      root,
+      { signal: abortController.signal },
+    );
+    pid = Number(await waitForFile(fixture.pidPath));
+    await waitForFile(fixture.readyPath);
+    descendantPid = Number(await waitForFile(fixture.descendantPidPath));
+    await waitForProcessExit(pid);
+    abortController.abort();
+
+    await assert.rejects(invocation, error => error?.name === "AbortError");
+    assert.equal(processExists(pid), false, "aborted AST completion must leave the leader reaped");
+    assert.equal(processExists(descendantPid), false, "aborted AST completion must terminate surviving descendants");
+  } finally {
+    if (pid && processExists(pid)) process.kill(-pid, "SIGKILL");
+    if (descendantPid && processExists(descendantPid)) process.kill(descendantPid, "SIGKILL");
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("ast_search preserves failure while settling descendants after the leader exits", {
+  skip: process.platform === "win32" ? "POSIX process groups only" : false,
+  timeout: 5_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "unclecode-ast-leader-failure-"));
+  let pid;
+  let descendantPid;
+  try {
+    const fixture = writeLeaderExitsFirstTool(root, "ast-failure", { exitCode: 2 });
+    const ast = createAstToolRegistry({ executable: fixture.executable, forceKillDelayMs: 50 });
+    const invocation = ast.handlers.ast_search({ pattern: "$A", path: "." }, root);
+    pid = Number(await waitForFile(fixture.pidPath));
+    await waitForFile(fixture.readyPath);
+    descendantPid = Number(await waitForFile(fixture.descendantPidPath));
+
+    await assert.rejects(invocation, /ast-grep failed \(exit 2\)/);
+    assert.equal(processExists(pid), false, "failed AST completion must reap the group leader");
+    assert.equal(processExists(descendantPid), false, "failed AST completion must terminate surviving descendants");
+  } finally {
+    if (pid && processExists(pid)) process.kill(-pid, "SIGKILL");
+    if (descendantPid && processExists(descendantPid)) process.kill(descendantPid, "SIGKILL");
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("normal and duplicate LSP close settle descendants after the leader exits first", {
+  skip: process.platform === "win32" ? "POSIX process groups only" : false,
+  timeout: 5_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "unclecode-lsp-leader-close-"));
+  let pid;
+  let descendantPid;
+  try {
+    const fixture = writeLeaderExitsFirstLanguageServer(root, "lsp-close");
+    const client = new LspJsonRpcClient(
+      { id: "leader-first", command: process.execPath, args: [fixture.executable], languageId: "typescript" },
+      root,
+      1_000,
+      undefined,
+      50,
+    );
+    await client.start();
+    pid = Number(await waitForFile(fixture.pidPath));
+    await waitForFile(fixture.readyPath);
+    descendantPid = Number(await waitForFile(fixture.descendantPidPath));
+
+    const firstClose = client.close();
+    const secondClose = client.close();
+    assert.equal(secondClose, firstClose, "duplicate close must join the same group-settlement promise");
+    await Promise.all([firstClose, secondClose]);
+    assert.equal(processExists(pid), false, "normal LSP close must reap the group leader");
+    assert.equal(processExists(descendantPid), false, "normal LSP close must terminate surviving descendants");
+  } finally {
+    if (pid && processExists(pid)) process.kill(-pid, "SIGKILL");
+    if (descendantPid && processExists(descendantPid)) process.kill(descendantPid, "SIGKILL");
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("LSP failure settles descendants after the process-group leader exits first", {
+  skip: process.platform === "win32" ? "POSIX process groups only" : false,
+  timeout: 5_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "unclecode-lsp-leader-failure-"));
+  let pid;
+  let descendantPid;
+  try {
+    const fixture = writeLeaderExitsFirstLanguageServer(root, "lsp-failure");
+    const client = new LspJsonRpcClient(
+      { id: "leader-first", command: process.execPath, args: [fixture.executable], languageId: "typescript" },
+      root,
+      1_000,
+      undefined,
+      50,
+    );
+    await client.start();
+    pid = Number(await waitForFile(fixture.pidPath));
+    await waitForFile(fixture.readyPath);
+    descendantPid = Number(await waitForFile(fixture.descendantPidPath));
+
+    await assert.rejects(client.request("crash", null), /exited before completing the request/);
+    await client.close();
+    assert.equal(processExists(pid), false, "failed LSP session must reap the group leader");
+    assert.equal(processExists(descendantPid), false, "failed LSP session must terminate surviving descendants");
+  } finally {
+    if (pid && processExists(pid)) process.kill(-pid, "SIGKILL");
+    if (descendantPid && processExists(descendantPid)) process.kill(descendantPid, "SIGKILL");
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("native LSP and AST tools register definitions and risk metadata", () => {
   const runtime = createToolRuntime({ interactionBridge: createWorkShellInteractionBridge() });
@@ -216,6 +579,109 @@ test("native code tools reject paths that escape the workspace", async () => {
     /path must be a non-empty string/,
   );
   assert.equal(called, false);
+});
+
+test("ast_search abort waits for its SIGTERM-ignoring process group to be killed", {
+  skip: process.platform === "win32" ? "process-group settlement is POSIX-only" : false,
+  timeout: 5_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "unclecode-ast-settle-"));
+  let pid;
+  let descendantPid;
+  try {
+    const stubborn = writeStubbornTool(root, "stubborn-ast");
+    const ast = createAstToolRegistry({ executable: stubborn.executable, forceKillDelayMs: 300 });
+    const abortController = new AbortController();
+    const invocation = ast.handlers.ast_search(
+      { pattern: "$A", path: "." },
+      root,
+      { signal: abortController.signal },
+    );
+    pid = Number(await waitForFile(stubborn.pidPath));
+    await waitForFile(stubborn.readyPath);
+    descendantPid = Number(await waitForFile(stubborn.descendantPidPath));
+    abortController.abort();
+    await assert.rejects(invocation, error => error?.name === "AbortError");
+    assert.equal(readFileSync(stubborn.termPath, "utf8"), "term");
+    assert.equal(processExists(pid), false, "the AST handler must await process-group exit");
+    assert.equal(processExists(descendantPid), false, "the AST process-group descendant must also exit");
+  } finally {
+    if (pid && processExists(pid)) process.kill(pid, "SIGKILL");
+    if (descendantPid && processExists(descendantPid)) process.kill(descendantPid, "SIGKILL");
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("lsp_query abort waits for its SIGTERM-ignoring server process group to be killed", {
+  skip: process.platform === "win32" ? "process-group settlement is POSIX-only" : false,
+  timeout: 5_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "unclecode-lsp-settle-"));
+  let pid;
+  let descendantPid;
+  try {
+    const stubborn = writeStubbornTool(root, "stubborn-lsp");
+    writeFileSync(path.join(root, "example.ts"), "const value = 1;\n");
+    const lsp = createLspToolRegistry({
+      resolveServer: fakeServerResolver(stubborn.executable),
+      forceKillDelayMs: 300,
+    });
+    const abortController = new AbortController();
+    const invocation = lsp.handlers.lsp_query(
+      { action: "symbols", path: "example.ts" },
+      root,
+      { signal: abortController.signal },
+    );
+    pid = Number(await waitForFile(stubborn.pidPath));
+    await waitForFile(stubborn.readyPath);
+    descendantPid = Number(await waitForFile(stubborn.descendantPidPath));
+    abortController.abort();
+    await assert.rejects(invocation, error => error?.name === "AbortError");
+    assert.equal(readFileSync(stubborn.termPath, "utf8"), "term");
+    assert.equal(processExists(pid), false, "the LSP handler must await process-group exit");
+    assert.equal(processExists(descendantPid), false, "the LSP process-group descendant must also exit");
+  } finally {
+    if (pid && processExists(pid)) process.kill(pid, "SIGKILL");
+    if (descendantPid && processExists(descendantPid)) process.kill(descendantPid, "SIGKILL");
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("concurrent LSP close calls join one abort-vs-exit settlement", {
+  skip: process.platform === "win32" ? "process-group settlement is POSIX-only" : false,
+  timeout: 5_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "unclecode-lsp-double-close-"));
+  let pid;
+  let descendantPid;
+  try {
+    const stubborn = writeStubbornTool(root, "stubborn-lsp-close");
+    const abortController = new AbortController();
+    const client = new LspJsonRpcClient(
+      { id: "stubborn", command: process.execPath, args: [stubborn.executable], languageId: "typescript" },
+      root,
+      2_000,
+      abortController.signal,
+      300,
+    );
+    const start = client.start();
+    pid = Number(await waitForFile(stubborn.pidPath));
+    await waitForFile(stubborn.readyPath);
+    descendantPid = Number(await waitForFile(stubborn.descendantPidPath));
+    abortController.abort();
+    const firstClose = client.close();
+    const secondClose = client.close();
+    assert.equal(secondClose, firstClose, "concurrent close calls must join the same settlement promise");
+    await assert.rejects(start, error => error?.name === "AbortError");
+    await Promise.all([firstClose, secondClose]);
+    assert.equal(readFileSync(stubborn.termPath, "utf8"), "term");
+    assert.equal(processExists(pid), false);
+    assert.equal(processExists(descendantPid), false);
+  } finally {
+    if (pid && processExists(pid)) process.kill(pid, "SIGKILL");
+    if (descendantPid && processExists(descendantPid)) process.kill(descendantPid, "SIGKILL");
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("lsp_query speaks JSON-RPC and normalizes diagnostics and definitions", async () => {

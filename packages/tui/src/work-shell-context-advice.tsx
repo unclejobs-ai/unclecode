@@ -95,6 +95,7 @@ export function computeWorkShellContextAdviceRows(input: {
 function resolveSourceLabel(
   packet: ContextPacketView,
   suggestion: ContextPolicySuggestion,
+  uiLocale: "en" | "ko" = "en",
 ): string {
   const source = [...packet.included, ...packet.excluded].find(
     (item) => item.id === suggestion.sourceId,
@@ -104,15 +105,15 @@ function resolveSourceLabel(
   }
   switch (suggestion.reasonCode) {
     case "stale-condensed-history":
-      return "recent conversation history";
+      return uiLocale === "ko" ? "최근 대화 기록" : "recent conversation history";
     case "expired-source":
-      return "expired context source";
+      return uiLocale === "ko" ? "만료된 컨텍스트 소스" : "expired context source";
     case "low-trust-token-hotspot":
-      return "oversized context source";
+      return uiLocale === "ko" ? "너무 큰 컨텍스트 소스" : "oversized context source";
     case "mandatory-guidance":
-      return "required project guidance";
+      return uiLocale === "ko" ? "필수 프로젝트 지침" : "required project guidance";
     default:
-      return "source from the previous packet";
+      return uiLocale === "ko" ? "이전 패킷의 소스" : "source from the previous packet";
   }
 }
 
@@ -127,6 +128,7 @@ export function renderWorkShellContextAdvice(input: {
   /** Stacked layouts pay for their own separation, so drop the top margin. */
   readonly compact?: boolean | undefined;
   readonly dense?: boolean | undefined;
+  readonly uiLocale?: "en" | "ko";
 }): React.ReactNode {
   if (input.suggestions.length === 0 && !input.unavailable) {
     return null;
@@ -144,7 +146,7 @@ export function renderWorkShellContextAdvice(input: {
   return (
     <Box marginTop={input.compact ? 0 : 1} flexDirection="column">
       <Text>
-        <Text color={input.palette.assistant} bold>{"Suggestions"}</Text>
+        <Text color={input.palette.assistant} bold>{input.uiLocale === "ko" ? "제안" : "Suggestions"}</Text>
         <Text color={input.palette.textMuted}>{` · ${input.suggestions.length}`}</Text>
       </Text>
       {input.unavailable ? (
@@ -155,15 +157,22 @@ export function renderWorkShellContextAdvice(input: {
       {visible.map((suggestion) => {
         const selected = suggestion.id === selectedSuggestion?.id;
         const savings = suggestion.estimatedTokenSaving === undefined
-          ? "saving unknown"
-          : `save ${formatContextReceiptTokenEstimate({
+          ? (input.uiLocale === "ko" ? "절감량 알 수 없음" : "saving unknown")
+          : `${input.uiLocale === "ko" ? "절감" : "save"} ${formatContextReceiptTokenEstimate({
               tokenEstimate: suggestion.estimatedTokenSaving,
               tokenEstimateState: "estimated",
             })}`;
-        const status = suggestion.status === "proposed" ? savings : suggestion.status;
-        const actionPrefix = `${selected ? "›" : "·"} ${ACTION_LABELS[suggestion.action]} · `;
+        const status = suggestion.status === "proposed"
+          ? savings
+          : input.uiLocale === "ko"
+            ? ({ accepted: "승인됨", rejected: "거부됨", stale: "오래됨" } as const)[suggestion.status]
+            : suggestion.status;
+        const actionLabel = input.uiLocale === "ko"
+          ? ({ keep: "유지", refresh: "새로 고침", summarize: "요약", "hold-back": "보류" } as const)[suggestion.action]
+          : ACTION_LABELS[suggestion.action];
+        const actionPrefix = `${selected ? "›" : "·"} ${actionLabel} · `;
         const statusSuffix = ` · ${status}`;
-        const sourceLabel = resolveSourceLabel(input.packet, suggestion);
+        const sourceLabel = resolveSourceLabel(input.packet, suggestion, input.uiLocale ?? "en");
         const labelWidth = Math.max(
           0,
           input.width - getDisplayWidth(actionPrefix) - getDisplayWidth(statusSuffix),
@@ -176,18 +185,18 @@ export function renderWorkShellContextAdvice(input: {
             </Text>
             {selected && !input.dense ? (
               <Text color={input.palette.textMuted}>
-                {truncateForDisplayWidth(`Why · ${sanitizeContextPreview(suggestion.reasonText)}`, Math.max(16, input.width))}
+                {truncateForDisplayWidth(`${input.uiLocale === "ko" ? "이유" : "Why"} · ${sanitizeContextPreview(suggestion.reasonText)}`, Math.max(16, input.width))}
               </Text>
             ) : null}
             {selected && suggestion.status === "proposed" && input.actionsEnabled ? (
-              <Text color={input.palette.user}>{"A accept · R reject"}</Text>
+              <Text color={input.palette.user}>{input.uiLocale === "ko" ? "A 승인 · R 거부" : "A accept · R reject"}</Text>
             ) : null}
           </React.Fragment>
         );
       })}
       {!input.dense && input.suggestions.length > visible.length ? (
         <Text color={input.palette.textMuted}>
-          {`… ${input.suggestions.length - visible.length} more`}
+          {input.uiLocale === "ko" ? `… ${input.suggestions.length - visible.length}개 더 있음` : `… ${input.suggestions.length - visible.length} more`}
         </Text>
       ) : null}
     </Box>

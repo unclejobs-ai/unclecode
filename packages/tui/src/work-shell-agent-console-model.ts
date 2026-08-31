@@ -2,12 +2,15 @@ import type {
   AgentConsoleSnapshot,
   AgentConsoleTab,
   AgentRun,
+  AgentRunStatus,
   AsyncJob,
+  AsyncJobStatus,
+  QualityReviewHistoryEntry,
   ToolActivity,
   WorkNode,
   WorkNodeStatus,
 } from "@unclecode/contracts";
-import type { AgentConsoleSelection } from "@unclecode/orchestrator";
+import { getWorkShellMessages, type AgentConsoleSelection } from "@unclecode/orchestrator";
 
 import { getDisplayWidth, truncateForDisplayWidth } from "./text-width.js";
 import {
@@ -89,34 +92,242 @@ export type AgentConsoleInspector = {
 export function selectWorkGraphHudRows(
   snapshot: AgentConsoleSnapshot,
   width: number,
+  options: { readonly expanded?: boolean; readonly uiLocale?: "en" | "ko" } = {},
 ): readonly string[] {
+  const uiLocale = options.uiLocale ?? "en";
+  const messages = getWorkShellMessages(uiLocale);
   const graph = snapshot.workGraph;
+  const review = snapshot.qualityReview;
   if (!graph || graph.nodes.length === 0) {
-    return [];
+    if (!review?.profile || !review.currentStage || review.iteration === undefined) return [];
+    if (review.profile === "minimal") {
+      return [boundRow(
+        `${uiLocale === "ko" ? "품질 엔진" : messages.qualityEngine} · ${localizedQualityProfile(review.profile, uiLocale)}`
+        + ` · ${messages.gate} ${localizedGateDecision(review.latestDecision, uiLocale)}`
+        + (uiLocale === "ko" ? " · /scc 상세" : " · /scc details"),
+        boundWidth(width),
+      )];
+    }
+    return [boundRow(
+      `${uiLocale === "ko" ? "품질 엔진" : messages.qualityEngine} · ${localizedQualityProfile(review.profile, uiLocale)} · ${localizedQualityStage(review.currentStage, uiLocale)}`
+      + ` · PDCA ${localizedPdcaPhase(review.currentStage, uiLocale)}`
+      + ` · ${messages.gate} ${localizedGateDecision(review.latestDecision, uiLocale)} · ${uiLocale === "ko" ? "반복" : "iteration"} ${review.iteration}`,
+      boundWidth(width),
+    )];
   }
 
   const bound = boundWidth(width);
   const completed = graph.nodes.filter((node) => node.status === "completed").length;
-  // Work that needs a human or is in flight leads; everything settled or not
-  // yet started follows in graph order.
-  const ordered = [
-    ...graph.nodes.filter((node) => isActiveWorkNodeStatus(node.status)),
-    ...graph.nodes.filter((node) => !isActiveWorkNodeStatus(node.status)),
-  ];
-  const visible = ordered.slice(0, WORK_GRAPH_HUD_ROWS);
+  const isQualityGraph = graph.qualityProfile !== undefined;
+  // Quiet hierarchy: current task → remaining stage → blocker →
+  // optional completed detail. Each role contributes at most one nearby row,
+  // and explicit Plan expansion remains the only surface that shows all nodes.
+  const nearby = ([
+    graph.nodes.find((node) => node.status === "running"),
+    graph.nodes.find((node) => node.status === "ready" || node.status === "approved" || node.status === "proposed"),
+    graph.nodes.find((node) => node.status === "requires_action" || node.status === "blocked" || node.status === "failed"),
+    [...graph.nodes].reverse().find((node) => node.status === "completed"),
+    ...graph.nodes,
+  ] satisfies readonly (WorkNode | undefined)[])
+    .filter((node): node is WorkNode => node !== undefined)
+    .filter((node, index, nodes) => nodes.indexOf(node) === index);
+  const visible = options.expanded ? graph.nodes : nearby.slice(0, WORK_GRAPH_HUD_ROWS);
   const hidden = graph.nodes.length - visible.length;
   const titleBudget = Math.max(8, Math.min(40, bound - 24));
+
+  if (isQualityGraph) {
+    const remaining = graph.nodes.length - completed;
+    return [
+      boundRow(
+        `${uiLocale === "ko" ? "품질 엔진" : messages.qualityEngine} · ${localizedQualityProfile(graph.qualityProfile, uiLocale)} · ${localizedQualityStage(graph.currentStage, uiLocale)}`
+        + ` · PDCA ${localizedPdcaPhase(graph.currentStage, uiLocale)}`
+        + ` · ${messages.gate} ${localizedGateDecision(graph.gateStatus, uiLocale)} · ${uiLocale === "ko" ? "반복" : "iteration"} ${graph.iteration}`,
+        bound,
+      ),
+      ...visible.map((node) => truncateForDisplayWidth(
+        `${HUD_INDENT}${qualityNodeGlyph(node.status)} `
+        + `${boundRow(node.title || node.id, titleBudget)}`
+        + ` · ${localizedWorkNodeStatus(node.status, uiLocale)}`,
+        bound,
+      )),
+      ...(options.expanded && hidden > 0 ? [`${HUD_INDENT}… +${hidden} ${uiLocale === "ko" ? "더 있음" : "more"}`] : []),
+      boundRow(
+        `${completed}/${graph.nodes.length} ${uiLocale === "ko" ? "완료" : "complete"} · ${remaining} ${uiLocale === "ko" ? "남음" : "remaining"}`
+        + (options.expanded ? (uiLocale === "ko" ? " · Ctrl+T 축소" : " · Ctrl+T compact") : (uiLocale === "ko" ? " · Ctrl+T 전체 계획" : " · Ctrl+T full plan")),
+        bound,
+      ),
+    ];
+  }
 
   return [
     boundRow(`${graph.goal ?? graph.id} · ${completed}/${graph.nodes.length}`, bound),
     ...visible.map((node) => truncateForDisplayWidth(
       `${HUD_INDENT}${agentConsoleStatusGlyph(STATUS_TONES[node.status])} `
       + `${boundRow(node.title || node.id, titleBudget)}`
-      + ` · ${workNodeStatusLabel(node.status)}`,
+      + ` · ${localizedWorkNodeStatus(node.status, uiLocale)}`,
       bound,
     )),
-    ...(hidden > 0 ? [`${HUD_INDENT}… +${hidden} more`] : []),
+    ...(options.expanded && hidden > 0 ? [`${HUD_INDENT}… +${hidden}${uiLocale === "ko" ? "개 더 있음" : " more"}`] : []),
   ];
+}
+
+function qualityPdcaPhase(
+  stage: "explore" | "plan" | "work" | "critic" | "promote",
+): "plan" | "do" | "check" | "act" {
+  if (stage === "explore" || stage === "plan") return "plan";
+  if (stage === "work") return "do";
+  if (stage === "critic") return "check";
+  return "act";
+}
+
+function localizedPdcaPhase(
+  stage: "explore" | "plan" | "work" | "critic" | "promote",
+  uiLocale: "en" | "ko",
+): string {
+  if (uiLocale === "en") return qualityPdcaPhase(stage);
+  switch (qualityPdcaPhase(stage)) {
+    case "plan": return "계획";
+    case "do": return "실행";
+    case "check": return "점검";
+    case "act": return "개선";
+  }
+}
+
+function qualityNodeGlyph(status: WorkNodeStatus): string {
+  if (status === "completed") return "✓";
+  if (status === "running") return "●";
+  if (status === "failed" || status === "cancelled") return "×";
+  if (status === "blocked" || status === "requires_action") return "◆";
+  return "○";
+}
+
+export function selectQualityReviewLines(
+  snapshot: AgentConsoleSnapshot,
+  width: number,
+  uiLocale: "en" | "ko" = "en",
+): readonly string[] {
+  const m = getWorkShellMessages(uiLocale);
+  const graph = snapshot.workGraph;
+  const review = snapshot.qualityReview;
+  if (!graph && !review) {
+    const bound = boundWidth(width);
+    return [
+      boundRow(uiLocale === "ko" ? "SCC 품질 엔진 · 준비됨" : "SCC Quality Engine · ready", bound),
+      boundRow(uiLocale === "ko"
+        ? "이 세션에 기록된 품질 실행이 없습니다."
+        : "No quality run recorded for this session.", bound),
+      boundRow(uiLocale === "ko"
+        ? "작업을 시작하거나 /scc review <대상> 으로 명시적 검토를 실행하세요."
+        : "Start a task, or /scc review <target> for an explicit review.", bound),
+    ];
+  }
+  const bound = boundWidth(width);
+  const profile = graph?.qualityProfile ?? review?.profile;
+  const stage = graph?.currentStage ?? review?.currentStage;
+  const iteration = graph?.iteration ?? review?.iteration;
+  const gate = graph?.gateStatus ?? review?.latestDecision;
+  if (!profile || !stage || iteration === undefined || !gate) {
+    return [uiLocale === "ko" ? "품질 검토 사용 불가 · 품질 상태 불완전" : "Quality review unavailable · incomplete quality projection"];
+  }
+  const criticNodes = (graph?.nodes ?? []).filter((node) => node.role === "critic" || node.stage === "critic");
+  const findings = criticNodes.filter((node) => node.status === "failed" || node.status === "blocked");
+  const latest = review?.history.at(-1);
+  const evidenceReview = selectLastEvidenceBearingReview(review?.history) ?? latest;
+  const hasHistory = (review?.history.length ?? 0) > 0;
+  const reviewedArtifactHash = evidenceReview?.reviewedArtifactHash;
+  const currentArtifactHash = evidenceReview?.currentArtifactHash;
+  const artifactCheckRecorded = evidenceReview?.stale !== true && Boolean(
+    evidenceReview?.artifactHash
+    || (
+      reviewedArtifactHash
+      && currentArtifactHash
+      && reviewedArtifactHash === currentArtifactHash
+    ),
+  );
+  const independentReview = evidenceReview?.independentVerification === true && evidenceReview.stale !== true;
+  const findingCount = Math.max(findings.length, evidenceReview?.failures.length ?? 0);
+  const verdict = gate === "proceed"
+    ? (uiLocale === "ko" ? "통과" : "Passed")
+    : gate === "refine"
+      ? (uiLocale === "ko" ? "수정 필요" : "Needs refinement")
+      : gate === "pivot"
+        ? (uiLocale === "ko" ? "계획 변경 필요" : "Plan change required")
+        : gate === "block"
+          ? (uiLocale === "ko" ? "차단" : "Blocked")
+          : (uiLocale === "ko" ? "미입증" : "Unproven");
+  const checks = profile === "minimal"
+    ? artifactCheckRecorded
+      ? (uiLocale === "ko" ? "완료 상태와 산출물 무결성" : "completion and artifact integrity")
+      : (uiLocale === "ko" ? "완료 상태; 기록된 산출물 검증 없음" : "completion state; no recorded artifact check")
+    : artifactCheckRecorded && independentReview
+      ? (uiLocale === "ko" ? "산출물 무결성과 독립 검토" : "artifact integrity and independent review")
+      : artifactCheckRecorded
+        ? (uiLocale === "ko" ? "산출물 무결성; 독립 검토는 미입증" : "artifact integrity; independent review unproven")
+        : independentReview
+          ? (uiLocale === "ko" ? "독립 검토; 기록된 산출물 검증 없음" : "independent review; no recorded artifact check")
+          : (uiLocale === "ko" ? "기록된 산출물 검증 없음; 독립 검토는 미입증" : "no recorded artifact check; independent review unproven");
+  const reviewStatus = profile === "minimal"
+    ? (uiLocale === "ko" ? "최소 프로필은 독립 critic 검토를 요구하지 않음" : "independent critic not required by minimal profile")
+    : independentReview
+      ? (uiLocale === "ko" ? "독립 검토 완료" : "independently reviewed")
+      : (uiLocale === "ko" ? "독립 검토 없음" : "no independent review");
+  const next = gate === "proceed"
+    ? (uiLocale === "ko" ? "조치 없음" : "no action")
+    : gate === "refine"
+      ? (uiLocale === "ko" ? `${findingCount || 1}개 발견사항 수정` : `fix ${findingCount || 1} finding${findingCount === 1 ? "" : "s"}`)
+      : gate === "pivot"
+        ? (uiLocale === "ko" ? "계획을 다시 세우기" : "re-plan the work")
+        : gate === "block"
+          ? (uiLocale === "ko" ? "차단 원인 해결" : "resolve the blocker")
+          : (uiLocale === "ko" ? "/scc review <대상>으로 독립 검토" : "run /scc review <target> for independent proof");
+  return [
+    boundRow(`SCC · ${verdict} · ${localizedQualityProfile(profile, uiLocale)}`, bound),
+    boundRow(`${uiLocale === "ko" ? "확인" : "Checked"} · ${checks}`, bound),
+    boundRow(`${uiLocale === "ko" ? "검토" : "Review"} · ${reviewStatus}`, bound),
+    ...(review && !hasHistory
+      ? [boundRow(uiLocale === "ko" ? "아직 검토 기록이 없습니다." : "No review history recorded yet.", bound)]
+      : []),
+    ...(gate !== "proceed" && evidenceReview?.reason
+      ? [boundRow(`${m.reason} · ${evidenceReview.reason}`, bound)]
+      : []),
+    boundRow(`${uiLocale === "ko" ? "다음" : "Next"} · ${next}`, bound),
+  ];
+}
+
+function localizedWorkNodeStatus(status: WorkNodeStatus, uiLocale: "en" | "ko"): string {
+  if (uiLocale === "en") return workNodeStatusLabel(status);
+  const labels: Record<WorkNodeStatus, string> = {
+    proposed: "제안", approved: "승인", ready: "준비", running: "실행 중", completed: "완료",
+    failed: "실패", blocked: "차단", cancelled: "취소", requires_action: "조치 필요",
+  };
+  return labels[status];
+}
+
+function selectLastEvidenceBearingReview(
+  history: readonly QualityReviewHistoryEntry[] | undefined,
+): QualityReviewHistoryEntry | undefined {
+  if (!history) return undefined;
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const entry = history[index];
+    if (
+      entry
+      && entry.event === "gate"
+      && (
+        entry.failures.length > 0
+        || entry.evidenceRefs.length > 0
+        || entry.artifactRefs.length > 0
+        || entry.artifactHash !== undefined
+        || entry.reviewedArtifactHash !== undefined
+        || entry.currentArtifactHash !== undefined
+        || entry.reviewerId !== undefined
+        || entry.reviewerRunId !== undefined
+        || entry.route !== undefined
+      )
+    ) {
+      return entry;
+    }
+  }
+  return undefined;
 }
 
 /** A job the operator is still waiting on, dispatched or not. */
@@ -160,6 +371,7 @@ export function selectActiveAgentHudRows(
   snapshot: AgentConsoleSnapshot,
   now: number,
   width: number,
+  uiLocale: "en" | "ko" = "en",
 ): readonly string[] {
   const active = snapshot.agents.filter(isActiveAgentRun);
   if (active.length === 0) {
@@ -172,9 +384,9 @@ export function selectActiveAgentHudRows(
   const nameBudget = Math.max(8, Math.min(28, Math.trunc(bound * 0.3)));
 
   return [
-    boundRow(`Agents · ${active.length} active`, bound),
-    ...visible.map((run) => formatActiveAgentRow(run, now, bound, nameBudget)),
-    ...(hidden > 0 ? [`${HUD_INDENT}… +${hidden} more`] : []),
+    boundRow(uiLocale === "ko" ? `에이전트 · ${active.length}개 활성` : `Agents · ${active.length} active`, bound),
+    ...visible.map((run) => formatActiveAgentRow(run, now, bound, nameBudget, uiLocale)),
+    ...(hidden > 0 ? [`${HUD_INDENT}… +${hidden}${uiLocale === "ko" ? "개 더 있음" : " more"}`] : []),
   ];
 }
 
@@ -187,6 +399,7 @@ export function selectActiveAgentHudRows(
 export function selectAgentConsoleRows(
   snapshot: AgentConsoleSnapshot,
   tab: AgentConsoleTab,
+  uiLocale: "en" | "ko" = "en",
 ): readonly AgentConsoleRow[] {
   switch (tab) {
     case "agents":
@@ -194,7 +407,7 @@ export function selectAgentConsoleRows(
         id: run.id,
         glyph: agentConsoleStatusGlyph(STATUS_TONES[run.status]),
         label: flattenRowText(run.displayName),
-        statusLabel: run.status,
+        statusLabel: localizedAgentRunStatus(run.status, uiLocale),
         tone: STATUS_TONES[run.status],
       }));
     case "jobs":
@@ -202,7 +415,7 @@ export function selectAgentConsoleRows(
         id: job.id,
         glyph: agentConsoleStatusGlyph(STATUS_TONES[job.status]),
         label: flattenRowText(job.label),
-        statusLabel: job.status,
+        statusLabel: localizedAsyncJobStatus(job.status, uiLocale),
         tone: STATUS_TONES[job.status],
       }));
     case "plan":
@@ -210,8 +423,18 @@ export function selectAgentConsoleRows(
         id: node.id,
         glyph: agentConsoleStatusGlyph(STATUS_TONES[node.status]),
         label: flattenRowText(node.title || node.id),
-        statusLabel: workNodeStatusLabel(node.status),
+        statusLabel: localizedWorkNodeStatus(node.status, uiLocale),
         tone: STATUS_TONES[node.status],
+      }));
+    case "quality":
+      return [...(snapshot.qualityReview?.history ?? [])].reverse().map((entry, index) => ({
+        id: `${entry.startedAt}:${entry.iteration}:${entry.event}:${index}`,
+        glyph: agentConsoleStatusGlyph(qualityDecisionTone(entry.decision)),
+        label: flattenRowText(
+          `${uiLocale === "ko" ? "반복" : "iteration"} ${entry.iteration} · ${localizedQualityStage(entry.stage, uiLocale)} · ${localizedQualityEvent(entry.event, uiLocale)}`,
+        ),
+        statusLabel: localizedGateDecision(entry.decision, uiLocale),
+        tone: qualityDecisionTone(entry.decision),
       }));
   }
 }
@@ -222,6 +445,8 @@ export function selectAgentConsoleRows(
  * or zero pricing yields `undefined` rather than a manufactured `$0.00`.
  */
 export function formatAgentConsoleTotalCost(snapshot: AgentConsoleSnapshot): string | undefined {
+  const ownerTotal = positiveFinite(snapshot.totalUsage?.costUsd);
+  if (ownerTotal > 0) return formatUsd(ownerTotal);
   let total = 0;
   const seenEventIds = new Set<string>();
   const usageAggregates = [snapshot.mainUsage, ...snapshot.agents.map((run) => run.usage)];
@@ -230,7 +455,7 @@ export function formatAgentConsoleTotalCost(snapshot: AgentConsoleSnapshot): str
     const cost = positiveFinite(usage.costUsd);
     if (cost === 0) continue;
 
-    const eventIds = [...new Set(usage.eventIds)];
+    const eventIds = [...new Set(usage.eventIds ?? [])];
     if (eventIds.length === 0) {
       total += cost;
       continue;
@@ -251,18 +476,28 @@ export function selectAgentConsoleInspector(
   selection: AgentConsoleSelection | undefined,
   now: number,
   width: number,
+  uiLocale: "en" | "ko" = "en",
 ): AgentConsoleInspector | undefined {
   if (!selection) {
     return undefined;
   }
   switch (selection.tab) {
     case "agents":
-      return inspectAgentRun(snapshot, selection.run, now, width);
+      return inspectAgentRun(snapshot, selection.run, now, width, uiLocale);
     case "jobs":
-      return inspectAsyncJob(snapshot, selection.job, now, width);
+      return inspectAsyncJob(snapshot, selection.job, now, width, uiLocale);
     case "plan":
-      return inspectWorkNode(selection.node, width);
+      return inspectWorkNode(selection.node, width, snapshot.workGraph, snapshot.qualityReview, uiLocale);
+    case "quality":
+      return inspectQualityReview(selection.review, width, uiLocale);
   }
+}
+
+function qualityDecisionTone(decision: QualityReviewHistoryEntry["decision"]): AgentConsoleRowTone {
+  if (decision === "proceed") return "success";
+  if (decision === "block") return "danger";
+  if (decision === "refine" || decision === "pivot") return "warning";
+  return "pending";
 }
 
 export function isActiveAgentRun(run: AgentRun): boolean {
@@ -301,6 +536,7 @@ function inspectAgentRun(
   run: AgentRun,
   now: number,
   width: number,
+  uiLocale: "en" | "ko",
 ): AgentConsoleInspector {
   const bound = boundWidth(width);
   const facts: AgentConsoleInspectorFact[] = [];
@@ -310,7 +546,7 @@ function inspectAgentRun(
   } else if (run.completedAt !== undefined) {
     facts.push({ label: "Duration", value: formatElapsedLabel(run.completedAt - run.startedAt) });
   }
-  const lineage = formatLineage(run);
+  const lineage = formatLineage(run, uiLocale);
   if (lineage) {
     facts.push({ label: "Lineage", value: lineage });
   }
@@ -328,7 +564,7 @@ function inspectAgentRun(
 
   return composeInspector({
     title: run.displayName,
-    subtitle: `${run.agentType} · ${run.status}`,
+    subtitle: `${localizedAgentType(run.agentType, uiLocale)} · ${localizedAgentRunStatus(run.status, uiLocale)}`,
     tone: STATUS_TONES[run.status],
     facts,
     ...scopedTimeline(snapshot, run.id, bound),
@@ -379,6 +615,7 @@ function inspectAsyncJob(
   job: AsyncJob,
   now: number,
   width: number,
+  uiLocale: "en" | "ko",
 ): AgentConsoleInspector {
   const bound = boundWidth(width);
   const facts: AgentConsoleInspectorFact[] = [];
@@ -402,7 +639,7 @@ function inspectAsyncJob(
 
   return composeInspector({
     title: job.label,
-    subtitle: `${job.type} · ${job.status}`,
+    subtitle: `${localizedJobType(job.type, uiLocale)} · ${localizedAsyncJobStatus(job.status, uiLocale)}`,
     tone: STATUS_TONES[job.status],
     facts,
     ...scopedTimeline(snapshot, job.agentRunId, bound),
@@ -417,7 +654,13 @@ function inspectAsyncJob(
  * A plan node carries the executor's raw assignment in `prompt`. The inspector
  * projects only the operator-facing fields, so that text has no path here.
  */
-function inspectWorkNode(node: WorkNode, width: number): AgentConsoleInspector {
+function inspectWorkNode(
+  node: WorkNode,
+  width: number,
+  graph?: AgentConsoleSnapshot["workGraph"],
+  qualityReview?: AgentConsoleSnapshot["qualityReview"],
+  uiLocale: "en" | "ko" = "en",
+): AgentConsoleInspector {
   const bound = boundWidth(width);
   const facts: AgentConsoleInspectorFact[] = [];
   if (node.dependsOn.length > 0) {
@@ -429,21 +672,152 @@ function inspectWorkNode(node: WorkNode, width: number): AgentConsoleInspector {
   if (node.acceptanceCriteria && node.acceptanceCriteria.length > 0) {
     facts.push({
       label: "Acceptance",
-      value: formatCount(node.acceptanceCriteria.length, "criterion", "criteria"),
+      value: uiLocale === "ko"
+        ? `기준 ${node.acceptanceCriteria.length}개`
+        : formatCount(node.acceptanceCriteria.length, "criterion", "criteria"),
     });
   }
   if (node.evidenceRefs.length > 0) {
-    facts.push({ label: "Evidence", value: formatCount(node.evidenceRefs.length, "ref", "refs") });
+    facts.push({
+      label: "Evidence",
+      value: uiLocale === "ko"
+        ? `참조 ${node.evidenceRefs.length}개`
+        : formatCount(node.evidenceRefs.length, "ref", "refs"),
+    });
+  }
+  if (node.artifactRefs?.length > 0) {
+    facts.push({ label: "Artifacts", value: node.artifactRefs.join(", ") });
+  }
+  if (node.stage) facts.push({ label: "Stage", value: localizedQualityStage(node.stage, uiLocale) });
+  if (node.role) facts.push({ label: "Role", value: localizedQualityRole(node.role, uiLocale) });
+  if (node.attempt !== undefined) facts.push({ label: "Attempt", value: String(node.attempt) });
+  if (node.reviewRequired !== undefined) {
+    facts.push({
+      label: "Review",
+      value: node.reviewRequired
+        ? (uiLocale === "ko" ? "필수" : "required")
+        : (uiLocale === "ko" ? "필수 아님" : "not required"),
+    });
+  }
+  if (graph?.gateStatus) facts.push({ label: "Gate", value: graph.gateStatus });
+  const completedReview = qualityReview?.history.findLast((entry) => entry.event === "completed");
+  if (completedReview) {
+    facts.push({
+      label: "Completion",
+      value: `${localizedQualityStage(completedReview.stage, uiLocale)} · ${localizedGateDecision(completedReview.decision, uiLocale)}`,
+    });
+  }
+  const reviewEntries = qualityReview?.history.filter((entry) =>
+    entry.artifactRefs.some((reference) => node.artifactRefs.includes(reference))) ?? [];
+  const latestReview = selectLastEvidenceBearingReview(reviewEntries)
+    ?? selectLastEvidenceBearingReview(qualityReview?.history)
+    ?? qualityReview?.history.at(-1);
+  if (latestReview?.reviewerId) {
+    facts.push({
+      label: "Reviewer",
+      value: `${latestReview.reviewerId} · ${latestReview.independentVerification
+        ? (uiLocale === "ko" ? "독립" : "independent")
+        : (uiLocale === "ko" ? "독립 아님" : "not independent")}`,
+    });
+  }
+  if (latestReview?.reviewerRunId) {
+    facts.push({ label: "Reviewer run", value: latestReview.reviewerRunId });
+  }
+  if (latestReview?.route || latestReview?.provider || latestReview?.model) {
+    facts.push({
+      label: "Route",
+      value: [latestReview.route, latestReview.provider, latestReview.model].filter(Boolean).join(" · "),
+    });
+  }
+  if (latestReview?.reviewedArtifactHash) {
+    facts.push({ label: "Reviewed hash", value: latestReview.reviewedArtifactHash });
+  }
+  if (latestReview?.currentArtifactHash) {
+    facts.push({
+      label: "Current hash",
+      value: `${latestReview.currentArtifactHash}${latestReview.stale
+        ? (uiLocale === "ko" ? " · 만료" : " · stale")
+        : (uiLocale === "ko" ? " · 현재" : " · current")}`,
+    });
+  } else if (latestReview?.artifactHash) {
+    facts.push({
+      label: "Artifact hash",
+      value: `${latestReview.artifactHash}${latestReview.stale ? (uiLocale === "ko" ? " · 만료" : " · stale") : ""}`,
+    });
+  }
+  if (latestReview?.count !== undefined && latestReview.limit !== undefined) {
+    facts.push({ label: "Attempt", value: `${latestReview.count}/${latestReview.limit}` });
   }
 
   return composeInspector({
     title: node.title || node.id,
-    subtitle: `task · ${workNodeStatusLabel(node.status)}`,
+    subtitle: `${uiLocale === "ko" ? "작업" : "task"} · ${localizedWorkNodeStatus(node.status, uiLocale)}`,
     tone: STATUS_TONES[node.status],
     facts,
-    timeline: [],
+    timeline: latestReview
+      ? [
+          ...(latestReview.reason ? [`${uiLocale === "ko" ? "이유" : "Reason"} · ${latestReview.reason}`] : []),
+          ...latestReview.failures.map((failure) => `${uiLocale === "ko" ? "실패" : "Failure"} · ${failure}`),
+          ...latestReview.evidenceRefs.map((evidence) => `${uiLocale === "ko" ? "증거" : "Evidence"} · ${evidence}`),
+        ]
+      : [],
     hiddenTimelineCount: 0,
     bound,
+  });
+}
+
+function inspectQualityReview(
+  review: QualityReviewHistoryEntry,
+  width: number,
+  uiLocale: "en" | "ko",
+): AgentConsoleInspector {
+  const facts: AgentConsoleInspectorFact[] = [
+    { label: "Gate", value: localizedGateDecision(review.decision, uiLocale) },
+    { label: "Stage", value: localizedQualityStage(review.stage, uiLocale) },
+    { label: "Iteration", value: String(review.iteration) },
+    {
+      label: "Verification",
+      value: review.independentVerification
+        ? (uiLocale === "ko" ? "독립" : "independent")
+        : (uiLocale === "ko" ? "독립 아님" : "not independent"),
+    },
+  ];
+  if (review.reviewerId) facts.push({ label: "Reviewer", value: review.reviewerId });
+  if (review.reviewerRunId) facts.push({ label: "Reviewer run", value: review.reviewerRunId });
+  if (review.route || review.provider || review.model) {
+    facts.push({
+      label: "Route",
+      value: [review.route, review.provider, review.model].filter(Boolean).join(" · "),
+    });
+  }
+  if (review.reviewedArtifactHash) facts.push({ label: "Reviewed hash", value: review.reviewedArtifactHash });
+  if (review.currentArtifactHash) {
+    facts.push({
+      label: "Current hash",
+      value: `${review.currentArtifactHash}${review.stale
+        ? (uiLocale === "ko" ? " · 만료" : " · stale")
+        : (uiLocale === "ko" ? " · 현재" : " · current")}`,
+    });
+  } else if (review.artifactHash) {
+    facts.push({ label: "Artifact hash", value: review.artifactHash });
+  }
+  if (review.count !== undefined && review.limit !== undefined) {
+    facts.push({ label: "Attempt", value: `${review.count}/${review.limit}` });
+  }
+
+  return composeInspector({
+    title: `${uiLocale === "ko" ? "반복" : "Iteration"} ${review.iteration} · ${localizedQualityEvent(review.event, uiLocale)}`,
+    subtitle: `${localizedQualityStage(review.stage, uiLocale)} · ${localizedGateDecision(review.decision, uiLocale)}`,
+    tone: qualityDecisionTone(review.decision),
+    facts,
+    timeline: [
+      ...(review.reason ? [`${uiLocale === "ko" ? "이유" : "Reason"} · ${review.reason}`] : []),
+      ...review.failures.map((failure) => `${uiLocale === "ko" ? "비평 발견" : "Critic finding"} · ${failure}`),
+      ...review.evidenceRefs.map((evidence) => `${uiLocale === "ko" ? "증거" : "Evidence"} · ${evidence}`),
+      ...review.artifactRefs.map((artifact) => `${uiLocale === "ko" ? "산출물" : "Artifact"} · ${artifact}`),
+    ],
+    hiddenTimelineCount: 0,
+    bound: boundWidth(width),
   });
 }
 
@@ -479,10 +853,11 @@ function formatActiveAgentRow(
   now: number,
   bound: number,
   nameBudget: number,
+  uiLocale: "en" | "ko",
 ): string {
   const head = `${HUD_INDENT}${agentConsoleStatusGlyph(STATUS_TONES[run.status])} `
     + `${boundRow(run.displayName, nameBudget)}`
-    + ` · ${run.status} ${formatElapsedLabel(now - run.startedAt)}`;
+    + ` · ${localizedAgentRunStatus(run.status, uiLocale)} ${formatElapsedLabel(now - run.startedAt)}`;
   if (!run.currentActivity) {
     return truncateForDisplayWidth(head, bound);
   }
@@ -493,10 +868,80 @@ function formatActiveAgentRow(
   return truncateForDisplayWidth(`${head} · ${boundRow(run.currentActivity, remaining)}`, bound);
 }
 
-function formatLineage(run: AgentRun): string | undefined {
-  if (run.continuationOf) return `continues ${run.continuationOf}`;
-  if (run.parentRunId) return `child of ${run.parentRunId}`;
+function formatLineage(run: AgentRun, uiLocale: "en" | "ko"): string | undefined {
+  if (run.continuationOf) return `${uiLocale === "ko" ? "이어받은 실행" : "continues"} ${run.continuationOf}`;
+  if (run.parentRunId) return `${uiLocale === "ko" ? "상위 실행" : "child of"} ${run.parentRunId}`;
   return undefined;
 }
 
+function localizedAgentRunStatus(status: AgentRunStatus, uiLocale: "en" | "ko"): string {
+  if (uiLocale === "en") return status;
+  return ({
+    queued: "대기",
+    running: "실행 중",
+    waiting: "응답 대기",
+    completed: "완료",
+    failed: "실패",
+    cancelled: "취소",
+    interrupted: "중단",
+  } as const)[status];
+}
 
+function localizedAsyncJobStatus(status: AsyncJobStatus, uiLocale: "en" | "ko"): string {
+  if (uiLocale === "en") return status;
+  return ({
+    queued: "대기",
+    running: "실행 중",
+    completed: "완료",
+    failed: "실패",
+    cancelled: "취소",
+    interrupted: "중단",
+  } as const)[status];
+}
+
+function localizedAgentType(agentType: string, uiLocale: "en" | "ko"): string {
+  if (uiLocale === "en") return agentType;
+  return ({
+    scout: "탐색",
+    planner: "계획",
+    worker: "작업",
+    executor: "실행",
+    critic: "비평",
+    reviewer: "검토",
+    guardian: "검증",
+  } as Readonly<Record<string, string>>)[agentType] ?? agentType;
+}
+
+function localizedJobType(jobType: string, uiLocale: "en" | "ko"): string {
+  if (uiLocale === "en") return jobType;
+  return ({
+    "work-node": "작업 노드",
+    agent: "에이전트",
+    review: "검토",
+  } as Readonly<Record<string, string>>)[jobType] ?? jobType;
+}
+
+function localizedQualityStage(stage: string, uiLocale: "en" | "ko"): string {
+  if (uiLocale === "en") return stage;
+  return ({ explore: "탐색", plan: "계획", work: "작업", critic: "비평", promote: "정리" } as Readonly<Record<string, string>>)[stage] ?? stage;
+}
+
+function localizedQualityEvent(event: QualityReviewHistoryEntry["event"], uiLocale: "en" | "ko"): string {
+  if (uiLocale === "en") return event;
+  return ({ gate: "게이트", refine: "개선", pivot: "전환", completed: "완료" } as const)[event];
+}
+
+function localizedQualityProfile(profile: string, uiLocale: "en" | "ko"): string {
+  if (uiLocale === "en") return profile;
+  return ({ minimal: "최소", standard: "표준", deep: "심층", creator: "창작" } as Readonly<Record<string, string>>)[profile] ?? profile;
+}
+
+function localizedQualityRole(role: string, uiLocale: "en" | "ko"): string {
+  if (uiLocale === "en") return role;
+  return ({ explorer: "탐색", planner: "계획", worker: "작업", critic: "비평", promoter: "정리" } as Readonly<Record<string, string>>)[role] ?? role;
+}
+
+function localizedGateDecision(decision: string, uiLocale: "en" | "ko"): string {
+  if (uiLocale === "en") return decision;
+  return ({ proceed: "진행", refine: "개선", pivot: "전환", block: "차단", unproven: "미입증" } as Readonly<Record<string, string>>)[decision] ?? decision;
+}

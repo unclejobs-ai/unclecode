@@ -2,6 +2,7 @@ import type {
   ContextPacketSourceCategory,
   ContextPacketView,
 } from "./context-packet-view.js";
+import type { ProviderTurnPerformance } from "./performance.js";
 
 export const CONTEXT_PROFILE_IDS = ["build", "explore", "review"] as const;
 export type ContextProfileId = (typeof CONTEXT_PROFILE_IDS)[number];
@@ -65,9 +66,15 @@ export type AskUserQuestionAnswer = {
 };
 
 export type AskUserQuestionRequest = {
+  readonly kind: "security-approval" | "user-decision";
   readonly id: string;
   readonly title?: string;
   readonly questions: readonly AskUserQuestion[];
+};
+
+export type PersistedSecurityApprovalRule = {
+  readonly kind: "tool";
+  readonly key: string;
 };
 
 export type AskUserQuestionResult =
@@ -75,6 +82,35 @@ export type AskUserQuestionResult =
   | { readonly status: "cancelled" }
   | { readonly status: "timed_out"; readonly answers: readonly AskUserQuestionAnswer[] }
   | { readonly status: "unavailable"; readonly reason: string };
+
+/** Bounded, display-safe pending decision exposed by the Control Room API. */
+export type ControlRoomPendingDecision = {
+  readonly kind: "security-approval" | "user-decision";
+  readonly id: string;
+  readonly title?: string;
+  readonly questions: readonly {
+    readonly id: string;
+    readonly question: string;
+    readonly options: readonly {
+      readonly label: string;
+      readonly description?: string;
+    }[];
+    readonly multi?: boolean;
+    readonly recommended?: number;
+  }[];
+};
+
+/** Typed answer mutation for one exact Control Room user decision. */
+export type ControlRoomDecisionPayload = {
+  readonly decisionId: string;
+  readonly answers: readonly AskUserQuestionAnswer[];
+};
+
+/** One-shot approval mutation bound to one exact security prompt instance. */
+export type ControlRoomApprovalPayload = {
+  readonly decision: "approve_once";
+  readonly decisionId: string;
+};
 
 export const WORK_NODE_STATUSES = [
   "proposed",
@@ -89,6 +125,18 @@ export const WORK_NODE_STATUSES = [
 ] as const;
 export type WorkNodeStatus = (typeof WORK_NODE_STATUSES)[number];
 
+export const QUALITY_PROFILES = ["minimal", "standard", "deep", "creator"] as const;
+export type QualityProfile = (typeof QUALITY_PROFILES)[number];
+
+export const QUALITY_HARNESS_STAGES = ["explore", "plan", "work", "critic", "promote"] as const;
+export type QualityHarnessStage = (typeof QUALITY_HARNESS_STAGES)[number];
+
+export const QUALITY_GATE_STATUSES = ["proceed", "refine", "pivot", "block", "unproven"] as const;
+export type QualityGateStatus = (typeof QUALITY_GATE_STATUSES)[number];
+
+export const WORK_NODE_ROLES = ["explorer", "planner", "worker", "critic", "promoter"] as const;
+export type WorkNodeRole = (typeof WORK_NODE_ROLES)[number];
+
 export type WorkNode = {
   readonly id: string;
   readonly title: string;
@@ -99,19 +147,151 @@ export type WorkNode = {
   readonly manifestId?: string;
   readonly acceptanceCriteria?: readonly string[];
   readonly evidenceRefs: readonly string[];
+  readonly stage: QualityHarnessStage;
+  readonly role: WorkNodeRole;
+  readonly attempt: number;
+  readonly artifactRefs: readonly string[];
+  readonly reviewRequired: boolean;
 };
 
 export type WorkGraph = {
   readonly id: string;
   readonly goal?: string;
   readonly constraints?: readonly string[];
+  readonly qualityProfile: QualityProfile;
+  readonly currentStage: QualityHarnessStage;
+  readonly gateStatus: QualityGateStatus;
+  readonly iteration: number;
   readonly nodes: readonly WorkNode[];
   readonly approval: "pending" | "approved" | "rejected";
 };
 
+export const MAX_SUPERSEDED_WORK_PROPOSALS = 32;
+
+export type WorkProposalIdentity = {
+  readonly graphId: string;
+  readonly iteration: number;
+};
+
+/** Host-owned ordering watermark for replay-safe `work.proposed` projection. */
+export type WorkProposalOrderProjection = WorkProposalIdentity & {
+  readonly startedAt: number;
+  readonly sequence?: number;
+  /** Fail closed after the bounded legacy same-timestamp replay set is exhausted. */
+  readonly unsequencedTieSaturated?: true;
+  readonly superseded: readonly WorkProposalIdentity[];
+};
+
+export const MAX_QUALITY_REVIEW_HISTORY = 32;
+
+export type QualityReviewHistoryEntry = {
+  readonly event: "gate" | "refine" | "pivot" | "completed";
+  readonly stage: QualityHarnessStage;
+  readonly decision: QualityGateStatus;
+  readonly iteration: number;
+  readonly reason?: string;
+  readonly failures: readonly string[];
+  readonly evidenceRefs: readonly string[];
+  readonly artifactRefs: readonly string[];
+  readonly artifactHash?: string;
+  readonly reviewedArtifactHash?: string;
+  readonly currentArtifactHash?: string;
+  readonly reviewerId?: string;
+  readonly reviewerRunId?: string;
+  readonly provider?: string;
+  readonly model?: string;
+  readonly route?: "direct" | "frontier" | "commodity" | "fallback";
+  readonly count?: number;
+  readonly limit?: number;
+  readonly independentVerification: boolean;
+  readonly stale: boolean;
+  readonly startedAt: number;
+};
+
+export type QualityReviewProjection = {
+  readonly runId: string;
+  readonly graphId: string;
+  /** Current lifecycle state, including graph-less minimal turns. */
+  readonly profile?: QualityProfile;
+  readonly currentStage?: QualityHarnessStage;
+  readonly iteration?: number;
+  readonly refineCount: number;
+  readonly pivotCount: number;
+  readonly latestDecision: QualityGateStatus;
+  readonly history: readonly QualityReviewHistoryEntry[];
+};
+
+export const MAX_EVOLUTION_PROPOSALS = 32;
+
+export type EvolutionCleanupResourceProjection = {
+  readonly kind: "branch" | "worktree" | "baseline-worktree";
+  readonly identity: string;
+  readonly status: "removed" | "retained" | "cleanup-failed";
+};
+
+export type EvolutionCleanupProjection = {
+  readonly status: "completed" | "retained" | "failed";
+  readonly resources: readonly EvolutionCleanupResourceProjection[];
+  readonly summary?: string;
+};
+
+/**
+ * Bounded, content-free projection of a host-recorded evolution candidate.
+ * Candidate file bodies and evaluator output are artifact-owned and never
+ * enter a console snapshot.
+ */
+export type EvolutionProposalProjection = {
+  readonly id: string;
+  readonly runId: string;
+  readonly candidateId: string;
+  readonly creatorId: string;
+  readonly evaluatorId: string;
+  readonly attestorId: string;
+  readonly state: "pr-ready" | "rejected" | "failed" | "cancelled" | "stale";
+  readonly isolation: "worktree";
+  readonly isolatedBranch?: string;
+  readonly isolatedWorktree?: string;
+  readonly heldOutBenchmark: boolean;
+  readonly heldOutBenchmarkId: string;
+  readonly humanApproval: "pending";
+  readonly mergeRequiresHumanApproval: true;
+  readonly stale: boolean;
+  readonly changedAssets: readonly { readonly path: string; readonly sha256: string }[];
+  readonly hashes: {
+    readonly baseCommit?: string;
+    readonly candidateCommit?: string;
+    readonly patch?: string;
+    readonly candidateArtifact?: string;
+    readonly evaluator: string;
+    readonly evaluatorEnvironment: string;
+    readonly policy: string;
+    readonly suite: string;
+    readonly baselineResult?: string;
+    readonly candidateResult?: string;
+  };
+  readonly comparison?: {
+    readonly baselineScore: number;
+    readonly candidateScore: number;
+    readonly delta: number;
+    readonly passed: boolean;
+    readonly thresholdsHash: string;
+  };
+  readonly attestation?: {
+    readonly timestamp: string;
+    readonly maxAgeMs: number;
+    readonly branchExists: boolean;
+    readonly worktreeExists: boolean;
+  };
+  readonly cleanup: EvolutionCleanupProjection;
+  readonly failures: readonly string[];
+  readonly summary: string;
+  readonly artifactRefs: readonly string[];
+  readonly createdAt: string;
+};
+
 export type WorkNodeDispatchOutcome = {
   readonly nodeId: string;
-  readonly status: Extract<WorkNodeStatus, "completed" | "failed" | "blocked">;
+  readonly status: Extract<WorkNodeStatus, "completed" | "failed" | "cancelled" | "blocked">;
   readonly summary: string;
   readonly evidenceRefs: readonly string[];
 };
@@ -227,14 +407,15 @@ export type TerminalAsyncJobStatus = Extract<
 >;
 
 /**
- * Deduplicated usage ledger. `eventIds` is the identity set that makes usage
- * replay idempotent — a provider turn contributes to either `mainUsage` or one
- * `AgentRun.usage`, never both.
+ * Materialized usage totals. Legacy checkpoints may still carry `eventIds`;
+ * parsers validate those arrays for migration and always remove them from the
+ * returned projection. Exact replay identity belongs to the runtime ledger.
  */
 export type AgentRunUsageRoute = {
   readonly provider: string;
   readonly model: string;
-  readonly eventIds: readonly string[];
+  /** @deprecated Accepted as legacy input only; never emitted in a snapshot. */
+  readonly eventIds?: readonly string[];
   readonly inputTokens?: number;
   readonly outputTokens?: number;
   readonly cacheReadTokens?: number;
@@ -244,7 +425,8 @@ export type AgentRunUsageRoute = {
 };
 
 export type AgentRunUsage = {
-  readonly eventIds: readonly string[];
+  /** @deprecated Accepted as legacy input only; never emitted in a snapshot. */
+  readonly eventIds?: readonly string[];
   /** Uncached input; cache reads and writes are tracked in their own buckets. */
   readonly inputTokens?: number;
   readonly outputTokens?: number;
@@ -253,6 +435,11 @@ export type AgentRunUsage = {
   readonly cacheSavingsUsd?: number;
   readonly costUsd?: number;
   readonly routes?: readonly AgentRunUsageRoute[];
+};
+
+export type AgentUsageRouteTotals = Omit<AgentRunUsageRoute, "eventIds">;
+export type AgentUsageTotals = Omit<AgentRunUsage, "eventIds" | "routes"> & {
+  readonly routes?: readonly AgentUsageRouteTotals[];
 };
 
 /**
@@ -318,18 +505,43 @@ export type AgentControlPort = {
   continue(agentRunId: string, message?: string): Promise<AgentControlReceipt>;
 };
 
-export const AGENT_CONSOLE_TABS = ["agents", "jobs", "plan"] as const;
+export const AGENT_CONSOLE_TABS = ["agents", "jobs", "plan", "quality"] as const;
 export type AgentConsoleTab = (typeof AGENT_CONSOLE_TABS)[number];
+
+/** Bounded, redacted diagnostic safe for traces, checkpoints, and operator projections. */
+export type PluginDiagnosticProjection = {
+  readonly runId: string;
+  readonly source: "memory" | "workspace" | "cached";
+  readonly trustLane: "host-provided" | "workspace-trusted" | "cached-external";
+  readonly pluginId: string;
+  readonly pluginName: string;
+  readonly hookName: string;
+  readonly status: "error";
+  readonly errorName: string;
+  readonly errorMessage: string;
+  readonly exitStatus?: string | undefined;
+  readonly dedupeKey: string;
+  readonly startedAt: number;
+};
 
 export type AgentConsoleSnapshot = {
   readonly profileId: ContextProfileId;
+  readonly securityApprovals?: readonly PersistedSecurityApprovalRule[];
   readonly manifest?: PersistedPromptManifest;
   readonly pendingDecision?: AskUserQuestionRequest;
   readonly workGraph?: WorkGraph;
+  readonly workProposalOrder?: WorkProposalOrderProjection;
+  readonly qualityReview?: QualityReviewProjection;
+  readonly evolutionProposals?: readonly EvolutionProposalProjection[];
+  readonly pluginDiagnostics?: readonly PluginDiagnosticProjection[];
   readonly activity: readonly ToolActivity[];
   readonly agents: readonly AgentRun[];
   readonly jobs: readonly AsyncJob[];
   readonly mainUsage?: AgentRunUsage;
+  /** Owner-materialized lifetime session total; contains no replay identity. */
+  readonly totalUsage?: AgentUsageTotals;
+  /** One bounded main-provider receipt; lifetime totals remain separate. */
+  readonly lastTurnPerformance?: ProviderTurnPerformance;
 };
 
 export type AgentConsoleJournalEvent =
@@ -365,11 +577,24 @@ export function createAgentConsoleSnapshot(
 ): AgentConsoleSnapshot {
   return {
     profileId: input.profileId,
+    ...(input.securityApprovals && input.securityApprovals.length > 0
+      ? { securityApprovals: copySecurityApprovalRules(input.securityApprovals) }
+      : {}),
     ...(input.manifest ? { manifest: copyPersistedPromptManifest(input.manifest) } : {}),
     ...(input.pendingDecision
       ? { pendingDecision: copyAskUserQuestionRequest(input.pendingDecision) }
       : {}),
     ...(input.workGraph ? { workGraph: copyWorkGraph(input.workGraph) } : {}),
+    ...(input.workProposalOrder
+      ? { workProposalOrder: copyWorkProposalOrder(input.workProposalOrder) }
+      : {}),
+    ...(input.qualityReview ? { qualityReview: copyQualityReview(input.qualityReview) } : {}),
+    ...(input.evolutionProposals && input.evolutionProposals.length > 0
+      ? { evolutionProposals: input.evolutionProposals.slice(-MAX_EVOLUTION_PROPOSALS).map(copyEvolutionProposal) }
+      : {}),
+    ...(input.pluginDiagnostics && input.pluginDiagnostics.length > 0
+      ? { pluginDiagnostics: input.pluginDiagnostics.slice(-MAX_PERSISTED_PLUGIN_DIAGNOSTICS).map(copyPluginDiagnostic) }
+      : {}),
     activity: input.activity.map((activity) => ({
       id: activity.id,
       toolCallId: activity.toolCallId,
@@ -393,6 +618,10 @@ export function createAgentConsoleSnapshot(
     jobs: boundLifecycleRecords(input.jobs ?? [], MAX_PERSISTED_ASYNC_JOBS, isActiveAsyncJob)
       .map(copyAsyncJob),
     ...(input.mainUsage ? { mainUsage: copyAgentRunUsage(input.mainUsage) } : {}),
+    ...(input.totalUsage ? { totalUsage: copyAgentUsageTotals(input.totalUsage) } : {}),
+    ...(input.lastTurnPerformance
+      ? { lastTurnPerformance: copyProviderTurnPerformance(input.lastTurnPerformance) }
+      : {}),
   };
 }
 
@@ -463,6 +692,7 @@ function copyPersistedPromptManifest(manifest: PersistedPromptManifest): Persist
 
 function copyAskUserQuestionRequest(request: AskUserQuestionRequest): AskUserQuestionRequest {
   return {
+    kind: request.kind ?? "user-decision",
     id: request.id,
     ...(request.title === undefined ? {} : { title: request.title }),
     questions: request.questions.map((question) => ({
@@ -478,11 +708,34 @@ function copyAskUserQuestionRequest(request: AskUserQuestionRequest): AskUserQue
   };
 }
 
+function copySecurityApprovalRules(
+  rules: readonly PersistedSecurityApprovalRule[],
+): readonly PersistedSecurityApprovalRule[] {
+  const unique = new Map<string, PersistedSecurityApprovalRule>();
+  for (const rule of rules) {
+    if (rule.kind === "tool" && isSafePermissionRuleKey(rule.key)) {
+      unique.set(rule.key, { kind: "tool", key: rule.key });
+    }
+  }
+  return [...unique.values()];
+}
+
+function isSafePermissionRuleKey(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= 128
+    && /^[A-Za-z0-9_.:-]+$/.test(value);
+}
+
 function copyWorkGraph(graph: WorkGraph): WorkGraph {
   return {
     id: graph.id,
     ...(graph.goal === undefined ? {} : { goal: graph.goal }),
     ...(graph.constraints === undefined ? {} : { constraints: [...graph.constraints] }),
+    qualityProfile: graph.qualityProfile ?? "minimal",
+    currentStage: graph.currentStage ?? "work",
+    gateStatus: graph.gateStatus ?? "unproven",
+    iteration: graph.iteration ?? 0,
     approval: graph.approval,
     nodes: graph.nodes.map((node) => ({
       id: node.id,
@@ -492,11 +745,154 @@ function copyWorkGraph(graph: WorkGraph): WorkGraph {
       dependsOn: [...node.dependsOn],
       fileOwnership: [...node.fileOwnership],
       ...(node.manifestId === undefined ? {} : { manifestId: node.manifestId }),
-      ...(node.acceptanceCriteria === undefined
-        ? {}
-        : { acceptanceCriteria: [...node.acceptanceCriteria] }),
+      acceptanceCriteria: [...(node.acceptanceCriteria ?? [])],
       evidenceRefs: [...node.evidenceRefs],
+      stage: node.stage ?? "work",
+      role: node.role ?? "worker",
+      attempt: node.attempt ?? 0,
+      artifactRefs: [...(node.artifactRefs ?? [])],
+      reviewRequired: node.reviewRequired ?? false,
     })),
+  };
+}
+
+function copyWorkProposalOrder(order: WorkProposalOrderProjection): WorkProposalOrderProjection {
+  return {
+    graphId: order.graphId,
+    iteration: order.iteration,
+    startedAt: order.startedAt,
+    ...(order.sequence === undefined ? {} : { sequence: order.sequence }),
+    ...(order.unsequencedTieSaturated ? { unsequencedTieSaturated: true as const } : {}),
+    superseded: order.superseded.slice(-MAX_SUPERSEDED_WORK_PROPOSALS).map((identity) => ({
+      graphId: identity.graphId,
+      iteration: identity.iteration,
+    })),
+  };
+}
+
+function copyQualityReview(projection: QualityReviewProjection): QualityReviewProjection {
+  return {
+    runId: projection.runId.slice(0, 256),
+    graphId: projection.graphId.slice(0, 256),
+    ...(projection.profile === undefined ? {} : { profile: projection.profile }),
+    ...(projection.currentStage === undefined ? {} : { currentStage: projection.currentStage }),
+    ...(projection.iteration === undefined ? {} : { iteration: projection.iteration }),
+    refineCount: projection.refineCount,
+    pivotCount: projection.pivotCount,
+    latestDecision: projection.latestDecision,
+    history: projection.history.slice(-MAX_QUALITY_REVIEW_HISTORY).map((entry) => ({
+      event: entry.event,
+      stage: entry.stage,
+      decision: entry.decision,
+      iteration: entry.iteration,
+      ...(entry.reason === undefined ? {} : { reason: entry.reason.slice(0, 2_000) }),
+      failures: entry.failures.slice(0, 32).map((failure) => failure.slice(0, 500)),
+      evidenceRefs: entry.evidenceRefs.slice(0, 64).map((reference) => reference.slice(0, 1_000)),
+      artifactRefs: entry.artifactRefs.slice(0, 64).map((reference) => reference.slice(0, 1_000)),
+      ...(entry.artifactHash === undefined ? {} : { artifactHash: entry.artifactHash.slice(0, 256) }),
+      ...(entry.reviewedArtifactHash === undefined
+        ? {}
+        : { reviewedArtifactHash: entry.reviewedArtifactHash.slice(0, 256) }),
+      ...(entry.currentArtifactHash === undefined
+        ? {}
+        : { currentArtifactHash: entry.currentArtifactHash.slice(0, 256) }),
+      ...(entry.reviewerId === undefined ? {} : { reviewerId: entry.reviewerId.slice(0, 256) }),
+      ...(entry.reviewerRunId === undefined
+        ? {}
+        : { reviewerRunId: entry.reviewerRunId.slice(0, 256) }),
+      ...(entry.provider === undefined ? {} : { provider: entry.provider.slice(0, 128) }),
+      ...(entry.model === undefined ? {} : { model: entry.model.slice(0, 256) }),
+      ...(entry.route === undefined ? {} : { route: entry.route }),
+      ...(entry.count === undefined ? {} : { count: entry.count }),
+      ...(entry.limit === undefined ? {} : { limit: entry.limit }),
+      independentVerification: entry.independentVerification,
+      stale: entry.stale,
+      startedAt: entry.startedAt,
+    })),
+  };
+}
+
+function copyEvolutionProposal(proposal: EvolutionProposalProjection): EvolutionProposalProjection {
+  return {
+    id: proposal.id.slice(0, 256),
+    runId: proposal.runId.slice(0, 256),
+    candidateId: proposal.candidateId.slice(0, 256),
+    creatorId: proposal.creatorId.slice(0, 256),
+    evaluatorId: proposal.evaluatorId.slice(0, 256),
+    attestorId: proposal.attestorId.slice(0, 256),
+    state: proposal.state,
+    isolation: "worktree",
+    ...(proposal.isolatedBranch === undefined
+      ? {}
+      : { isolatedBranch: proposal.isolatedBranch.slice(0, 512) }),
+    ...(proposal.isolatedWorktree === undefined
+      ? {}
+      : { isolatedWorktree: proposal.isolatedWorktree.slice(0, 1_000) }),
+    heldOutBenchmark: proposal.heldOutBenchmark,
+    heldOutBenchmarkId: proposal.heldOutBenchmarkId.slice(0, 256),
+    humanApproval: "pending",
+    mergeRequiresHumanApproval: true,
+    stale: proposal.stale,
+    changedAssets: proposal.changedAssets.slice(0, 128).map((entry) => ({
+      path: entry.path.slice(0, 1_000),
+      sha256: entry.sha256.slice(0, 80),
+    })),
+    hashes: {
+      ...(proposal.hashes.baseCommit === undefined ? {} : { baseCommit: proposal.hashes.baseCommit.slice(0, 80) }),
+      ...(proposal.hashes.candidateCommit === undefined
+        ? {}
+        : { candidateCommit: proposal.hashes.candidateCommit.slice(0, 80) }),
+      ...(proposal.hashes.patch === undefined ? {} : { patch: proposal.hashes.patch.slice(0, 80) }),
+      ...(proposal.hashes.candidateArtifact === undefined
+        ? {}
+        : { candidateArtifact: proposal.hashes.candidateArtifact.slice(0, 80) }),
+      evaluator: proposal.hashes.evaluator.slice(0, 80),
+      evaluatorEnvironment: proposal.hashes.evaluatorEnvironment.slice(0, 80),
+      policy: proposal.hashes.policy.slice(0, 80),
+      suite: proposal.hashes.suite.slice(0, 80),
+      ...(proposal.hashes.baselineResult === undefined
+        ? {}
+        : { baselineResult: proposal.hashes.baselineResult.slice(0, 80) }),
+      ...(proposal.hashes.candidateResult === undefined
+        ? {}
+        : { candidateResult: proposal.hashes.candidateResult.slice(0, 80) }),
+    },
+    ...(proposal.comparison === undefined
+      ? {}
+      : {
+          comparison: {
+            baselineScore: proposal.comparison.baselineScore,
+            candidateScore: proposal.comparison.candidateScore,
+            delta: proposal.comparison.delta,
+            passed: proposal.comparison.passed,
+            thresholdsHash: proposal.comparison.thresholdsHash.slice(0, 80),
+          },
+        }),
+    ...(proposal.attestation === undefined
+      ? {}
+      : {
+          attestation: {
+            timestamp: proposal.attestation.timestamp.slice(0, 80),
+            maxAgeMs: proposal.attestation.maxAgeMs,
+            branchExists: proposal.attestation.branchExists,
+            worktreeExists: proposal.attestation.worktreeExists,
+          },
+        }),
+    cleanup: {
+      status: proposal.cleanup.status,
+      resources: proposal.cleanup.resources.slice(0, 16).map((resource) => ({
+        kind: resource.kind,
+        identity: resource.identity.slice(0, 1_000),
+        status: resource.status,
+      })),
+      ...(proposal.cleanup.summary === undefined
+        ? {}
+        : { summary: proposal.cleanup.summary.slice(0, 512) }),
+    },
+    failures: proposal.failures.slice(0, 32).map((failure) => failure.slice(0, 256)),
+    summary: proposal.summary.slice(0, 512),
+    artifactRefs: proposal.artifactRefs.slice(0, 32).map((reference) => reference.slice(0, 1_000)),
+    createdAt: proposal.createdAt.slice(0, 80),
   };
 }
 
@@ -587,15 +983,10 @@ function copyAsyncJob(job: AsyncJob): AsyncJob {
       : { errorSummary: boundLifecycleSummary(job.errorSummary) }),
   };
 }
-/**
- * Keep every per-route replay identity for the same reason as the aggregate
- * ledger; route eviction would make provider/model attribution diverge.
- */
 function copyAgentRunUsageRoute(route: AgentRunUsageRoute): AgentRunUsageRoute {
   return {
     provider: route.provider,
     model: route.model,
-    eventIds: [...new Set(route.eventIds)],
     ...(route.inputTokens === undefined ? {} : { inputTokens: route.inputTokens }),
     ...(route.outputTokens === undefined ? {} : { outputTokens: route.outputTokens }),
     ...(route.cacheReadTokens === undefined ? {} : { cacheReadTokens: route.cacheReadTokens }),
@@ -606,13 +997,8 @@ function copyAgentRunUsageRoute(route: AgentRunUsageRoute): AgentRunUsageRoute {
 }
 
 
-/**
- * Replay identities intentionally live for the full session. Evicting an older
- * id would let a resumed trace charge lifetime totals a second time.
- */
 function copyAgentRunUsage(usage: AgentRunUsage): AgentRunUsage {
   return {
-    eventIds: [...new Set(usage.eventIds)],
     ...(usage.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
     ...(usage.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
     ...(usage.cacheReadTokens === undefined ? {} : { cacheReadTokens: usage.cacheReadTokens }),
@@ -623,14 +1009,83 @@ function copyAgentRunUsage(usage: AgentRunUsage): AgentRunUsage {
   };
 }
 
+function copyProviderTurnPerformance(performance: ProviderTurnPerformance): ProviderTurnPerformance {
+  return {
+    provider: performance.provider,
+    model: performance.model,
+    startedAt: performance.startedAt,
+    ...(performance.firstTokenAt === undefined ? {} : { firstTokenAt: performance.firstTokenAt }),
+    ...(performance.completedAt === undefined ? {} : { completedAt: performance.completedAt }),
+    ...(performance.inputTokens === undefined ? {} : { inputTokens: performance.inputTokens }),
+    ...(performance.outputTokens === undefined ? {} : { outputTokens: performance.outputTokens }),
+    ...(performance.cacheReadTokens === undefined ? {} : { cacheReadTokens: performance.cacheReadTokens }),
+    ...(performance.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: performance.cacheWriteTokens }),
+    ...(performance.costUsd === undefined ? {} : { costUsd: performance.costUsd }),
+  };
+}
+
+function copyAgentUsageTotals(usage: AgentUsageTotals): AgentUsageTotals {
+  return {
+    ...(usage.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
+    ...(usage.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
+    ...(usage.cacheReadTokens === undefined ? {} : { cacheReadTokens: usage.cacheReadTokens }),
+    ...(usage.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: usage.cacheWriteTokens }),
+    ...(usage.cacheSavingsUsd === undefined ? {} : { cacheSavingsUsd: usage.cacheSavingsUsd }),
+    ...(usage.costUsd === undefined ? {} : { costUsd: usage.costUsd }),
+    ...(usage.routes === undefined
+      ? {}
+      : {
+          routes: usage.routes.map((route) => ({
+            provider: route.provider,
+            model: route.model,
+            ...(route.inputTokens === undefined ? {} : { inputTokens: route.inputTokens }),
+            ...(route.outputTokens === undefined ? {} : { outputTokens: route.outputTokens }),
+            ...(route.cacheReadTokens === undefined
+              ? {}
+              : { cacheReadTokens: route.cacheReadTokens }),
+            ...(route.cacheWriteTokens === undefined
+              ? {}
+              : { cacheWriteTokens: route.cacheWriteTokens }),
+            ...(route.cacheSavingsUsd === undefined
+              ? {}
+              : { cacheSavingsUsd: route.cacheSavingsUsd }),
+            ...(route.costUsd === undefined ? {} : { costUsd: route.costUsd }),
+          })),
+        }),
+  };
+}
+
 const MAX_PERSISTED_TOOL_ACTIVITY = 80;
+const MAX_PERSISTED_PLUGIN_DIAGNOSTICS = 64;
+export const MAX_PLUGIN_DIAGNOSTIC_FIELD_CHARS = 240;
+const PLUGIN_DIAGNOSTIC_DEDUPE_KEY = /^sha256:[a-f0-9]{64}$/;
+const PLUGIN_DIAGNOSTIC_TRUST_BY_SOURCE = {
+  memory: "host-provided",
+  workspace: "workspace-trusted",
+  cached: "cached-external",
+} as const;
+const PLUGIN_DIAGNOSTIC_SECRET_PATTERNS = [
+  /\bBearer\s+[^\s,;]+/gi,
+  /\b(?:sk|ghp|xoxb)-[A-Za-z0-9_-]{8,}\b/g,
+  /\b(?:api[_-]?key|token|secret|password)\s*[=:]\s*[^\s,;]+/gi,
+] as const;
+const PLUGIN_DIAGNOSTIC_PATH_PATTERN = /(^|[\s([{"'=])(?:\.{1,2}\/|\/|[A-Za-z]:\\)[^\s,;)\]}"']+/g;
 const WORK_NODE_STATUS_SET = new Set<string>(WORK_NODE_STATUSES);
+const QUALITY_PROFILE_SET = new Set<string>(QUALITY_PROFILES);
+const QUALITY_HARNESS_STAGE_SET = new Set<string>(QUALITY_HARNESS_STAGES);
+const QUALITY_GATE_STATUS_SET = new Set<string>(QUALITY_GATE_STATUSES);
+const WORK_NODE_ROLE_SET = new Set<string>(WORK_NODE_ROLES);
 const TOOL_ACTIVITY_KIND_SET = new Set<string>(TOOL_ACTIVITY_KINDS);
 const TOOL_ACTIVITY_STATUS_SET = new Set<string>(TOOL_ACTIVITY_STATUSES);
 const MAX_PERSISTED_AGENT_RUNS = 128;
 const MAX_PERSISTED_ASYNC_JOBS = 128;
 const AGENT_RUN_STATUS_SET = new Set<string>(AGENT_RUN_STATUSES);
 const ASYNC_JOB_STATUS_SET = new Set<string>(ASYNC_JOB_STATUSES);
+const EVOLUTION_STATE_SET = new Set(["pr-ready", "rejected", "failed", "cancelled", "stale"] as const);
+const EVOLUTION_CLEANUP_STATUS_SET = new Set(["completed", "retained", "failed"] as const);
+const EVOLUTION_RESOURCE_KIND_SET = new Set(["branch", "worktree", "baseline-worktree"] as const);
+const EVOLUTION_RESOURCE_STATUS_SET = new Set(["removed", "retained", "cleanup-failed"] as const);
+const SHA256_DIGEST = /^sha256:[a-f0-9]{64}$/;
 
 /**
  * Validates the durable console projection at the resume boundary. The parser
@@ -647,15 +1102,47 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
   const pendingDecision = hasOwn(record, "pendingDecision")
     ? parseAskUserQuestionRequest(record.pendingDecision)
     : undefined;
+  const securityApprovals = hasOwn(record, "securityApprovals")
+    ? parseSecurityApprovalRules(record.securityApprovals)
+    : undefined;
   const workGraph = hasOwn(record, "workGraph") ? parseWorkGraph(record.workGraph) : undefined;
+  const workProposalOrder = hasOwn(record, "workProposalOrder")
+    ? parseWorkProposalOrder(record.workProposalOrder)
+    : undefined;
+  const qualityReview = hasOwn(record, "qualityReview")
+    ? parseQualityReviewProjection(record.qualityReview)
+    : undefined;
+  const evolutionProposals = hasOwn(record, "evolutionProposals")
+    ? parseEvolutionProposals(record.evolutionProposals)
+    : undefined;
+  const pluginDiagnostics = hasOwn(record, "pluginDiagnostics")
+    ? parsePluginDiagnostics(record.pluginDiagnostics)
+    : undefined;
   const mainUsage = hasOwn(record, "mainUsage") ? parseAgentRunUsage(record.mainUsage) : undefined;
+  const totalUsage = hasOwn(record, "totalUsage")
+    ? parseAgentUsageTotals(record.totalUsage)
+    : undefined;
+  const lastTurnPerformance = hasOwn(record, "lastTurnPerformance")
+    ? parseProviderTurnPerformance(record.lastTurnPerformance)
+    : undefined;
   const activityValue = record.activity;
 
   if (
     (hasOwn(record, "manifest") && !manifest)
     || (hasOwn(record, "pendingDecision") && !pendingDecision)
+    || (hasOwn(record, "securityApprovals") && !securityApprovals)
     || (hasOwn(record, "workGraph") && !workGraph)
+    || (hasOwn(record, "workProposalOrder") && !workProposalOrder)
+    || (workProposalOrder
+      && (!workGraph
+        || workProposalOrder.graphId !== workGraph.id
+        || workProposalOrder.iteration > workGraph.iteration))
+    || (hasOwn(record, "qualityReview") && !qualityReview)
+    || (hasOwn(record, "evolutionProposals") && !evolutionProposals)
+    || (hasOwn(record, "pluginDiagnostics") && !pluginDiagnostics)
     || (hasOwn(record, "mainUsage") && !mainUsage)
+    || (hasOwn(record, "totalUsage") && !totalUsage)
+    || (hasOwn(record, "lastTurnPerformance") && !lastTurnPerformance)
     || !Array.isArray(activityValue)
   ) {
     return undefined;
@@ -690,14 +1177,375 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
 
   return createAgentConsoleSnapshot({
     profileId: record.profileId,
+    ...(securityApprovals && securityApprovals.length > 0 ? { securityApprovals } : {}),
     ...(manifest ? { manifest } : {}),
     ...(pendingDecision ? { pendingDecision } : {}),
     ...(workGraph ? { workGraph } : {}),
+    ...(workProposalOrder ? { workProposalOrder } : {}),
+    ...(qualityReview ? { qualityReview } : {}),
+    ...(evolutionProposals && evolutionProposals.length > 0 ? { evolutionProposals } : {}),
+    ...(pluginDiagnostics && pluginDiagnostics.length > 0 ? { pluginDiagnostics } : {}),
     activity,
     agents,
     jobs,
     ...(mainUsage ? { mainUsage } : {}),
+    ...(totalUsage ? { totalUsage } : {}),
+    ...(lastTurnPerformance ? { lastTurnPerformance } : {}),
   });
+}
+
+function parseProviderTurnPerformance(value: unknown): ProviderTurnPerformance | undefined {
+  const record = asRecord(value);
+  if (
+    !record
+    || !isNonEmptyString(record.provider)
+    || !isNonEmptyString(record.model)
+    || !isNonNegativeInteger(record.startedAt)
+    || (hasOwn(record, "firstTokenAt") && !isNonNegativeInteger(record.firstTokenAt))
+    || (hasOwn(record, "completedAt") && !isNonNegativeInteger(record.completedAt))
+    || (hasOwn(record, "inputTokens") && !isNonNegativeInteger(record.inputTokens))
+    || (hasOwn(record, "outputTokens") && !isNonNegativeInteger(record.outputTokens))
+    || (hasOwn(record, "cacheReadTokens") && !isNonNegativeInteger(record.cacheReadTokens))
+    || (hasOwn(record, "cacheWriteTokens") && !isNonNegativeInteger(record.cacheWriteTokens))
+    || (hasOwn(record, "costUsd") && !isNonNegativeFinite(record.costUsd))
+    || (typeof record.firstTokenAt === "number" && record.firstTokenAt < record.startedAt)
+    || (typeof record.completedAt === "number" && record.completedAt < record.startedAt)
+    || (typeof record.firstTokenAt === "number"
+      && typeof record.completedAt === "number"
+      && record.firstTokenAt > record.completedAt)
+  ) {
+    return undefined;
+  }
+  return copyProviderTurnPerformance({
+    provider: record.provider.trim(),
+    model: record.model.trim(),
+    startedAt: record.startedAt,
+    ...(typeof record.firstTokenAt === "number" ? { firstTokenAt: record.firstTokenAt } : {}),
+    ...(typeof record.completedAt === "number" ? { completedAt: record.completedAt } : {}),
+    ...(typeof record.inputTokens === "number" ? { inputTokens: record.inputTokens } : {}),
+    ...(typeof record.outputTokens === "number" ? { outputTokens: record.outputTokens } : {}),
+    ...(typeof record.cacheReadTokens === "number" ? { cacheReadTokens: record.cacheReadTokens } : {}),
+    ...(typeof record.cacheWriteTokens === "number" ? { cacheWriteTokens: record.cacheWriteTokens } : {}),
+    ...(typeof record.costUsd === "number" ? { costUsd: record.costUsd } : {}),
+  });
+}
+
+function copyPluginDiagnostic(diagnostic: PluginDiagnosticProjection): PluginDiagnosticProjection {
+  return {
+    runId: boundedPluginDiagnosticField(diagnostic.runId),
+    source: diagnostic.source,
+    trustLane: diagnostic.trustLane,
+    pluginId: boundedPluginDiagnosticField(diagnostic.pluginId),
+    pluginName: boundedPluginDiagnosticField(diagnostic.pluginName),
+    hookName: boundedPluginDiagnosticField(diagnostic.hookName),
+    status: "error",
+    errorName: boundedPluginDiagnosticField(diagnostic.errorName),
+    errorMessage: boundedPluginDiagnosticField(diagnostic.errorMessage),
+    ...(diagnostic.exitStatus === undefined
+      ? {}
+      : { exitStatus: boundedPluginDiagnosticField(diagnostic.exitStatus) }),
+    dedupeKey: boundedPluginDiagnosticField(diagnostic.dedupeKey),
+    startedAt: diagnostic.startedAt,
+  };
+}
+
+function boundedPluginDiagnosticField(value: string): string {
+  let projected = value.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ");
+  for (const pattern of PLUGIN_DIAGNOSTIC_SECRET_PATTERNS) {
+    projected = projected.replace(pattern, (match) => {
+      const key = match.match(/^(api[_-]?key|token|secret|password)/i)?.[1];
+      return key ? `${key}=[REDACTED]` : "[REDACTED]";
+    });
+  }
+  projected = projected.replace(
+    PLUGIN_DIAGNOSTIC_PATH_PATTERN,
+    (_match, prefix: string) => `${prefix}[PATH]`,
+  );
+  const chars = Array.from(projected.trim());
+  return chars.length <= MAX_PLUGIN_DIAGNOSTIC_FIELD_CHARS
+    ? chars.join("")
+    : `${chars.slice(0, MAX_PLUGIN_DIAGNOSTIC_FIELD_CHARS - 1).join("")}…`;
+}
+
+export function createPluginDiagnosticProjection(
+  diagnostic: PluginDiagnosticProjection,
+): PluginDiagnosticProjection {
+  return copyPluginDiagnostic(diagnostic);
+}
+
+function parsePluginDiagnostics(value: unknown): readonly PluginDiagnosticProjection[] | undefined {
+  if (!Array.isArray(value) || value.length > MAX_PERSISTED_PLUGIN_DIAGNOSTICS) return undefined;
+  const parsed = value.map(parsePluginDiagnosticProjection);
+  return parsed.every((item): item is PluginDiagnosticProjection => item !== undefined)
+    ? parsed
+    : undefined;
+}
+
+export function parsePluginDiagnosticProjection(value: unknown): PluginDiagnosticProjection | undefined {
+  const record = asRecord(value);
+  if (!record) return undefined;
+  const source = record.source;
+  const trustLane = record.trustLane;
+  const strings = ["runId", "pluginId", "pluginName", "hookName", "errorName", "errorMessage", "dedupeKey"] as const;
+  if (
+    (source !== "memory" && source !== "workspace" && source !== "cached")
+    || (trustLane !== "host-provided" && trustLane !== "workspace-trusted" && trustLane !== "cached-external")
+    || PLUGIN_DIAGNOSTIC_TRUST_BY_SOURCE[source] !== trustLane
+    || record.status !== "error"
+    || !strings.every((key) => typeof record[key] === "string" && record[key].trim().length > 0)
+    || !PLUGIN_DIAGNOSTIC_DEDUPE_KEY.test(record.dedupeKey as string)
+    || (record.exitStatus !== undefined
+      && (typeof record.exitStatus !== "string" || record.exitStatus.trim().length === 0))
+    || typeof record.startedAt !== "number"
+    || !Number.isFinite(record.startedAt)
+    || record.startedAt < 0
+  ) {
+    return undefined;
+  }
+  return createPluginDiagnosticProjection({
+    runId: record.runId as string,
+    source,
+    trustLane,
+    pluginId: record.pluginId as string,
+    pluginName: record.pluginName as string,
+    hookName: record.hookName as string,
+    status: "error",
+    errorName: record.errorName as string,
+    errorMessage: record.errorMessage as string,
+    ...(typeof record.exitStatus === "string" ? { exitStatus: record.exitStatus } : {}),
+    dedupeKey: record.dedupeKey as string,
+    startedAt: record.startedAt,
+  });
+}
+
+function parseEvolutionProposals(value: unknown): readonly EvolutionProposalProjection[] | undefined {
+  if (!Array.isArray(value) || value.length > MAX_EVOLUTION_PROPOSALS) return undefined;
+  const parsed = value.map(parseEvolutionProposal);
+  return parsed.every((item): item is EvolutionProposalProjection => item !== undefined)
+    ? parsed
+    : undefined;
+}
+
+function parseEvolutionProposal(value: unknown): EvolutionProposalProjection | undefined {
+  const record = asRecord(value);
+  if (!record) return undefined;
+  const requiredIdentities = ["id", "runId", "candidateId", "creatorId", "evaluatorId", "attestorId"] as const;
+  const state = record.state;
+  const changedAssets = parseEvolutionChangedAssets(record.changedAssets);
+  const hashes = parseEvolutionHashes(record.hashes);
+  const comparison = hasOwn(record, "comparison") ? parseEvolutionComparison(record.comparison) : undefined;
+  const attestation = hasOwn(record, "attestation") ? parseEvolutionAttestation(record.attestation) : undefined;
+  const cleanup = parseEvolutionCleanup(record.cleanup);
+  const failures = parseBoundedEvolutionStrings(record.failures, 32, 256);
+  const artifactRefs = parseBoundedEvolutionStrings(record.artifactRefs, 32, 1_000);
+  if (
+    !requiredIdentities.every((key) => isBoundedNonEmptyString(record[key], 256))
+    || !EVOLUTION_STATE_SET.has(state as EvolutionProposalProjection["state"])
+    || record.isolation !== "worktree"
+    || (record.isolatedBranch !== undefined && !isBoundedNonEmptyString(record.isolatedBranch, 512))
+    || (record.isolatedWorktree !== undefined && !isBoundedNonEmptyString(record.isolatedWorktree, 1_000))
+    || typeof record.heldOutBenchmark !== "boolean"
+    || !isBoundedNonEmptyString(record.heldOutBenchmarkId, 256)
+    || record.humanApproval !== "pending"
+    || record.mergeRequiresHumanApproval !== true
+    || typeof record.stale !== "boolean"
+    || !changedAssets
+    || !hashes
+    || (hasOwn(record, "comparison") && !comparison)
+    || (hasOwn(record, "attestation") && !attestation)
+    || !cleanup
+    || !failures
+    || !isBoundedString(record.summary, 512)
+    || !artifactRefs
+    || !isCanonicalUtcMilliseconds(record.createdAt)
+  ) {
+    return undefined;
+  }
+  return copyEvolutionProposal({
+    id: record.id as string,
+    runId: record.runId as string,
+    candidateId: record.candidateId as string,
+    creatorId: record.creatorId as string,
+    evaluatorId: record.evaluatorId as string,
+    attestorId: record.attestorId as string,
+    state: state as EvolutionProposalProjection["state"],
+    isolation: "worktree",
+    ...(typeof record.isolatedBranch === "string" ? { isolatedBranch: record.isolatedBranch } : {}),
+    ...(typeof record.isolatedWorktree === "string" ? { isolatedWorktree: record.isolatedWorktree } : {}),
+    heldOutBenchmark: record.heldOutBenchmark,
+    heldOutBenchmarkId: record.heldOutBenchmarkId as string,
+    humanApproval: "pending",
+    mergeRequiresHumanApproval: true,
+    stale: record.stale,
+    changedAssets,
+    hashes,
+    ...(comparison ? { comparison } : {}),
+    ...(attestation ? { attestation } : {}),
+    cleanup,
+    failures,
+    summary: record.summary as string,
+    artifactRefs,
+    createdAt: record.createdAt as string,
+  });
+}
+
+function parseEvolutionChangedAssets(
+  value: unknown,
+): EvolutionProposalProjection["changedAssets"] | undefined {
+  if (!Array.isArray(value) || value.length > 128) return undefined;
+  const parsed = value.map((entry) => {
+    const record = asRecord(entry);
+    return record
+      && isBoundedNonEmptyString(record.path, 1_000)
+      && isBoundedNonEmptyString(record.sha256, 80)
+      ? { path: record.path, sha256: record.sha256 }
+      : undefined;
+  });
+  return parsed.every((entry): entry is { readonly path: string; readonly sha256: string } => entry !== undefined)
+    ? parsed
+    : undefined;
+}
+
+function parseEvolutionHashes(value: unknown): EvolutionProposalProjection["hashes"] | undefined {
+  const record = asRecord(value);
+  if (!record) return undefined;
+  const required = ["evaluator", "evaluatorEnvironment", "policy", "suite"] as const;
+  const optional = [
+    "baseCommit",
+    "candidateCommit",
+    "patch",
+    "candidateArtifact",
+    "baselineResult",
+    "candidateResult",
+  ] as const;
+  if (
+    !required.every((key) => typeof record[key] === "string" && SHA256_DIGEST.test(record[key]))
+    || !optional.every((key) => record[key] === undefined || isBoundedNonEmptyString(record[key], 80))
+  ) {
+    return undefined;
+  }
+  return {
+    ...(typeof record.baseCommit === "string" ? { baseCommit: record.baseCommit } : {}),
+    ...(typeof record.candidateCommit === "string" ? { candidateCommit: record.candidateCommit } : {}),
+    ...(typeof record.patch === "string" ? { patch: record.patch } : {}),
+    ...(typeof record.candidateArtifact === "string" ? { candidateArtifact: record.candidateArtifact } : {}),
+    evaluator: record.evaluator as string,
+    evaluatorEnvironment: record.evaluatorEnvironment as string,
+    policy: record.policy as string,
+    suite: record.suite as string,
+    ...(typeof record.baselineResult === "string" ? { baselineResult: record.baselineResult } : {}),
+    ...(typeof record.candidateResult === "string" ? { candidateResult: record.candidateResult } : {}),
+  };
+}
+
+function parseEvolutionComparison(
+  value: unknown,
+): NonNullable<EvolutionProposalProjection["comparison"]> | undefined {
+  const record = asRecord(value);
+  if (
+    !record
+    || !isFiniteNumber(record.baselineScore)
+    || !isFiniteNumber(record.candidateScore)
+    || !isFiniteNumber(record.delta)
+    || typeof record.passed !== "boolean"
+    || typeof record.thresholdsHash !== "string"
+    || !SHA256_DIGEST.test(record.thresholdsHash)
+  ) {
+    return undefined;
+  }
+  return {
+    baselineScore: record.baselineScore,
+    candidateScore: record.candidateScore,
+    delta: record.delta,
+    passed: record.passed,
+    thresholdsHash: record.thresholdsHash,
+  };
+}
+
+function parseEvolutionAttestation(
+  value: unknown,
+): NonNullable<EvolutionProposalProjection["attestation"]> | undefined {
+  const record = asRecord(value);
+  if (
+    !record
+    || !isCanonicalUtcMilliseconds(record.timestamp)
+    || !isNonNegativeInteger(record.maxAgeMs)
+    || record.maxAgeMs > 3_600_000
+    || typeof record.branchExists !== "boolean"
+    || typeof record.worktreeExists !== "boolean"
+  ) {
+    return undefined;
+  }
+  return {
+    timestamp: record.timestamp,
+    maxAgeMs: record.maxAgeMs,
+    branchExists: record.branchExists,
+    worktreeExists: record.worktreeExists,
+  };
+}
+
+function parseEvolutionCleanup(value: unknown): EvolutionCleanupProjection | undefined {
+  const record = asRecord(value);
+  if (
+    !record
+    || !EVOLUTION_CLEANUP_STATUS_SET.has(record.status as EvolutionCleanupProjection["status"])
+    || !Array.isArray(record.resources)
+    || record.resources.length > 16
+    || (record.summary !== undefined && !isBoundedString(record.summary, 512))
+  ) {
+    return undefined;
+  }
+  const resources = record.resources.map((entry) => {
+    const resource = asRecord(entry);
+    return resource
+      && EVOLUTION_RESOURCE_KIND_SET.has(resource.kind as EvolutionCleanupResourceProjection["kind"])
+      && isBoundedNonEmptyString(resource.identity, 1_000)
+      && EVOLUTION_RESOURCE_STATUS_SET.has(resource.status as EvolutionCleanupResourceProjection["status"])
+      ? {
+          kind: resource.kind as EvolutionCleanupResourceProjection["kind"],
+          identity: resource.identity,
+          status: resource.status as EvolutionCleanupResourceProjection["status"],
+        }
+      : undefined;
+  });
+  if (!resources.every((entry): entry is EvolutionCleanupResourceProjection => entry !== undefined)) {
+    return undefined;
+  }
+  return {
+    status: record.status as EvolutionCleanupProjection["status"],
+    resources,
+    ...(typeof record.summary === "string" ? { summary: record.summary } : {}),
+  };
+}
+
+function parseBoundedEvolutionStrings(
+  value: unknown,
+  maximumItems: number,
+  maximumLength: number,
+): readonly string[] | undefined {
+  return Array.isArray(value)
+    && value.length <= maximumItems
+    && value.every((entry) => isBoundedNonEmptyString(entry, maximumLength))
+    ? value
+    : undefined;
+}
+
+function isBoundedString(value: unknown, maximumLength: number): value is string {
+  return typeof value === "string" && value.length <= maximumLength;
+}
+
+function isBoundedNonEmptyString(value: unknown, maximumLength: number): value is string {
+  return isBoundedString(value, maximumLength) && value.trim().length > 0;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isCanonicalUtcMilliseconds(value: unknown): value is string {
+  return typeof value === "string"
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)
+    && Number.isFinite(Date.parse(value));
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -858,6 +1706,13 @@ function parseAskUserQuestionRequest(value: unknown): AskUserQuestionRequest | u
   if (hasOwn(record, "title") && !isNonEmptyString(record.title)) {
     return undefined;
   }
+  if (
+    hasOwn(record, "kind")
+    && record.kind !== "security-approval"
+    && record.kind !== "user-decision"
+  ) {
+    return undefined;
+  }
 
   const questions = record.questions.map(parseAskUserQuestion);
   if (questions.some((question) => question === undefined)) {
@@ -868,10 +1723,28 @@ function parseAskUserQuestionRequest(value: unknown): AskUserQuestionRequest | u
   );
 
   return {
+    kind: record.kind === "security-approval" ? "security-approval" : "user-decision",
     id: record.id,
     ...(typeof record.title === "string" ? { title: record.title } : {}),
     questions: parsedQuestions,
   };
+}
+
+function parseSecurityApprovalRules(value: unknown): readonly PersistedSecurityApprovalRule[] | undefined {
+  if (!Array.isArray(value) || value.length > 256) return undefined;
+  const rules: PersistedSecurityApprovalRule[] = [];
+  const seen = new Set<string>();
+  for (const candidate of value) {
+    const record = asRecord(candidate);
+    if (!record || record.kind !== "tool" || !isSafePermissionRuleKey(record.key)) {
+      return undefined;
+    }
+    if (!seen.has(record.key)) {
+      seen.add(record.key);
+      rules.push({ kind: "tool", key: record.key });
+    }
+  }
+  return rules;
 }
 
 function parseAskUserQuestion(value: unknown): AskUserQuestion | undefined {
@@ -919,13 +1792,26 @@ function parseAskUserQuestionOption(value: unknown): AskUserQuestionOption | und
 
 function parseWorkGraph(value: unknown): WorkGraph | undefined {
   const record = asRecord(value);
+  if (!record) {
+    return undefined;
+  }
   const constraints = parseOptionalStringList(record, "constraints");
+  const qualityProfile = hasOwn(record, "qualityProfile") ? record.qualityProfile : "minimal";
+  const currentStage = hasOwn(record, "currentStage") ? record.currentStage : "work";
+  const gateStatus = hasOwn(record, "gateStatus") ? record.gateStatus : "unproven";
+  const iteration = hasOwn(record, "iteration") ? record.iteration : 0;
   if (
-    !record
-    || !isNonEmptyString(record.id)
+    !isNonEmptyString(record.id)
     || !Array.isArray(record.nodes)
     || (hasOwn(record, "goal") && !isNonEmptyString(record.goal))
     || constraints === null
+    || typeof qualityProfile !== "string"
+    || !QUALITY_PROFILE_SET.has(qualityProfile)
+    || typeof currentStage !== "string"
+    || !QUALITY_HARNESS_STAGE_SET.has(currentStage)
+    || typeof gateStatus !== "string"
+    || !QUALITY_GATE_STATUS_SET.has(gateStatus)
+    || !isNonNegativeInteger(iteration)
     || (record.approval !== "pending" && record.approval !== "approved" && record.approval !== "rejected")
   ) {
     return undefined;
@@ -942,20 +1828,189 @@ function parseWorkGraph(value: unknown): WorkGraph | undefined {
     id: record.id,
     ...(typeof record.goal === "string" ? { goal: record.goal } : {}),
     ...(constraints === undefined ? {} : { constraints }),
+    qualityProfile: qualityProfile as QualityProfile,
+    currentStage: currentStage as QualityHarnessStage,
+    gateStatus: gateStatus as QualityGateStatus,
+    iteration,
     approval: record.approval,
     nodes: parsedNodes,
   };
 }
 
-function parseWorkNode(value: unknown): WorkNode | undefined {
+function parseWorkProposalIdentity(value: unknown): WorkProposalIdentity | undefined {
   const record = asRecord(value);
-  const dependsOn = parseStringList(record?.dependsOn);
-  const fileOwnership = parseStringList(record?.fileOwnership);
-  const acceptanceCriteria = parseOptionalStringList(record, "acceptanceCriteria");
-  const evidenceRefs = parseStringList(record?.evidenceRefs);
+  return record
+    && isNonEmptyString(record.graphId)
+    && isNonNegativeInteger(record.iteration)
+    ? { graphId: record.graphId, iteration: record.iteration }
+    : undefined;
+}
+
+function parseWorkProposalOrder(value: unknown): WorkProposalOrderProjection | undefined {
+  const record = asRecord(value);
   if (
     !record
-    || !isNonEmptyString(record.id)
+    || !isNonEmptyString(record.graphId)
+    || !isNonNegativeInteger(record.iteration)
+    || !isNonNegativeInteger(record.startedAt)
+    || (hasOwn(record, "sequence") && !isNonNegativeInteger(record.sequence))
+    || (hasOwn(record, "unsequencedTieSaturated") && record.unsequencedTieSaturated !== true)
+    || !Array.isArray(record.superseded)
+    || record.superseded.length > MAX_SUPERSEDED_WORK_PROPOSALS
+  ) {
+    return undefined;
+  }
+  const superseded = record.superseded.map(parseWorkProposalIdentity);
+  if (superseded.some((identity) => identity === undefined)) return undefined;
+  const identities = superseded.filter(
+    (identity): identity is WorkProposalIdentity => identity !== undefined,
+  );
+  const keys = identities.map((identity) => JSON.stringify([identity.graphId, identity.iteration]));
+  if (
+    new Set(keys).size !== keys.length
+    || keys.includes(JSON.stringify([record.graphId, record.iteration]))
+  ) {
+    return undefined;
+  }
+  return copyWorkProposalOrder({
+    graphId: record.graphId,
+    iteration: record.iteration,
+    startedAt: record.startedAt,
+    ...(typeof record.sequence === "number" ? { sequence: record.sequence } : {}),
+    ...(record.unsequencedTieSaturated === true ? { unsequencedTieSaturated: true as const } : {}),
+    superseded: identities,
+  });
+}
+
+function parseQualityReviewProjection(value: unknown): QualityReviewProjection | undefined {
+  const record = asRecord(value);
+  if (
+    !record
+    || !isNonEmptyString(record.runId)
+    || !isNonEmptyString(record.graphId)
+    || (hasOwn(record, "profile")
+      && (typeof record.profile !== "string" || !QUALITY_PROFILE_SET.has(record.profile)))
+    || (hasOwn(record, "currentStage")
+      && (typeof record.currentStage !== "string"
+        || !QUALITY_HARNESS_STAGE_SET.has(record.currentStage)))
+    || (hasOwn(record, "iteration") && !isNonNegativeInteger(record.iteration))
+    || !isNonNegativeInteger(record.refineCount)
+    || !isNonNegativeInteger(record.pivotCount)
+    || typeof record.latestDecision !== "string"
+    || !QUALITY_GATE_STATUS_SET.has(record.latestDecision)
+    || !Array.isArray(record.history)
+    || record.history.length > MAX_QUALITY_REVIEW_HISTORY
+  ) {
+    return undefined;
+  }
+  const history = record.history.map(parseQualityReviewHistoryEntry);
+  if (history.some((entry) => entry === undefined)) return undefined;
+  return {
+    runId: record.runId,
+    graphId: record.graphId,
+    ...(typeof record.profile === "string" && QUALITY_PROFILE_SET.has(record.profile)
+      ? { profile: record.profile as QualityProfile }
+      : {}),
+    ...(typeof record.currentStage === "string" && QUALITY_HARNESS_STAGE_SET.has(record.currentStage)
+      ? { currentStage: record.currentStage as QualityHarnessStage }
+      : {}),
+    ...(isNonNegativeInteger(record.iteration) ? { iteration: record.iteration } : {}),
+    refineCount: record.refineCount,
+    pivotCount: record.pivotCount,
+    latestDecision: record.latestDecision as QualityGateStatus,
+    history: history.filter((entry): entry is QualityReviewHistoryEntry => entry !== undefined),
+  };
+}
+
+function parseQualityReviewHistoryEntry(value: unknown): QualityReviewHistoryEntry | undefined {
+  const record = asRecord(value);
+  const failures = parseStringList(record?.failures);
+  const evidenceRefs = parseStringList(record?.evidenceRefs);
+  const artifactRefs = parseStringList(record?.artifactRefs);
+  if (
+    !record
+    || (record.event !== "gate" && record.event !== "refine" && record.event !== "pivot" && record.event !== "completed")
+    || typeof record.stage !== "string"
+    || !QUALITY_HARNESS_STAGE_SET.has(record.stage)
+    || typeof record.decision !== "string"
+    || !QUALITY_GATE_STATUS_SET.has(record.decision)
+    || !isNonNegativeInteger(record.iteration)
+    || (hasOwn(record, "reason") && !isNonEmptyString(record.reason))
+    || !failures
+    || failures.length > 32
+    || !evidenceRefs
+    || evidenceRefs.length > 64
+    || !artifactRefs
+    || artifactRefs.length > 64
+    || (hasOwn(record, "artifactHash") && !isNonEmptyString(record.artifactHash))
+    || (hasOwn(record, "reviewedArtifactHash") && !isNonEmptyString(record.reviewedArtifactHash))
+    || (hasOwn(record, "currentArtifactHash") && !isNonEmptyString(record.currentArtifactHash))
+    || (hasOwn(record, "reviewerId") && !isNonEmptyString(record.reviewerId))
+    || (hasOwn(record, "reviewerRunId") && !isNonEmptyString(record.reviewerRunId))
+    || (hasOwn(record, "provider") && !isNonEmptyString(record.provider))
+    || (hasOwn(record, "model") && !isNonEmptyString(record.model))
+    || (hasOwn(record, "route")
+      && record.route !== "direct"
+      && record.route !== "frontier"
+      && record.route !== "commodity"
+      && record.route !== "fallback")
+    || (hasOwn(record, "count") && !isNonNegativeInteger(record.count))
+    || (hasOwn(record, "limit") && !isNonNegativeInteger(record.limit))
+    || typeof record.independentVerification !== "boolean"
+    || typeof record.stale !== "boolean"
+    || !isNonNegativeFinite(record.startedAt)
+  ) {
+    return undefined;
+  }
+  return {
+    event: record.event,
+    stage: record.stage as QualityHarnessStage,
+    decision: record.decision as QualityGateStatus,
+    iteration: record.iteration,
+    ...(typeof record.reason === "string" ? { reason: record.reason } : {}),
+    failures,
+    evidenceRefs,
+    artifactRefs,
+    ...(typeof record.artifactHash === "string" ? { artifactHash: record.artifactHash } : {}),
+    ...(typeof record.reviewedArtifactHash === "string"
+      ? { reviewedArtifactHash: record.reviewedArtifactHash }
+      : {}),
+    ...(typeof record.currentArtifactHash === "string"
+      ? { currentArtifactHash: record.currentArtifactHash }
+      : {}),
+    ...(typeof record.reviewerId === "string" ? { reviewerId: record.reviewerId } : {}),
+    ...(typeof record.reviewerRunId === "string" ? { reviewerRunId: record.reviewerRunId } : {}),
+    ...(typeof record.provider === "string" ? { provider: record.provider } : {}),
+    ...(typeof record.model === "string" ? { model: record.model } : {}),
+    ...(typeof record.route === "string"
+      ? { route: record.route as NonNullable<QualityReviewHistoryEntry["route"]> }
+      : {}),
+    ...(typeof record.count === "number" ? { count: record.count } : {}),
+    ...(typeof record.limit === "number" ? { limit: record.limit } : {}),
+    independentVerification: record.independentVerification,
+    stale: record.stale,
+    startedAt: record.startedAt,
+  };
+}
+
+function parseWorkNode(value: unknown): WorkNode | undefined {
+  const record = asRecord(value);
+  if (!record) {
+    return undefined;
+  }
+  const dependsOn = parseStringList(record.dependsOn);
+  const fileOwnership = parseStringList(record.fileOwnership);
+  const acceptanceCriteria = parseOptionalStringList(record, "acceptanceCriteria");
+  const evidenceRefs = parseStringList(record.evidenceRefs);
+  const stage = hasOwn(record, "stage") ? record.stage : "work";
+  const role = hasOwn(record, "role") ? record.role : "worker";
+  const attempt = hasOwn(record, "attempt") ? record.attempt : 0;
+  const artifactRefs = hasOwn(record, "artifactRefs")
+    ? parseStringList(record.artifactRefs)
+    : [];
+  const reviewRequired = hasOwn(record, "reviewRequired") ? record.reviewRequired : false;
+  if (
+    !isNonEmptyString(record.id)
     || !isNonEmptyString(record.title)
     || !isNonEmptyString(record.prompt)
     || typeof record.status !== "string"
@@ -965,6 +2020,13 @@ function parseWorkNode(value: unknown): WorkNode | undefined {
     || (hasOwn(record, "manifestId") && !isNonEmptyString(record.manifestId))
     || acceptanceCriteria === null
     || !evidenceRefs
+    || typeof stage !== "string"
+    || !QUALITY_HARNESS_STAGE_SET.has(stage)
+    || typeof role !== "string"
+    || !WORK_NODE_ROLE_SET.has(role)
+    || !isNonNegativeInteger(attempt)
+    || !artifactRefs
+    || typeof reviewRequired !== "boolean"
   ) {
     return undefined;
   }
@@ -976,8 +2038,13 @@ function parseWorkNode(value: unknown): WorkNode | undefined {
     dependsOn,
     fileOwnership,
     ...(typeof record.manifestId === "string" ? { manifestId: record.manifestId } : {}),
-    ...(acceptanceCriteria === undefined ? {} : { acceptanceCriteria }),
+    acceptanceCriteria: acceptanceCriteria ?? [],
     evidenceRefs,
+    stage: stage as QualityHarnessStage,
+    role: role as WorkNodeRole,
+    attempt,
+    artifactRefs,
+    reviewRequired,
   };
 }
 
@@ -1108,14 +2175,16 @@ function parseAsyncJob(value: unknown): AsyncJob | undefined {
 
 function parseAgentRunUsageRoute(value: unknown): AgentRunUsageRoute | undefined {
   const record = asRecord(value);
-  const eventIds = parseStringList(record?.eventIds);
+  const eventIds = record && hasOwn(record, "eventIds")
+    ? parseStringList(record.eventIds)
+    : undefined;
   if (
     !record
     || typeof record.provider !== "string"
     || record.provider.trim().length === 0
     || typeof record.model !== "string"
     || record.model.trim().length === 0
-    || !eventIds
+    || (hasOwn(record, "eventIds") && !eventIds)
     || (hasOwn(record, "inputTokens") && !isNonNegativeInteger(record.inputTokens))
     || (hasOwn(record, "outputTokens") && !isNonNegativeInteger(record.outputTokens))
     || (hasOwn(record, "cacheReadTokens") && !isNonNegativeInteger(record.cacheReadTokens))
@@ -1125,10 +2194,10 @@ function parseAgentRunUsageRoute(value: unknown): AgentRunUsageRoute | undefined
   ) {
     return undefined;
   }
-  return copyAgentRunUsageRoute({
+  return {
     provider: record.provider.trim(),
     model: record.model.trim(),
-    eventIds,
+    ...(eventIds === undefined ? {} : { eventIds }),
     ...(typeof record.inputTokens === "number" ? { inputTokens: record.inputTokens } : {}),
     ...(typeof record.outputTokens === "number" ? { outputTokens: record.outputTokens } : {}),
     ...(typeof record.cacheReadTokens === "number"
@@ -1141,7 +2210,7 @@ function parseAgentRunUsageRoute(value: unknown): AgentRunUsageRoute | undefined
       ? { cacheSavingsUsd: record.cacheSavingsUsd }
       : {}),
     ...(typeof record.costUsd === "number" ? { costUsd: record.costUsd } : {}),
-  });
+  };
 }
 
 function parseAgentRunUsageRoutes(value: unknown): readonly AgentRunUsageRoute[] | undefined {
@@ -1175,7 +2244,7 @@ function usageRoutesMatchAggregate(
     const routeKey = `${route.provider}\0${route.model}`;
     if (routeKeys.has(routeKey)) return false;
     routeKeys.add(routeKey);
-    for (const eventId of route.eventIds) {
+    for (const eventId of route.eventIds ?? []) {
       if (!aggregateIds.has(eventId) || routedIds.has(eventId)) return false;
       routedIds.add(eventId);
     }
@@ -1215,13 +2284,15 @@ function usageRoutesMatchAggregate(
 
 function parseAgentRunUsage(value: unknown): AgentRunUsage | undefined {
   const record = asRecord(value);
-  const eventIds = parseStringList(record?.eventIds);
+  const eventIds = record && hasOwn(record, "eventIds")
+    ? parseStringList(record.eventIds)
+    : undefined;
   const routes = record && hasOwn(record, "routes")
     ? parseAgentRunUsageRoutes(record.routes)
     : undefined;
   if (
     !record
-    || !eventIds
+    || (hasOwn(record, "eventIds") && !eventIds)
     || (hasOwn(record, "inputTokens") && !isNonNegativeInteger(record.inputTokens))
     || (hasOwn(record, "outputTokens") && !isNonNegativeInteger(record.outputTokens))
     || (hasOwn(record, "cacheReadTokens") && !isNonNegativeInteger(record.cacheReadTokens))
@@ -1232,13 +2303,18 @@ function parseAgentRunUsage(value: unknown): AgentRunUsage | undefined {
   ) {
     return undefined;
   }
-  if (routes && !usageRoutesMatchAggregate(record, eventIds, routes)) {
+  if (
+    eventIds
+    && routes
+    && routes.every((route) => (route.eventIds?.length ?? 0) > 0)
+    && !usageRoutesMatchAggregate(record, eventIds, routes)
+  ) {
     return undefined;
   }
 
 
   return copyAgentRunUsage({
-    eventIds,
+    eventIds: eventIds ?? [],
     ...(typeof record.inputTokens === "number" ? { inputTokens: record.inputTokens } : {}),
     ...(typeof record.outputTokens === "number" ? { outputTokens: record.outputTokens } : {}),
     ...(typeof record.cacheReadTokens === "number"
@@ -1253,4 +2329,66 @@ function parseAgentRunUsage(value: unknown): AgentRunUsage | undefined {
     ...(typeof record.costUsd === "number" ? { costUsd: record.costUsd } : {}),
     ...(routes === undefined ? {} : { routes }),
   });
+}
+
+function parseAgentUsageTotals(value: unknown): AgentUsageTotals | undefined {
+  const record = asRecord(value);
+  if (!record || !usageCounterRecordIsValid(record)) return undefined;
+  let routes: AgentUsageRouteTotals[] | undefined;
+  if (hasOwn(record, "routes")) {
+    if (!Array.isArray(record.routes)) return undefined;
+    routes = [];
+    const routeKeys = new Set<string>();
+    for (const value of record.routes) {
+      const route = asRecord(value);
+      if (
+        !route
+        || !isNonEmptyString(route.provider)
+        || !isNonEmptyString(route.model)
+        || !usageCounterRecordIsValid(route)
+      ) {
+        return undefined;
+      }
+      const key = `${route.provider.trim()}\0${route.model.trim()}`;
+      if (routeKeys.has(key)) return undefined;
+      routeKeys.add(key);
+      routes.push({
+        provider: route.provider.trim(),
+        model: route.model.trim(),
+        ...copyUsageCounterFields(route),
+      });
+    }
+  }
+  return copyAgentUsageTotals({
+    ...copyUsageCounterFields(record),
+    ...(routes === undefined ? {} : { routes }),
+  });
+}
+
+function usageCounterRecordIsValid(record: Record<string, unknown>): boolean {
+  return !(
+    (hasOwn(record, "inputTokens") && !isNonNegativeInteger(record.inputTokens))
+    || (hasOwn(record, "outputTokens") && !isNonNegativeInteger(record.outputTokens))
+    || (hasOwn(record, "cacheReadTokens") && !isNonNegativeInteger(record.cacheReadTokens))
+    || (hasOwn(record, "cacheWriteTokens") && !isNonNegativeInteger(record.cacheWriteTokens))
+    || (hasOwn(record, "cacheSavingsUsd") && !isNonNegativeFinite(record.cacheSavingsUsd))
+    || (hasOwn(record, "costUsd") && !isNonNegativeFinite(record.costUsd))
+  );
+}
+
+function copyUsageCounterFields(record: Record<string, unknown>): Omit<AgentUsageTotals, "routes"> {
+  return {
+    ...(typeof record.inputTokens === "number" ? { inputTokens: record.inputTokens } : {}),
+    ...(typeof record.outputTokens === "number" ? { outputTokens: record.outputTokens } : {}),
+    ...(typeof record.cacheReadTokens === "number"
+      ? { cacheReadTokens: record.cacheReadTokens }
+      : {}),
+    ...(typeof record.cacheWriteTokens === "number"
+      ? { cacheWriteTokens: record.cacheWriteTokens }
+      : {}),
+    ...(typeof record.cacheSavingsUsd === "number"
+      ? { cacheSavingsUsd: record.cacheSavingsUsd }
+      : {}),
+    ...(typeof record.costUsd === "number" ? { costUsd: record.costUsd } : {}),
+  };
 }

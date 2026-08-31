@@ -268,7 +268,7 @@ test("turn receipt derives every source count from its auditable source refs", (
   assert.equal(output, "▤ 3 sent · ~18.1k tok");
 });
 
-test("WorkShellView renders categorized context proof outside the conversation transcript", async () => {
+test("WorkShellView keeps context proof to one quiet row outside the transcript", async () => {
   const output = await renderView({
     activePanel: { title: "Status", lines: ["Ready"] },
     contextPacket: packet({ id: "crp-b203" }),
@@ -280,7 +280,7 @@ test("WorkShellView renders categorized context proof outside the conversation t
   });
 
   assert.match(output, /▤ 3 sent · ~18\.1k tok/);
-  assert.match(output, /Guidance 1 · Memory 2/);
+  assert.doesNotMatch(output, /Guidance 1 · Memory 2/);
   assert.equal(output.match(/▤/g)?.length, 1);
   assert.doesNotMatch(output, /SUBMITTED crp-b203|turn-session-1-7/);
 });
@@ -1014,6 +1014,77 @@ test("Context Desk compares lifecycle receipts with human labels and token delta
   // Comparing the next packet does not drop the previously submitted receipt.
   assert.match(output, /Next request · ready to send/);
   assert.doesNotMatch(output, /crp-a91f|crp-b203|receipt-submitted|receipt-preview|turn-session/);
+});
+
+test("Korean Context Desk localizes runbook, compare, and action receipt chrome only", async () => {
+  const contextPacket = packet({
+    id: "crp-b203",
+    included: [workNodeSource(), ...packet().included],
+    sourceCounts: { included: 3, excluded: 3, warnings: 0 },
+  });
+  const output = await renderView(
+    {
+      uiLocale: "ko",
+      contextPacket,
+      contextInspectorCursor: 0,
+      contextPreviewReceipt: receipt({ packetId: "crp-b203", tokenEstimate: 20_600 }),
+      contextSubmittedReceipt: receipt({
+        id: "receipt-submitted-ko",
+        packetId: "crp-a91f",
+        state: "submitted",
+        turnId: "turn-ko",
+        tokenEstimate: 18_100,
+      }),
+      contextPacketChange: {
+        kind: "safety-refresh",
+        removedSourceIds: ["workspace-1"],
+        addedSourceIds: ["bridge-1"],
+        protectedSourceIds: [],
+        reason: "RAW_CHANGE_REASON",
+      },
+      contextActionReceipt: {
+        id: "action-ko",
+        action: "include",
+        sourceId: "workspace-1",
+        sourceLabel: "AGENTS.md EXACT",
+        message: "RAW_ACTION_MESSAGE",
+        succeeded: true,
+        canUndo: true,
+        before: { includedInModel: false, tokenEstimate: 42 },
+        after: { includedInModel: true, tokenEstimate: 42 },
+      },
+      terminalColumns: 160,
+      terminalRows: 50,
+    },
+    { columns: 160, rows: 50 },
+  );
+
+  assert.match(output, /실행 지침 · Ship the Context Desk/);
+  assert.match(output, /진행 중 · Wire the runbook block into the packet view/);
+  assert.match(output, /다음 · 입력이 필요함/);
+  assert.match(output, /증거 · 3개 중 1개 수집됨/);
+  assert.match(output, /최근 전송 이후 · \+ recent Q&A/);
+  assert.match(output, /~2\.5k 증가/);
+  assert.match(output, /증명 · 포함됨 · AGENTS\.md EXACT · ~42t 전송됨 · 실행 취소 가능/);
+  assert.match(output, /Context Desk runbook|Ship the Context Desk|AGENTS\.md EXACT/,
+    "artifact and work-node payload stays unchanged");
+  assert.doesNotMatch(output, /Runbook ·|Doing ·|Next · Needs your input|Evidence ·|Since last send|larger|now sent|undo ready/);
+  assert.doesNotMatch(output, /RAW_CHANGE_REASON|RAW_ACTION_MESSAGE|receipt-submitted-ko|turn-ko|action-ko/);
+
+  const detail = await renderView({
+    uiLocale: "ko",
+    contextPacket,
+    contextInspectorCursor: 0,
+    contextInspectorExpanded: "goal-loop-graph-7-node-3",
+    terminalColumns: 100,
+    terminalRows: 50,
+  }, { columns: 100, rows: 50 });
+  assert.match(detail, /목표 · Ship the Context Desk/);
+  assert.match(detail, /상태 · 입력 필요/);
+  assert.match(detail, /유지 조건 · Do not edit engine files/);
+  assert.match(detail, /승인 조건 · Runbook renders before the source list/);
+  assert.match(detail, /증거 · 3개 중 1개 수집됨/);
+  assert.doesNotMatch(detail, /Goal ·|Status · requires action|Must hold ·|Accepted when ·|Evidence · 1 of 3 collected/);
 });
 
 test("Context Desk advertises only the selected source's real capabilities", async () => {
@@ -1918,7 +1989,7 @@ test("narrow Groups delivery lanes keep Sent and Held glyphs without a DELIVERY 
   assert.ok(lines.some((line) => /^○ Held\b/.test(line)), "Held lane must keep its open glyph");
 });
 
-test("compact Groups stays inside its tiny pane allocation with a wrapped composer", async () => {
+test("compact Groups stays inside its bounded pane allocation with a wrapped composer", async () => {
   const terminalColumns = 52;
   const terminalRows = 40;
   const draft = Array.from(
@@ -1937,7 +2008,11 @@ test("compact Groups stays inside its tiny pane allocation with a wrapped compos
   const workbenchRows = Math.max(1, overlayViewportRows - 1);
   const contentRows = Math.max(1, workbenchRows - 1);
   const groupsPaneAllocation = Math.max(2, contentRows - 1 - 2 - 1);
-  assert.equal(groupsPaneAllocation, 2, "the fixture must exercise the minimum Groups pane allocation");
+  assert.equal(
+    groupsPaneAllocation,
+    4,
+    "the fixture must share the Composer's four-row viewport plus both possible overflow markers",
+  );
 
   const output = await renderView(
     {

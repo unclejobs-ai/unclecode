@@ -110,6 +110,11 @@ test("the slash command picker consumes its keys before the Agent Console sees t
 
 test("Alt+A toggles the console from any non-secure composer state", () => {
   assert.deepEqual(decide({ ...ALT_A, open: false }), dispatch({ kind: "open" }));
+  assert.deepEqual(
+    decide({ value: "a", key: { meta: true, escape: true }, open: false }),
+    dispatch({ kind: "open" }),
+    "terminal parsers may retain the escape flag on the combined Alt+A chord",
+  );
   assert.deepEqual(decide({ ...ALT_A, open: true }), dispatch({ kind: "close" }));
   // A draft in the composer must not gate the toggle — only the console's
   // navigation keys are conditioned on an empty composer.
@@ -165,20 +170,28 @@ test("an open console with an empty composer owns navigation and control keys", 
 });
 
 test("Tab walks the console tabs forward and Shift+Tab walks them back", () => {
-  const forward = [["agents", "jobs"], ["jobs", "plan"], ["plan", "agents"]];
+  const forward = [["agents", "jobs"], ["jobs", "plan"], ["plan", "quality"], ["quality", "agents"]];
   for (const [from, to] of forward) {
     assert.deepEqual(
       decide({ key: { tab: true }, tab: from }),
       dispatch({ kind: "tab", tab: to }),
     );
   }
-  const backward = [["agents", "plan"], ["jobs", "agents"], ["plan", "jobs"]];
+  const backward = [["agents", "quality"], ["jobs", "agents"], ["plan", "jobs"], ["quality", "plan"]];
   for (const [from, to] of backward) {
     assert.deepEqual(
       decide({ key: { tab: true, shift: true }, tab: from }),
       dispatch({ kind: "tab", tab: to }),
     );
   }
+});
+
+test("the Quality tab is read-only while navigation and global Ctrl+O remain available", () => {
+  for (const value of ["s", "x", "r"]) {
+    assert.deepEqual(decide({ tab: "quality", value }), CONSUME);
+  }
+  assert.deepEqual(decide({ tab: "quality", value: "j" }), dispatch({ kind: "move", delta: 1 }));
+  assert.deepEqual(decide({ tab: "quality", value: "o", key: { ctrl: true } }), PASS);
 });
 
 test("a composer with a draft keeps every console key as ordinary editing", () => {
@@ -378,7 +391,8 @@ function renderWithInput(element) {
   const stdout = createWritableOutput();
   let output = "";
   stdout.on("data", (chunk) => {
-    output += chunk.toString();
+    const rendered = chunk.toString();
+    if (rendered.includes("\n")) output = rendered;
   });
   const instance = render(element, {
     stdin,
@@ -469,6 +483,7 @@ function consoleSnapshot() {
  */
 function createAgentConsoleEngine(overrides = {}) {
   const calls = {
+    beginSteer: [],
     steer: [],
     cancel: [],
     continue: [],
@@ -514,22 +529,21 @@ function createAgentConsoleEngine(overrides = {}) {
     setMode: async () => {},
     openSessionsPanel: async () => {},
     handleSubmit: async (line) => {
-      if (state.composerMode === "agent-steer") {
-        const selection = resolveAgentConsoleSelection(state.agentConsoleView, state.agentConsole);
-        calls.steer.push({
-          agentRunId: selection?.tab === "agents" ? selection.run.id : undefined,
-          message: line,
-        });
-        setState({
-          composerMode: "default",
-          agentConsoleView: settleAgentConsoleControl(state.agentConsoleView, {
-            status: "accepted",
-            message: "Steered.",
-          }),
-        });
-        return;
-      }
       calls.submitted.push(line);
+    },
+    submitAgentSteer: async (line) => {
+      const selection = resolveAgentConsoleSelection(state.agentConsoleView, state.agentConsole);
+      calls.steer.push({
+        agentRunId: selection?.tab === "agents" ? selection.run.id : undefined,
+        message: line,
+      });
+      setState({
+        composerMode: "default",
+        agentConsoleView: settleAgentConsoleControl(state.agentConsoleView, {
+          status: "accepted",
+          message: "Steered.",
+        }),
+      });
     },
     cancelSensitiveInput: () => {
       if (state.composerMode !== "agent-steer") {
@@ -561,10 +575,16 @@ function createAgentConsoleEngine(overrides = {}) {
     toggleAgentConsoleInspector: () => {
       setState({ agentConsoleView: toggleAgentConsoleInspector(state.agentConsoleView) });
     },
-    beginAgentSteer: () => {
+    beginAgentSteer: (agentRunId) => {
       const view = state.agentConsoleView;
       const selection = resolveAgentConsoleSelection(view, state.agentConsole);
-      if (!view.open || selection?.tab !== "agents" || isSettledAgentRun(selection.run)) {
+      calls.beginSteer.push(agentRunId);
+      if (
+        !view.open
+        || selection?.tab !== "agents"
+        || (agentRunId !== undefined && selection.run.id !== agentRunId)
+        || isSettledAgentRun(selection.run)
+      ) {
         setState({
           agentConsoleView: settleAgentConsoleControl(view, {
             status: "rejected",
@@ -734,6 +754,7 @@ test("the console keyboard drives steer, cancel and continue at the selected run
     stdin.write("s");
     await waitForCondition(() => getState().composerMode === "agent-steer");
     assert.equal(getState().composerMode, "agent-steer", "s opens the steer composer");
+    assert.deepEqual(calls.beginSteer, ["r2"], "steer mode binds the exact selected run identity");
     assert.doesNotMatch(lastFrame(getOutput()), /› s/, "s must never reach the composer draft");
 
     stdin.write("focus on tests");
@@ -827,6 +848,7 @@ test("Tab switches console tabs and Esc closes the console", async () => {
 
     stdin.write("\t");
     await waitForCondition(() => getState().agentConsoleView.tab === "jobs");
+    await waitForCondition(() => /\[Jobs\]/.test(lastFrame(getOutput())));
     assert.equal(getState().agentConsoleView.tab, "jobs");
     assert.match(lastFrame(getOutput()), /\[Jobs\]/);
 
@@ -836,6 +858,7 @@ test("Tab switches console tabs and Esc closes the console", async () => {
 
     stdin.write("\u001b");
     await waitForCondition(() => !getState().agentConsoleView.open);
+    await waitForCondition(() => !/▤ Agent Console/.test(lastFrame(getOutput())));
     assert.equal(getState().agentConsoleView.open, false, "Esc closes the console");
     assert.doesNotMatch(lastFrame(getOutput()), /▤ Agent Console/);
   } finally {
@@ -860,9 +883,12 @@ test("agent-steer keeps hidden telemetry panels from stealing the steer message"
 
       // Typed one keystroke at a time, so the panel's own single-character
       // hotkey (`a` / `c`) really is the first key of the steer message.
+      let typedPrefix = "";
       for (const character of word) {
+        typedPrefix += character;
         stdin.write(character);
-        await new Promise((resolve) => setTimeout(resolve, 40));
+        const visiblePrefix = typedPrefix.trimEnd();
+        await waitForCondition(() => new RegExp(`› ${visiblePrefix}`).test(lastFrame(getOutput())));
       }
       await waitForCondition(() => new RegExp(`› ${word}`).test(lastFrame(getOutput())));
       assert.match(
@@ -1028,6 +1054,32 @@ test("Alt+A out of the steer composer tears the steer draft down with the mode",
   }
 });
 
+test("Alt+A and Enter in one terminal chunk cannot submit an abandoned steer draft", async () => {
+  const { engine, calls, getState } = createAgentConsoleEngine();
+  const { stdin, instance, getOutput } = renderConsolePane(engine);
+
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    stdin.write("\u001ba");
+    await waitForCondition(() => getState().agentConsoleView.open);
+    stdin.write("s");
+    await waitForCondition(() => getState().composerMode === "agent-steer");
+    stdin.write("must stay with the agent");
+    await waitForCondition(() => /› must stay with the agent/.test(lastFrame(getOutput())));
+
+    stdin.write("\u001ba\r");
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    assert.equal(getState().composerMode, "default");
+    assert.equal(getState().agentConsoleView.open, false);
+    assert.deepEqual(calls.submitted, [], "the same-chunk Enter must not reach the provider");
+    assert.deepEqual(calls.steer, [], "the abandoned draft must not reach the agent either");
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
 test("an empty steer with a pending attachment stays empty and keeps the attachment queued", async () => {
   const { engine, calls, getState } = createAgentConsoleEngine();
   let captureCalls = 0;
@@ -1041,7 +1093,7 @@ test("an empty steer with a pending attachment stays empty and keeps the attachm
   try {
     await new Promise((resolve) => setTimeout(resolve, 150));
     stdin.write("\u0016");
-    await waitForCondition(() => captureCalls === 1 && getOutput().includes("[1/5]"));
+    await waitForCondition(() => captureCalls === 1 && /attachments · 1\/5/i.test(getOutput()));
 
     stdin.write("\u001ba");
     await waitForCondition(() => getState().agentConsoleView.open);
@@ -1068,7 +1120,11 @@ test("an empty steer with a pending attachment stays empty and keeps the attachm
     await waitForCondition(
       () => !getState().agentConsoleView.open && !/▤ Agent Console/.test(lastFrame(getOutput())),
     );
-    assert.match(lastFrame(getOutput()), /\[1\/5\]/, "the attachment badge survives the steer");
+    assert.match(
+      lastFrame(getOutput()),
+      /attachments · 1\/5/i,
+      "the attachment count survives the steer outside the input row",
+    );
     assert.equal(getState().composerMode, "default", "normal turn starts outside steer mode");
 
     stdin.write("\r");
@@ -1105,15 +1161,15 @@ test("two Shift+Tab chords in one terminal chunk walk two tabs, not the same one
     // the first event's decision is cached and never read — and the second
     // event must still decide against the tab the first one selected.
     stdin.write("\u001b[Z\u001b[Z");
-    await waitForCondition(() => getState().agentConsoleView.tab === "jobs", 1500);
+    await waitForCondition(() => getState().agentConsoleView.tab === "plan", 1500);
 
     assert.equal(
       getState().agentConsoleView.tab,
-      "jobs",
-      "agents → plan → jobs: the second chord must not replay the first decision",
+      "plan",
+      "agents → quality → plan: the second chord must not replay the first decision",
     );
     assert.equal(getState().agentConsoleView.open, true, "neither chord may close the console");
-    assert.match(lastFrame(getOutput()), /\[Jobs\]/, "the rendered console agrees with the state");
+    assert.match(lastFrame(getOutput()), /\[Plan\]/, "the rendered console agrees with the state");
   } finally {
     instance.unmount();
     instance.cleanup();

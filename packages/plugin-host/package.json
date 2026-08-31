@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@second-claude/core": "file:../../vendor/second-claude/second-claude-core-4.0.0.tgz",
+    "@unclecode/contracts": "file:../contracts",
     "zod": "^4.3.6"
   },
   "exports": {

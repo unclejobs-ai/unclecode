@@ -8,5 +8,6 @@
     "sourceMap": true,
     "composite": true
   },
+  "references": [{ "path": "../contracts" }],
   "include": ["src/**/*.ts"]
 }

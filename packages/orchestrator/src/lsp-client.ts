@@ -1,6 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createInstrumentedLruCache } from "@unclecode/contracts";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import {
+  createOwnedProcessGroupController,
+  type OwnedProcessGroupController,
+} from "./process-group-settlement.js";
 
 export type LspServerConfig = {
   readonly id: string;
@@ -28,7 +33,12 @@ type DiagnosticWaiter = {
   readonly timer: NodeJS.Timeout;
 };
 const FORCE_KILL_DELAY_MS = 2_000;
-
+const MAX_LSP_FRAME_BYTES = 16 * 1024 * 1024;
+const MAX_LSP_INPUT_BUFFER_BYTES = 32 * 1024 * 1024;
+const MIN_LSP_INPUT_BUFFER_CAPACITY = 64 * 1024;
+const LSP_HEADER_TERMINATOR = Buffer.from("\r\n\r\n");
+const MAX_PUBLISHED_DIAGNOSTIC_URIS = 512;
+const MAX_PUBLISHED_DIAGNOSTIC_BYTES = 8 * 1024 * 1024;
 
 function abortError(): Error {
   const error = new Error("The LSP request was aborted.");
@@ -91,13 +101,25 @@ export function resolveDefaultLspServer(
 export class LspJsonRpcClient {
   private child: ChildProcessWithoutNullStreams | undefined;
   private buffer = Buffer.alloc(0);
+  private bufferStart = 0;
+  private bufferEnd = 0;
+  private headerSearchOffset = 0;
+  private pendingBodyStart: number | undefined;
+  private pendingFrameEnd: number | undefined;
   private nextRequestId = 1;
   private readonly pending = new Map<number, PendingRequest>();
-  private readonly publishedDiagnostics = new Map<string, unknown[]>();
+  private readonly publishedDiagnostics = createInstrumentedLruCache<string, unknown[]>({
+    name: "lsp-published-diagnostics",
+    maxEntries: MAX_PUBLISHED_DIAGNOSTIC_URIS,
+    maxRetainedBytes: MAX_PUBLISHED_DIAGNOSTIC_BYTES,
+  });
   private readonly diagnosticWaiters = new Map<string, Set<DiagnosticWaiter>>();
   private stderr = "";
   private closed = false;
   private abortListener: (() => void) | undefined;
+  private processGroup: OwnedProcessGroupController | undefined;
+  private terminationPromise: Promise<void> | undefined;
+  private closePromise: Promise<void> | undefined;
   capabilities: Record<string, unknown> = {};
 
   constructor(
@@ -105,6 +127,7 @@ export class LspJsonRpcClient {
     private readonly cwd: string,
     private readonly timeoutMs: number,
     private readonly signal?: AbortSignal,
+    private readonly forceKillDelayMs = FORCE_KILL_DELAY_MS,
   ) {}
 
   async start(): Promise<void> {
@@ -112,6 +135,12 @@ export class LspJsonRpcClient {
     this.child = spawn(this.config.command, [...this.config.args], {
       cwd: this.cwd,
       stdio: ["pipe", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+    });
+    this.processGroup = createOwnedProcessGroupController({
+      child: this.child,
+      label: this.config.id,
+      forceKillDelayMs: this.forceKillDelayMs,
     });
     this.child.stdout.on("data", (chunk: Buffer) => this.consume(chunk));
     this.child.stderr.on("data", (chunk: Buffer) => {
@@ -185,8 +214,8 @@ export class LspJsonRpcClient {
   }
 
   waitForPublishedDiagnostics(uri: string, timeoutMs = this.timeoutMs): Promise<{ received: boolean; items: unknown[] }> {
-    const current = this.publishedDiagnostics.get(uri);
-    if (current) return Promise.resolve({ received: true, items: current });
+    const current = this.publishedDiagnostics.lookup(uri);
+    if (current.hit) return Promise.resolve({ received: true, items: current.value });
     const { promise, resolve } = Promise.withResolvers<{ received: boolean; items: unknown[] }>();
     let waiter: DiagnosticWaiter;
     const timer = setTimeout(() => {
@@ -203,20 +232,29 @@ export class LspJsonRpcClient {
     return promise;
   }
 
-  async close(): Promise<void> {
-    if (this.closed) return;
-    try {
-      await this.request("shutdown", null, Math.min(500, this.timeoutMs));
-      this.notify("exit", null);
-    } catch {
-      // The process is terminated below when graceful shutdown is unavailable.
+  close(): Promise<void> {
+    this.closePromise ??= this.closeInternal();
+    return this.closePromise;
+  }
+
+  private async closeInternal(): Promise<void> {
+    if (!this.closed) {
+      try {
+        await this.request("shutdown", null, Math.min(500, this.timeoutMs));
+        this.notify("exit", null);
+      } catch {
+        // The process is terminated below when graceful shutdown is unavailable.
+      }
+      this.closed = true;
+      if (this.signal && this.abortListener) {
+        this.signal.removeEventListener("abort", this.abortListener);
+      }
+      this.rejectPending(new Error(`${this.config.id} session closed`));
+      this.settleDiagnosticWaiters();
+      this.publishedDiagnostics.invalidateAll();
+      this.releaseInputBuffer();
     }
-    this.closed = true;
-    if (this.signal && this.abortListener) {
-      this.signal.removeEventListener("abort", this.abortListener);
-    }
-    this.terminateChild();
-    this.rejectPending(new Error(`${this.config.id} session closed`));
+    await this.terminateChild();
   }
 
   private send(message: JsonObject): void {
@@ -226,28 +264,102 @@ export class LspJsonRpcClient {
   }
 
   private consume(chunk: Buffer): void {
-    this.buffer = Buffer.concat([this.buffer, chunk]);
-    while (true) {
-      const headerEnd = this.buffer.indexOf("\r\n\r\n");
-      if (headerEnd < 0) return;
-      const header = this.buffer.subarray(0, headerEnd).toString("ascii");
-      const lengthMatch = /(?:^|\r\n)Content-Length:\s*(\d+)/i.exec(header);
-      if (!lengthMatch) {
-        this.fail(new Error(`${this.config.id} sent an LSP frame without Content-Length`));
+    if (this.closed) return;
+    if (!this.appendInput(chunk)) return;
+    while (!this.closed) {
+      if (this.pendingFrameEnd === undefined) {
+        const unread = this.buffer.subarray(this.bufferStart, this.bufferEnd);
+        const searchFrom = Math.max(0, this.headerSearchOffset - this.bufferStart);
+        const relativeHeaderEnd = unread.indexOf(LSP_HEADER_TERMINATOR, searchFrom);
+        if (relativeHeaderEnd < 0) {
+          this.headerSearchOffset = Math.max(this.bufferStart, this.bufferEnd - 3);
+          return;
+        }
+        const headerEnd = this.bufferStart + relativeHeaderEnd;
+        const header = this.buffer.subarray(this.bufferStart, headerEnd).toString("ascii");
+        const lengthMatch = /(?:^|\r\n)Content-Length:\s*(\d+)/i.exec(header);
+        if (!lengthMatch) {
+          this.fail(new Error(`${this.config.id} sent an LSP frame without Content-Length`));
+          return;
+        }
+        const bodyLength = Number(lengthMatch[1]);
+        if (!Number.isSafeInteger(bodyLength) || bodyLength < 0 || bodyLength > MAX_LSP_FRAME_BYTES) {
+          this.fail(new Error(`${this.config.id} sent an oversized LSP frame`));
+          return;
+        }
+        this.pendingBodyStart = headerEnd + LSP_HEADER_TERMINATOR.length;
+        this.pendingFrameEnd = this.pendingBodyStart + bodyLength;
+      }
+      if (this.bufferEnd < this.pendingFrameEnd) return;
+
+      const bodyStart = this.pendingBodyStart;
+      const frameEnd = this.pendingFrameEnd;
+      if (bodyStart === undefined) {
+        this.fail(new Error(`${this.config.id} reached an invalid LSP parser state`));
         return;
       }
-      const bodyLength = Number(lengthMatch[1]);
-      const bodyStart = headerEnd + 4;
-      if (this.buffer.length < bodyStart + bodyLength) return;
-      const body = this.buffer.subarray(bodyStart, bodyStart + bodyLength).toString("utf8");
-      this.buffer = this.buffer.subarray(bodyStart + bodyLength);
+      const body = this.buffer.subarray(bodyStart, frameEnd).toString("utf8");
+      this.bufferStart = frameEnd;
+      this.headerSearchOffset = frameEnd;
+      this.pendingBodyStart = undefined;
+      this.pendingFrameEnd = undefined;
       try {
         this.handleMessage(JSON.parse(body) as JsonObject);
       } catch (error) {
         this.fail(error instanceof Error ? error : new Error(String(error)));
         return;
       }
+      if (this.bufferStart === this.bufferEnd) this.resetConsumedInput();
     }
+  }
+
+  private appendInput(chunk: Buffer): boolean {
+    const unreadBytes = this.bufferEnd - this.bufferStart;
+    if (chunk.length > MAX_LSP_INPUT_BUFFER_BYTES - unreadBytes) {
+      this.fail(new Error(`${this.config.id} exceeded the 32 MiB LSP input buffer limit`));
+      return false;
+    }
+    if (chunk.length === 0) return true;
+
+    if (this.buffer.length - this.bufferEnd < chunk.length) {
+      const requiredCapacity = unreadBytes + chunk.length;
+      let nextCapacity = Math.max(MIN_LSP_INPUT_BUFFER_CAPACITY, this.buffer.length);
+      while (nextCapacity < requiredCapacity) {
+        nextCapacity = Math.min(MAX_LSP_INPUT_BUFFER_BYTES, nextCapacity * 2);
+      }
+      const next = Buffer.allocUnsafe(nextCapacity);
+      this.buffer.copy(next, 0, this.bufferStart, this.bufferEnd);
+      const consumedBytes = this.bufferStart;
+      this.buffer = next;
+      this.bufferStart = 0;
+      this.bufferEnd = unreadBytes;
+      this.headerSearchOffset = Math.max(0, this.headerSearchOffset - consumedBytes);
+      if (this.pendingBodyStart !== undefined) {
+        this.pendingBodyStart -= consumedBytes;
+      }
+      if (this.pendingFrameEnd !== undefined) {
+        this.pendingFrameEnd -= consumedBytes;
+      }
+    }
+    chunk.copy(this.buffer, this.bufferEnd);
+    this.bufferEnd += chunk.length;
+    return true;
+  }
+
+  private resetConsumedInput(): void {
+    this.bufferStart = 0;
+    this.bufferEnd = 0;
+    this.headerSearchOffset = 0;
+    this.pendingBodyStart = undefined;
+    this.pendingFrameEnd = undefined;
+    if (this.buffer.length > MIN_LSP_INPUT_BUFFER_CAPACITY) {
+      this.buffer = Buffer.alloc(0);
+    }
+  }
+
+  private releaseInputBuffer(): void {
+    this.buffer = Buffer.alloc(0);
+    this.resetConsumedInput();
   }
 
   private handleMessage(message: JsonObject): void {
@@ -303,8 +415,15 @@ export class LspJsonRpcClient {
     if (this.signal && this.abortListener) {
       this.signal.removeEventListener("abort", this.abortListener);
     }
-    this.terminateChild();
+    this.terminationPromise = this.terminateChild();
+    void this.terminationPromise.catch(() => undefined);
     this.rejectPending(failure);
+    this.settleDiagnosticWaiters();
+    this.publishedDiagnostics.invalidateAll();
+    this.releaseInputBuffer();
+  }
+
+  private settleDiagnosticWaiters(): void {
     for (const waiters of this.diagnosticWaiters.values()) {
       for (const waiter of waiters) {
         clearTimeout(waiter.timer);
@@ -314,15 +433,10 @@ export class LspJsonRpcClient {
     this.diagnosticWaiters.clear();
   }
 
-  private terminateChild(): void {
-    const child = this.child;
-    if (!child || child.exitCode !== null || child.signalCode !== null) return;
-    child.kill();
-    const forceTimer = setTimeout(() => {
-      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-    }, FORCE_KILL_DELAY_MS);
-    forceTimer.unref();
-    child.once("exit", () => clearTimeout(forceTimer));
+  private terminateChild(): Promise<void> {
+    if (this.terminationPromise) return this.terminationPromise;
+    this.terminationPromise = this.processGroup?.terminate() ?? Promise.resolve();
+    return this.terminationPromise;
   }
 
   private rejectPending(error: Error): void {

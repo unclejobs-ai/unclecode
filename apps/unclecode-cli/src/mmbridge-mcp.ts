@@ -1,5 +1,9 @@
 import { loadMcpHostRegistry } from "@unclecode/mcp-host";
 import type { McpServerConfig } from "@unclecode/contracts";
+import {
+  createOwnedProcessGroupController,
+  type OwnedProcessGroupController,
+} from "@unclecode/orchestrator/process-group-settlement";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 const MCP_PROTOCOL_VERSION = "2025-11-25";
@@ -70,6 +74,9 @@ function resolveMmbridgeServerConfig(input: {
 const DEFAULT_MMBRIDGE_MCP_TIMEOUT_MS = 600_000;
 const MMBRIDGE_HEALTH_TIMEOUT_MS = 15_000;
 const MMBRIDGE_SHUTDOWN_GRACE_MS = 1_000;
+const MAX_MMBRIDGE_STDOUT_BUFFER_BYTES = 1024 * 1024;
+const MAX_MMBRIDGE_STDERR_BYTES = 256 * 1024;
+const MAX_MMBRIDGE_FRAME_BYTES = 512 * 1024;
 
 function redactDiagnosticText(value: string): string {
   return value
@@ -80,36 +87,12 @@ function redactDiagnosticText(value: string): string {
     .replace(/\b(api[_-]?key|token|secret|password)(\s*[:=]\s*)[^\s,;"'}]+/gi, "$1$2***");
 }
 
-function wait(ms: number): Promise<"timeout"> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve("timeout"), ms);
-    if (typeof timer.unref === "function") timer.unref();
-  });
-}
-
-async function shutdownMcpChild(child: ChildProcessWithoutNullStreams): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return;
-  }
-
-  const closed = new Promise<"closed">((resolve) => {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      resolve("closed");
-      return;
-    }
-    child.once("close", () => resolve("closed"));
-  });
-
+async function shutdownMcpChild(
+  child: ChildProcessWithoutNullStreams,
+  processGroup: OwnedProcessGroupController,
+): Promise<void> {
   child.stdin.end();
-  child.kill("SIGTERM");
-  if ((await Promise.race([closed, wait(MMBRIDGE_SHUTDOWN_GRACE_MS)])) === "closed") {
-    return;
-  }
-
-  if (child.exitCode === null && child.signalCode === null) {
-    child.kill("SIGKILL");
-  }
-  await Promise.race([closed, wait(MMBRIDGE_SHUTDOWN_GRACE_MS)]);
+  await processGroup.terminate();
 }
 
 type MmbridgeToolName =
@@ -157,13 +140,20 @@ export async function runMmbridgeMcpTool(input: {
     cwd: input.workspaceRoot,
     env: { ...process.env, ...(config.env ?? {}) },
     stdio: ["pipe", "pipe", "pipe"],
+    detached: process.platform !== "win32",
+  });
+  const processGroup = createOwnedProcessGroupController({
+    child,
+    label: "mmbridge MCP",
+    forceKillDelayMs: MMBRIDGE_SHUTDOWN_GRACE_MS,
   });
 
   let nextId = 1;
   const pending = new Map<number, { resolve: (value: JsonRpcResponse) => void; reject: (error: Error) => void }>();
   let stdoutBuffer = Buffer.alloc(0);
-  let stderrText = "";
+  let stderrBuffer = Buffer.alloc(0);
   let timer: NodeJS.Timeout | null = null;
+  let fatalError: Error | undefined;
 
   const failPending = (error: Error) => {
     for (const entry of pending.values()) {
@@ -179,13 +169,21 @@ export async function runMmbridgeMcpTool(input: {
     }
   };
 
+  const failSession = (error: Error) => {
+    if (fatalError) return;
+    fatalError = error;
+    failPending(error);
+    void processGroup.terminate().catch(() => undefined);
+  };
+
   const armTimeout = () => {
     clearTimer();
     if (timeoutMs <= 0) return;
     timer = setTimeout(() => {
       if (pending.size === 0) return;
-      failPending(new Error(`mmbridge MCP request timed out after ${timeoutMs}ms. ${redactDiagnosticText(stderrText)}`.trim()));
-      child.kill("SIGTERM");
+      failSession(new Error(
+        `mmbridge MCP request timed out after ${timeoutMs}ms. ${redactDiagnosticText(stderrBuffer.toString("utf8"))}`.trim(),
+      ));
     }, timeoutMs);
     if (typeof timer.unref === "function") timer.unref();
   };
@@ -207,14 +205,36 @@ export async function runMmbridgeMcpTool(input: {
   child.stdin.on("error", () => {});
 
   child.stderr.on("data", (chunk) => {
-    stderrText += chunk.toString();
+    if (fatalError) return;
+    const remaining = MAX_MMBRIDGE_STDERR_BYTES - stderrBuffer.length;
+    if (remaining > 0) {
+      stderrBuffer = Buffer.concat([stderrBuffer, chunk.subarray(0, remaining)]);
+    }
+    if (chunk.length > remaining) {
+      failSession(new Error(
+        `mmbridge MCP stderr exceeded ${MAX_MMBRIDGE_STDERR_BYTES} bytes. ${redactDiagnosticText(stderrBuffer.toString("utf8"))}`.trim(),
+      ));
+    }
   });
 
   child.stdout.on("data", (chunk) => {
+    if (fatalError) return;
     stdoutBuffer = Buffer.concat([stdoutBuffer, chunk]);
+    if (stdoutBuffer.length > MAX_MMBRIDGE_STDOUT_BUFFER_BYTES) {
+      stdoutBuffer = stdoutBuffer.subarray(0, MAX_MMBRIDGE_STDOUT_BUFFER_BYTES);
+      failSession(new Error(
+        `mmbridge MCP stdout buffer exceeded ${MAX_MMBRIDGE_STDOUT_BUFFER_BYTES} bytes. ${redactDiagnosticText(stderrBuffer.toString("utf8"))}`.trim(),
+      ));
+      return;
+    }
     while (true) {
       const newlineIndex = stdoutBuffer.indexOf(0x0a);
       if (newlineIndex < 0) return;
+      if (newlineIndex > MAX_MMBRIDGE_FRAME_BYTES) {
+        stdoutBuffer = Buffer.alloc(0);
+        failSession(new Error(`mmbridge MCP frame exceeded ${MAX_MMBRIDGE_FRAME_BYTES} bytes.`));
+        return;
+      }
       const line = stdoutBuffer.subarray(0, newlineIndex).toString("utf8").replace(/\r$/, "");
       stdoutBuffer = stdoutBuffer.subarray(newlineIndex + 1);
       if (line.length === 0) continue;
@@ -249,10 +269,12 @@ export async function runMmbridgeMcpTool(input: {
     }
   });
 
-  child.on("error", (error) => failPending(error instanceof Error ? error : new Error(String(error))));
-  child.on("close", (code) => {
+  child.on("error", (error) => failSession(error instanceof Error ? error : new Error(String(error))));
+  child.on("exit", (code) => {
     if (pending.size > 0) {
-      failPending(new Error(`mmbridge MCP process exited early with code ${code ?? 0}. ${redactDiagnosticText(stderrText)}`.trim()));
+      failSession(new Error(
+        `mmbridge MCP process exited early with code ${code ?? 0}. ${redactDiagnosticText(stderrBuffer.toString("utf8"))}`.trim(),
+      ));
     }
   });
 
@@ -274,7 +296,7 @@ export async function runMmbridgeMcpTool(input: {
     return resultLines;
   } finally {
     clearTimer();
-    await shutdownMcpChild(child);
+    await shutdownMcpChild(child, processGroup);
   }
 }
 
@@ -299,13 +321,20 @@ export async function runMmbridgeMcpHealthCheck(input: {
     cwd: input.workspaceRoot,
     env: { ...process.env, ...(config.env ?? {}) },
     stdio: ["pipe", "pipe", "pipe"],
+    detached: process.platform !== "win32",
+  });
+  const processGroup = createOwnedProcessGroupController({
+    child,
+    label: "mmbridge MCP health check",
+    forceKillDelayMs: MMBRIDGE_SHUTDOWN_GRACE_MS,
   });
 
   let nextId = 1;
   const pending = new Map<number, { resolve: (value: JsonRpcResponse) => void; reject: (error: Error) => void }>();
   let stdoutBuffer = Buffer.alloc(0);
-  let stderrText = "";
+  let stderrBuffer = Buffer.alloc(0);
   let timer: NodeJS.Timeout | null = null;
+  let fatalError: Error | undefined;
 
   const failPending = (error: Error) => {
     for (const entry of pending.values()) {
@@ -321,13 +350,19 @@ export async function runMmbridgeMcpHealthCheck(input: {
     }
   };
 
+  const failSession = (error: Error) => {
+    if (fatalError) return;
+    fatalError = error;
+    failPending(error);
+    void processGroup.terminate().catch(() => undefined);
+  };
+
   const armTimeout = () => {
     clearTimer();
     if (timeoutMs <= 0) return;
     timer = setTimeout(() => {
       if (pending.size === 0) return;
-      failPending(new Error(`mmbridge MCP health check timed out after ${timeoutMs}ms. Diagnostics hidden.`));
-      child.kill("SIGTERM");
+      failSession(new Error(`mmbridge MCP health check timed out after ${timeoutMs}ms. Diagnostics hidden.`));
     }, timeoutMs);
     if (typeof timer.unref === "function") timer.unref();
   };
@@ -347,13 +382,33 @@ export async function runMmbridgeMcpHealthCheck(input: {
 
   child.stdin.on("error", () => {});
   child.stderr.on("data", (chunk) => {
-    stderrText += chunk.toString();
+    if (fatalError) return;
+    const remaining = MAX_MMBRIDGE_STDERR_BYTES - stderrBuffer.length;
+    if (remaining > 0) {
+      stderrBuffer = Buffer.concat([stderrBuffer, chunk.subarray(0, remaining)]);
+    }
+    if (chunk.length > remaining) {
+      failSession(new Error(`mmbridge MCP health stderr exceeded ${MAX_MMBRIDGE_STDERR_BYTES} bytes. Diagnostics hidden.`));
+    }
   });
   child.stdout.on("data", (chunk) => {
+    if (fatalError) return;
     stdoutBuffer = Buffer.concat([stdoutBuffer, chunk]);
+    if (stdoutBuffer.length > MAX_MMBRIDGE_STDOUT_BUFFER_BYTES) {
+      stdoutBuffer = stdoutBuffer.subarray(0, MAX_MMBRIDGE_STDOUT_BUFFER_BYTES);
+      failSession(new Error(
+        `mmbridge MCP health stdout buffer exceeded ${MAX_MMBRIDGE_STDOUT_BUFFER_BYTES} bytes. Diagnostics hidden.`,
+      ));
+      return;
+    }
     while (true) {
       const newlineIndex = stdoutBuffer.indexOf(0x0a);
       if (newlineIndex < 0) return;
+      if (newlineIndex > MAX_MMBRIDGE_FRAME_BYTES) {
+        stdoutBuffer = Buffer.alloc(0);
+        failSession(new Error(`mmbridge MCP health frame exceeded ${MAX_MMBRIDGE_FRAME_BYTES} bytes. Diagnostics hidden.`));
+        return;
+      }
       const line = stdoutBuffer.subarray(0, newlineIndex).toString("utf8").replace(/\r$/, "");
       stdoutBuffer = stdoutBuffer.subarray(newlineIndex + 1);
       if (line.length === 0) continue;
@@ -381,10 +436,10 @@ export async function runMmbridgeMcpHealthCheck(input: {
       }
     }
   });
-  child.on("error", (error) => failPending(error instanceof Error ? error : new Error(String(error))));
-  child.on("close", (code) => {
+  child.on("error", (error) => failSession(error instanceof Error ? error : new Error(String(error))));
+  child.on("exit", (code) => {
     if (pending.size > 0) {
-      failPending(new Error(`mmbridge MCP process exited early with code ${code ?? 0}. Diagnostics hidden.`));
+      failSession(new Error(`mmbridge MCP process exited early with code ${code ?? 0}. Diagnostics hidden.`));
     }
   });
 
@@ -416,7 +471,7 @@ export async function runMmbridgeMcpHealthCheck(input: {
     };
   } finally {
     clearTimer();
-    await shutdownMcpChild(child);
+    await shutdownMcpChild(child, processGroup);
   }
 }
 

@@ -375,8 +375,8 @@ test("context lifecycle proves preview, submit, optimizer, lineage, resume, and 
     assert.equal(runtime.contextLedger.getActivePreview(sessionId), undefined);
     assert.match(resumed.options.initialSessionSummary ?? "", /^Chat:/);
     assert.deepEqual(resumed.options.initialEntries, [
-      { role: "user", text: "finish the lifecycle" },
-      { role: "assistant", text: "Lifecycle complete." },
+      { id: "entry-0", role: "user", text: "finish the lifecycle" },
+      { id: "entry-1", role: "assistant", text: "Lifecycle complete." },
     ]);
     assert.equal(
       resumed.options.initialLastSubmittedContextReceiptId,

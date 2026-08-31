@@ -35,6 +35,7 @@ const readGitStatusText: GitStatusReader = (cwd) => execFileSync(
 );
 
 const gitFactsCache = new Map<string, { readonly readAt: number; readonly facts: GitFacts }>();
+const GIT_FACTS_CACHE_MAX_ENTRIES = 32;
 
 /**
  * Workspace facts for `cwd`, at most one `git` process per {@link GIT_FACTS_TTL_MS}.
@@ -59,7 +60,11 @@ export function readGitFacts(
     // Not a repository, no `git` on PATH, or a locked index. All the same
     // answer: nothing to report about this workspace.
   }
+  if (gitFactsCache.has(cwd)) gitFactsCache.delete(cwd);
   gitFactsCache.set(cwd, { readAt: now, facts });
+  while (gitFactsCache.size > GIT_FACTS_CACHE_MAX_ENTRIES) {
+    gitFactsCache.delete(gitFactsCache.keys().next().value as string);
+  }
   return facts;
 }
 

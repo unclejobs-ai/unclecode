@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 
 import {
   anthropicToolCallFinalResponseText,
@@ -47,6 +48,30 @@ export async function runPromptSmoke(port, observations) {
 }
 
 export async function runToolCallSmoke(port, observations) {
+  const deniedEnv = isolatedRuntimeEnv(providerEnv(port), "gemini-policy-denied");
+  delete deniedEnv.UNCLECODE_ALLOW_RUN_SHELL;
+  const deniedBeforeRequests = observations.length;
+  const denied = await run(process.execPath, [
+    binEntrypoint,
+    "work",
+    "--engine",
+    "pi",
+    "--provider",
+    "gemini",
+    "--model",
+    "gemini-2.5-flash",
+    toolCallPromptText,
+  ], deniedEnv);
+
+  assert.equal(denied.code, 0, denied.stderr);
+  assert.match(denied.stdout, /run_shell blocked by execution policy/);
+  assert.doesNotMatch(denied.stdout, new RegExp(toolCallFinalResponseText));
+  const deniedRequests = observations.slice(deniedBeforeRequests);
+  assert.equal(deniedRequests.length, 2, `denied tool-call smoke should make two provider calls, got ${deniedRequests.length}`);
+  assert.equal(deniedRequests[0]?.hasTools, true, "denied smoke should still expose the declared tool");
+  assert.equal(deniedRequests[1]?.hasFunctionResponse, true, "denied smoke should return the policy refusal to the provider");
+  assert.equal(deniedRequests[1]?.finalAnswerGatedByToolResult, false, "a denied shell call must not fabricate the harmless command output");
+
   const beforeRequests = observations.length;
   const result = await run(process.execPath, [
     binEntrypoint,
@@ -58,10 +83,10 @@ export async function runToolCallSmoke(port, observations) {
     "--model",
     "gemini-2.5-flash",
     toolCallPromptText,
-  ], {
+  ], isolatedRuntimeEnv({
     ...providerEnv(port),
     UNCLECODE_ALLOW_RUN_SHELL: "1",
-  });
+  }, "gemini-policy-approved"));
 
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout, new RegExp(toolCallFinalResponseText));
@@ -86,6 +111,7 @@ export async function runToolCallSmoke(port, observations) {
     stdout: result.stdout.trim(),
     stderr: result.stderr.trim(),
     requestDelta: requests.length,
+    defaultPolicyBlockVerified: true,
     firstRequest: requests[0],
     secondRequest: requests[1],
     toolRoundTripVerified: true,
@@ -105,10 +131,10 @@ export async function runOpenAIToolCallSmoke(port, openAIObservations) {
     "--model",
     "gpt-4.1-mini",
     openAIToolCallPromptText,
-  ], {
+  ], isolatedRuntimeEnv({
     ...openAIProviderEnv(port),
     UNCLECODE_ALLOW_RUN_SHELL: "1",
-  });
+  }, "openai-policy-approved"));
 
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout, new RegExp(openAIToolCallFinalResponseText));
@@ -149,10 +175,10 @@ export async function runAnthropicToolCallSmoke(port, anthropicObservations) {
     "--model",
     "claude-sonnet-4-6",
     anthropicToolCallPromptText,
-  ], {
+  ], isolatedRuntimeEnv({
     ...anthropicProviderEnv(port),
     UNCLECODE_ALLOW_RUN_SHELL: "1",
-  });
+  }, "anthropic-policy-approved"));
 
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout, new RegExp(anthropicToolCallFinalResponseText));
@@ -178,5 +204,17 @@ export async function runAnthropicToolCallSmoke(port, anthropicObservations) {
     secondRequest: requests[1],
     toolRoundTripVerified: true,
     finalAnswerGatedByToolResult: true,
+  };
+}
+
+function isolatedRuntimeEnv(env, label) {
+  const root = process.env.UNCLECODE_RUNTIME_QA_HOME_ROOT ?? process.env.HOME;
+  assert.ok(root, "runtime QA requires an isolated HOME root");
+  const home = path.join(root, label);
+  return {
+    ...env,
+    HOME: home,
+    USERPROFILE: home,
+    UNCLECODE_SESSION_STORE_ROOT: path.join(home, ".unclecode", "state"),
   };
 }

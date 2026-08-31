@@ -3,6 +3,9 @@ import { writeFileSync } from "node:fs";
 import path from "node:path";
 
 import {
+  busySpinnerRowPattern,
+  englishBusyChromePattern,
+  koreanBusyStatusPattern,
   realUseFirstPromptText,
   realUseFirstResponseText,
   realUseQueuedPromptText,
@@ -15,7 +18,6 @@ import {
   calculatePaneWidth,
   capturePane,
   IDLE_COMPOSER_PATTERN,
-  lowerBusyActivityRowPattern,
   pressEnter,
   runTmux,
   submitLine,
@@ -24,7 +26,7 @@ import {
   waitForPane,
 } from "./tmux-helpers.mjs";
 
-const CONTEXT_WARNING_SUMMARY_PATTERN = /(?:\d+ warnings?|✓ none)/i;
+const CONTEXT_HEALTH_SUMMARY_PATTERN = /(?:\d+ warnings?|✓ none|Ready · Context packet looks ready)/i;
 const MAX_REAL_USE_LATENCY_MS = 12_000;
 
 export async function runRealUseTuiStress({ port, tmp, observations }) {
@@ -38,12 +40,18 @@ export async function runRealUseTuiStress({ port, tmp, observations }) {
   const queuePaneFile = path.join(tmp, "real-use-queue-pane.txt");
   const idlePaneAFile = path.join(tmp, "real-use-idle-a-pane.txt");
   const idlePaneBFile = path.join(tmp, "real-use-idle-b-pane.txt");
+  const resize60PaneFile = path.join(tmp, "real-use-60-pane.txt");
   const resize80PaneFile = path.join(tmp, "real-use-80-pane.txt");
   const resize120PaneFile = path.join(tmp, "real-use-120-pane.txt");
+  const resize140PaneFile = path.join(tmp, "real-use-140-pane.txt");
   const widthFile = path.join(tmp, "real-use-width.json");
   await runTmux(["kill-session", "-t", session], { allowFailure: true });
 
   const beforeRequests = observations.length;
+  assert.ok(
+    realUseFirstPromptText.length >= 64,
+    "real-use first prompt must exercise a 64+ character single-chunk submit",
+  );
   const command = [
     `cd ${shellQuote(repoRoot)}`,
     [
@@ -64,11 +72,11 @@ export async function runRealUseTuiStress({ port, tmp, observations }) {
     await submitLine(session, "/context", paneFile);
     const contextPane = await waitForPane(
       session,
-      /(?=.*Sources · \d+ sent · \d+ held)(?=.*(?:\d+ warnings?|✓ none))/is,
+      /(?=.*Sources · \d+ sent · \d+ held)(?=.*(?:\d+ warnings?|✓ none|Ready · Context packet looks ready))/is,
       contextPaneFile,
     );
     assert.match(contextPane, /Sources · \d+ sent · \d+ held/);
-    assert.match(contextPane, CONTEXT_WARNING_SUMMARY_PATTERN);
+    assert.match(contextPane, CONTEXT_HEALTH_SUMMARY_PATTERN);
     assert.doesNotMatch(contextPane, /Unknown command|panic|TypeError|ReferenceError/);
     await runTmux(["send-keys", "-t", session, "Escape"]);
     await waitForPane(session, IDLE_COMPOSER_PATTERN, paneFile);
@@ -82,16 +90,26 @@ export async function runRealUseTuiStress({ port, tmp, observations }) {
     await sleep(200);
 
     const firstSubmitStartedAt = Date.now();
-    await submitLine(session, realUseFirstPromptText, paneFile, new RegExp(escapeRegExp(realUseFirstPromptText)));
+    await submitLine(session, realUseFirstPromptText, paneFile);
     const busyPane = await waitForPane(
       session,
-      /preparing context|thinking|Working|Enter queues follow-up/,
+      koreanBusyStatusPattern,
       busyPaneFile,
     );
+    const busyRows = busyPane.split(/\r?\n/u);
+    const spinnerRows = busyRows.filter((line) => busySpinnerRowPattern.test(line));
+    assert.equal(
+      spinnerRows.length,
+      1,
+      "real-use busy state must render exactly one spinner in the composer dock",
+    );
+    const spinnerIndex = busyRows.indexOf(spinnerRows[0]);
+    const hintIndex = busyRows.findIndex((line) => /후속 요청|대기열 추가/u.test(line));
+    assert.ok(hintIndex > spinnerIndex, "real-use follow-up hint must remain below the busy status row");
     assert.doesNotMatch(
       busyPane,
-      lowerBusyActivityRowPattern(),
-      "real-use busy state should rely on the status spinner instead of adding a duplicate lower activity row",
+      englishBusyChromePattern,
+      "Korean real-use turn must keep busy and composer guidance in Korean",
     );
     assert.doesNotMatch(
       busyPane,
@@ -103,8 +121,8 @@ export async function runRealUseTuiStress({ port, tmp, observations }) {
     await waitForPane(session, new RegExp(escapeRegExp(realUseQueuedPromptText)), queuePaneFile);
     const queuedSubmitStartedAt = Date.now();
     await pressEnter(session);
-    const queuePane = await waitForPane(session, /queued|follow-up|\/queue/i, queuePaneFile);
-    assert.match(queuePane, /queued|follow-up|\/queue/i);
+    const queuePane = await waitForPane(session, /queued|follow-up|대기열|후속 요청|\/queue/i, queuePaneFile);
+    assert.match(queuePane, /queued|follow-up|대기열|후속 요청|\/queue/i);
 
     await waitForPane(session, new RegExp(escapeRegExp(realUseFirstResponseText)), paneFile);
     const firstReplyMs = Date.now() - firstSubmitStartedAt;
@@ -128,7 +146,11 @@ export async function runRealUseTuiStress({ port, tmp, observations }) {
     assert.match(pane, new RegExp(escapeRegExp(realUseFirstResponseText)));
     assert.match(pane, new RegExp(escapeRegExp(realUseQueuedPromptText)));
     assert.match(pane, new RegExp(escapeRegExp(realUseQueuedResponseText)));
-    assert.match(pane, new RegExp(`Running queued follow-up #1: ${escapeRegExp(realUseQueuedPromptText)}`));
+    assert.doesNotMatch(
+      pane,
+      /Running queued follow-up #\d+:/,
+      "queue lifecycle details should stay in the Queue view instead of leaking into the settled transcript",
+    );
     assert.doesNotMatch(
       pane,
       new RegExp(escapeRegExp(`${realUseFirstPromptText}${realUseQueuedPromptText}`)),
@@ -154,6 +176,12 @@ export async function runRealUseTuiStress({ port, tmp, observations }) {
     assert.equal(extractRuntimeQaUserRequest(realUseRequests[0]?.text ?? ""), realUseFirstPromptText);
     assert.equal(extractRuntimeQaUserRequest(realUseRequests[1]?.text ?? ""), realUseQueuedPromptText);
 
+    await runTmux(["resize-window", "-t", session, "-x", "60", "-y", "24"]);
+    await sleep(500);
+    const resize60 = await capturePane(session, resize60PaneFile);
+    const width60 = calculatePaneWidth(resize60, 60);
+    assert.deepEqual(width60.over, [], `Real-use TUI 60-column overflow: ${JSON.stringify(width60.over)}`);
+
     await runTmux(["resize-window", "-t", session, "-x", "80", "-y", "24"]);
     await sleep(500);
     const resize80 = await capturePane(session, resize80PaneFile);
@@ -166,18 +194,25 @@ export async function runRealUseTuiStress({ port, tmp, observations }) {
     const width120 = calculatePaneWidth(resize120, 120);
     assert.deepEqual(width120.over, [], `Real-use TUI 120-column overflow: ${JSON.stringify(width120.over)}`);
 
+    await runTmux(["resize-window", "-t", session, "-x", "140", "-y", "40"]);
+    await sleep(500);
+    const resize140 = await capturePane(session, resize140PaneFile);
+    const width140 = calculatePaneWidth(resize140, 140);
+    assert.deepEqual(width140.over, [], `Real-use TUI 140-column overflow: ${JSON.stringify(width140.over)}`);
+
     const width100 = calculatePaneWidth(pane, 100);
-    writeFileSync(widthFile, JSON.stringify({ width100, width80, width120 }, null, 2));
+    writeFileSync(widthFile, JSON.stringify({ width60, width80, width100, width120, width140 }, null, 2));
     assert.deepEqual(width100.over, [], `Real-use TUI 100-column overflow: ${JSON.stringify(width100.over)}`);
 
     return {
       paneExcerpt: pane.trimEnd(),
       contextPaneExcerpt: contextPane.trimEnd(),
       queuePaneExcerpt: queuePane.trimEnd(),
-      widths: { width100, width80, width120 },
+      widths: { width60, width80, width100, width120, width140 },
       latencies: { firstReplyMs, queueDrainMs, maxMs: MAX_REAL_USE_LATENCY_MS },
       requestDelta: realUseRequests.length,
       contextPacketTransparency: true,
+      longPromptImmediateEnterVerified: true,
       queueDrainVerified: true,
       resizeVerified: true,
       idleStableVerified: true,
@@ -190,5 +225,7 @@ export async function runRealUseTuiStress({ port, tmp, observations }) {
 }
 
 function normalizeIdlePane(pane) {
-  return pane.replace(/Ready · last(?: reply)? \d+(?:\.\d+)?s/g, "Ready · last <age>");
+  return pane
+    .replace(/Ready · last(?: reply)? \d+(?:\.\d+)?s/g, "Ready · last <age>")
+    .replace(/준비 완료 · 최근(?: 응답)? \d+(?:\.\d+)?s/g, "준비 완료 · 최근 <age>");
 }

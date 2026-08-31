@@ -2,6 +2,14 @@ import { SESSION_STATES } from "@unclecode/contracts";
 
 export { getSessionStoreRoot } from "./root.js";
 export { createSessionStore } from "./store.js";
+export {
+  getSessionPersistenceNoticeDir,
+  watchSessionPersistenceNotices,
+} from "./persistence-notifications.js";
+export type {
+  SessionPersistenceNotice,
+  SessionPersistenceNoticeWatcher,
+} from "./persistence-notifications.js";
 export type {
   ProjectMemoryEntry,
   SessionCheckpointSnapshot,

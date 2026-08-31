@@ -15,6 +15,7 @@ export type {
 } from "./types.js";
 export { ContextBrokerError, FreshnessCheckError, GitCommandError } from "./types.js";
 export { createRepoMapCache, defaultRepoMapCache } from "./repo-map-cache.js";
+export { getContextBrokerCacheTelemetrySnapshot } from "./cache-telemetry.js";
 export { generateRepoMap, getRepoMapCacheToken } from "./repo-map.js";
 export { detectHotspots, summarizeDiff } from "./hotspot.js";
 export { assertFreshContext, checkFreshness } from "./freshness.js";
@@ -46,6 +47,7 @@ export type {
 } from "./workspace-guidance.js";
 export {
   clearCachedWorkspaceGuidance,
+  getWorkspaceGuidanceCacheTelemetrySnapshot,
   loadCachedWorkspaceGuidance,
   loadWorkspaceGuidance,
 } from "./workspace-guidance.js";
@@ -101,6 +103,7 @@ export { loadPinnedSkillNames, getPinnedSkillsPath } from "./pinned-skills.js";
 export {
   clearWorkspaceSkillCache,
   discoverSkillMetadata,
+  getWorkspaceSkillCacheTelemetrySnapshot,
   listAvailableSkills,
   loadNamedSkill,
 } from "./workspace-skills.js";

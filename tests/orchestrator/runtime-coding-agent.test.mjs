@@ -58,6 +58,30 @@ test("providerOverrideFactory receives the agent tool runtime and its provider i
   assert.equal(seen.provider.runTurnCalls, 1);
 });
 
+test("toolAccess none constructs a provider with no advertised or executable tools", async () => {
+  let toolRuntime;
+  const agent = new RuntimeCodingAgent(
+    createAgentOptions({
+      toolAccess: "none",
+      providerOverrideFactory: (context) => {
+        toolRuntime = context.toolRuntime;
+        return createStubProvider();
+      },
+    }),
+  );
+
+  assert.deepEqual(await agent.runTurn("read-only synthesis"), { text: "stub" });
+  assert.deepEqual(toolRuntime.definitions, []);
+  assert.deepEqual(await toolRuntime.executor.execute({
+    toolName: "write_file",
+    input: { path: "forbidden.txt", content: "must not write" },
+    cwd: "/tmp",
+  }), {
+    isError: true,
+    content: "Quality review is read-only; tools are unavailable.",
+  });
+});
+
 test("providerOverride takes precedence over providerOverrideFactory", async () => {
   let factoryCalled = false;
   const override = createStubProvider();

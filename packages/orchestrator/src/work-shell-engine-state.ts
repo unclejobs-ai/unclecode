@@ -10,6 +10,8 @@ import type {
 import type { WorkShellReasoningConfig } from "./reasoning.js";
 import { createAgentConsoleSnapshot } from "@unclecode/contracts";
 import { createAgentConsoleViewState } from "./work-shell-agent-console-state.js";
+import { resolveWorkShellTerminalUiLocale } from "./work-shell-locale.js";
+import type { WorkShellPauseSnapshot } from "./work-shell-pause-controller.js";
 
 type BuildContextPanel<Reasoning extends WorkShellReasoningConfig> = (
   contextSummaryLines: readonly string[],
@@ -77,7 +79,10 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
     ...(input.options.initialTraceMode !== undefined ? { initialTraceMode: input.options.initialTraceMode } : {}),
   });
   return {
-    entries: input.options.initialEntries ? [...input.options.initialEntries] : [...decision.entries],
+    entries: identifyWorkShellEntries(
+      input.options.initialEntries ? input.options.initialEntries : decision.entries,
+      new Set(),
+    ),
     streamingAssistantText: undefined,
     streamingReasoningText: undefined,
     model: decision.model,
@@ -100,8 +105,13 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
     // and starts empty like traceLines does.
     liveTraceLines: [],
     traceMode: decision.traceMode,
+    uiLocale: input.options.initialUiLocale
+      ?? resolveWorkShellTerminalUiLocale(process.env, "en"),
+    uiLocaleLocked: input.options.initialUiLocaleLocked
+      ?? input.options.initialUiLocale !== undefined,
     composerMode: decision.composerMode,
     isBusy: decision.isBusy,
+    turnLifecycle: { state: "idle" } satisfies WorkShellPauseSnapshot,
     busyStatus: undefined,
     currentTurnStartedAt: undefined,
     lastTurnDurationMs: undefined,
@@ -138,11 +148,20 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
             ...(input.options.initialAgentConsole.manifest
               ? { manifest: input.options.initialAgentConsole.manifest }
               : {}),
+            ...(input.options.initialAgentConsole.securityApprovals
+              ? { securityApprovals: input.options.initialAgentConsole.securityApprovals }
+              : {}),
             ...(input.options.initialAgentConsole.pendingDecision
               ? { pendingDecision: input.options.initialAgentConsole.pendingDecision }
               : {}),
             ...(input.options.initialAgentConsole.workGraph
               ? { workGraph: input.options.initialAgentConsole.workGraph }
+              : {}),
+            ...(input.options.initialAgentConsole.workProposalOrder
+              ? { workProposalOrder: input.options.initialAgentConsole.workProposalOrder }
+              : {}),
+            ...(input.options.initialAgentConsole.qualityReview
+              ? { qualityReview: input.options.initialAgentConsole.qualityReview }
               : {}),
             ...(input.options.initialAgentConsole.mainUsage
               ? { mainUsage: input.options.initialAgentConsole.mainUsage }
@@ -164,11 +183,39 @@ export function appendWorkShellEntries<Reasoning extends WorkShellReasoningConfi
   state: WorkShellEngineState<Reasoning>,
   ...entries: readonly WorkShellChatEntry[]
 ): Partial<WorkShellEngineState<Reasoning>> {
+  const identifiedEntries = identifyWorkShellEntries(
+    entries,
+    new Set(state.entries.flatMap((entry) => entry.id ? [entry.id] : [])),
+    state.entries.length,
+  );
   const decision = resolveWorkShellAppendEntriesPatchDecision({
     entries: state.entries,
-    nextEntries: entries,
+    nextEntries: identifiedEntries,
   });
   return { entries: [...decision.entries] };
+}
+
+function identifyWorkShellEntries(
+  entries: readonly WorkShellChatEntry[],
+  occupied: Set<string>,
+  startIndex = 0,
+): readonly WorkShellChatEntry[] {
+  return entries.map((entry, offset) => {
+    if (entry.id) {
+      occupied.add(entry.id);
+      return entry;
+    }
+    let suffix = startIndex + offset;
+    let id = `entry-${suffix}`;
+    while (occupied.has(id)) {
+      suffix += 1;
+      id = `entry-${suffix}`;
+    }
+    occupied.add(id);
+    // Identity is deliberately enumerable: session/snapshot JSON must retain
+    // it so a reattached hook anchors the same transcript entry after restart.
+    return { ...entry, id };
+  });
 }
 
 export function createWorkShellBusyStatePatch<Reasoning extends WorkShellReasoningConfig>(input: {

@@ -30,6 +30,7 @@ import {
   loadExtensionConfigOverlays,
   loadExtensionManifestSummaries,
   WorkAgent,
+  resolveWorkShellTerminalUiLocale,
   type AppReasoningConfig,
   type WorkTurnAgent,
 } from "@unclecode/orchestrator";
@@ -73,6 +74,14 @@ import {
   type ToolRuntime,
 } from "@unclecode/providers";
 import {
+  PluginHost,
+  registerBuiltInSccQualityEngine,
+} from "@unclecode/plugin-host";
+import { loadMcpHostRegistry } from "@unclecode/mcp-host";
+import type { RuntimeSessionObservabilitySource } from "@unclecode/server";
+
+const MAX_SESSION_MCP_OBSERVABILITY = 64;
+import {
   buildContextLineItems,
   buildContextSummaryItems,
   buildOmoExcludedPacketItems,
@@ -86,18 +95,115 @@ import {
   resolveWorkShellCrpConfig,
   type WorkShellContextPacketResolver,
 } from "./work-runtime-crp.js";
+import {
+  createHostHeldOutWorktreeEvaluator,
+  createWorkCreatorEvolutionService,
+} from "./creator-evolution-runtime.js";
 
 const WORK_PI_TURN_STEP_LIMIT = 16;
 const WORK_PI_TURN_COST_LIMIT_USD = 2;
+
+type QualityReviewProvider = "openai" | "anthropic" | "gemini" | "deepseek";
+
+export type QualityReviewSelection = {
+  readonly provider: QualityReviewProvider;
+  readonly model: string;
+  readonly distinct: boolean;
+};
+
+const QUALITY_REVIEW_PROVIDER_ORDER: readonly QualityReviewProvider[] = [
+  "anthropic",
+  "gemini",
+  "deepseek",
+  "openai",
+];
+
+const QUALITY_REVIEW_PROVIDER_ENV = {
+  openai: { key: "OPENAI_API_KEY", model: "OPENAI_MODEL", fallback: "gpt-5.6-sol" },
+  anthropic: { key: "ANTHROPIC_API_KEY", model: "ANTHROPIC_MODEL", fallback: "claude-sonnet-4-20250514" },
+  gemini: { key: "GEMINI_API_KEY", model: "GEMINI_MODEL", fallback: "gemini-2.5-flash" },
+  deepseek: { key: "DEEPSEEK_API_KEY", model: "DEEPSEEK_MODEL", fallback: "deepseek-chat" },
+} as const;
+
+function isQualityReviewProvider(value: string | undefined): value is QualityReviewProvider {
+  return value === "openai" || value === "anthropic" || value === "gemini" || value === "deepseek";
+}
+
+/** Picks a real configured alternate route; otherwise a separate no-tools agent uses the direct route. */
+export function resolveQualityReviewSelection(input: {
+  readonly directProvider: QualityReviewProvider;
+  readonly directModel: string;
+  readonly env: NodeJS.ProcessEnv;
+}): QualityReviewSelection {
+  const explicitProvider = input.env.UNCLECODE_REVIEW_PROVIDER?.trim().toLowerCase();
+  if (explicitProvider && !isQualityReviewProvider(explicitProvider)) {
+    throw new Error(`Unsupported UNCLECODE_REVIEW_PROVIDER: ${explicitProvider}`);
+  }
+  const requestedProvider = isQualityReviewProvider(explicitProvider) ? explicitProvider : undefined;
+  const explicitModel = input.env.UNCLECODE_REVIEW_MODEL?.trim();
+  const candidates: readonly QualityReviewProvider[] = requestedProvider
+    ? [requestedProvider]
+    : explicitModel
+      ? [input.directProvider]
+      : QUALITY_REVIEW_PROVIDER_ORDER.filter((provider) => provider !== input.directProvider);
+  for (const provider of candidates) {
+    const fields = QUALITY_REVIEW_PROVIDER_ENV[provider];
+    const configured = provider === input.directProvider || Boolean(input.env[fields.key]?.trim());
+    if (!configured) continue;
+    const model = explicitModel
+      ?? input.env[fields.model]?.trim()
+      ?? (provider === input.directProvider ? input.directModel : fields.fallback);
+    return {
+      provider,
+      model,
+      distinct: provider !== input.directProvider,
+    };
+  }
+  return {
+    provider: input.directProvider,
+    model: input.directModel,
+    distinct: false,
+  };
+}
+
+export function resolveCreatorHeldOutReviewerSelection(input: {
+  readonly creatorProvider: QualityReviewProvider;
+  readonly evaluatorProvider: QualityReviewProvider;
+  readonly env: NodeJS.ProcessEnv;
+}): QualityReviewSelection | undefined {
+  const explicitProvider = input.env.UNCLECODE_CREATOR_REVIEW_PROVIDER?.trim().toLowerCase();
+  if (explicitProvider && !isQualityReviewProvider(explicitProvider)) {
+    throw new Error(`Unsupported UNCLECODE_CREATOR_REVIEW_PROVIDER: ${explicitProvider}`);
+  }
+  const candidates: readonly QualityReviewProvider[] = isQualityReviewProvider(explicitProvider)
+    ? [explicitProvider]
+    : QUALITY_REVIEW_PROVIDER_ORDER;
+  for (const provider of candidates) {
+    if (provider === input.creatorProvider || provider === input.evaluatorProvider) continue;
+    const fields = QUALITY_REVIEW_PROVIDER_ENV[provider];
+    if (!input.env[fields.key]?.trim()) continue;
+    return {
+      provider,
+      model: input.env.UNCLECODE_CREATOR_REVIEW_MODEL?.trim()
+        ?? input.env[fields.model]?.trim()
+        ?? fields.fallback,
+      distinct: true,
+    };
+  }
+  return undefined;
+}
 
 /**
  * Build one work/executor agent backed by OMP.
  *
  * Executor turns run entirely inside OMP: it routes the request, executes its
  * own tool loop, and resolves its own credentials from its own profile — so the
- * executor needs neither UncleCode's tool runtime nor a bearer token. The
- * surrounding `CodingAgent` still brackets the turn with the standard
- * trace/usage events, under the `omp` provider identity and the OMP selector.
+ * executor needs neither UncleCode's tool runtime nor a bearer token. Because
+ * that process boundary has no approval bridge, the worker exposes only its
+ * fixed workspace-file tool allowlist; shell and externally acting tools stay
+ * on UncleCode-owned runtimes. The surrounding `CodingAgent` still brackets
+ * the turn with the standard trace/usage events, under the `omp` provider
+ * identity and the OMP selector.
  *
  * The selector is fixed to `OMP_WORKER_DEFAULT_MODEL`: work turns always run on
  * Kimi K3. There is deliberately no caller input and no environment override —
@@ -126,15 +232,41 @@ export function createWorkExecutorAgent(input: {
 
 export type WorkCliBootstrapInput = {
   argv: readonly string[];
+  role?: "owner" | "client" | undefined;
   env?: NodeJS.ProcessEnv | undefined;
   userHomeDir?: string | undefined;
   lspBridge?: GuardianLspBridge | undefined;
+  /** Runtime-owner embedding seam; route identity remains derived from host configuration. */
+  creatorEvolutionRuntime?: {
+    readonly createCreatorAgent?: (() => WorkTurnAgent | Promise<WorkTurnAgent>) | undefined;
+    readonly createHeldOutWorkloadAgent?: ((input: {
+      readonly kind: "baseline" | "candidate";
+      readonly creatorSystemPrompt: string;
+    }) => WorkTurnAgent | Promise<WorkTurnAgent>) | undefined;
+    readonly createHeldOutEvaluatorAgent?: (() => WorkTurnAgent | Promise<WorkTurnAgent>) | undefined;
+    readonly createHeldOutReviewerAgent?: (() => WorkTurnAgent | Promise<WorkTurnAgent>) | undefined;
+    readonly evaluatorTurnTimeoutMs?: number | undefined;
+    readonly evaluatorAbortSettlementGraceMs?: number | undefined;
+  } | undefined;
 };
+
+export function createRuntimeClientAgent(): StartReplAgent {
+  return {
+    async runTurn() {
+      throw new Error("The TUI client must execute turns through the runtime owner attachment.");
+    },
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+  };
+}
 
 export type WorkCliBootstrapResult = {
   agent: StartReplAgent;
   prompt: string;
   options: StartReplOptions;
+  dispose?: (() => void | Promise<void>) | undefined;
+  readObservability?: (() => RuntimeSessionObservabilitySource) | undefined;
 };
 
 async function runInlineCommand(input: {
@@ -164,6 +296,7 @@ async function buildWorkShellContextSummary(input: {
     clearCachedWorkspaceGuidance(input.cwd, input.userHomeDir);
     clearExtensionRegistryCache({
       workspaceRoot: input.cwd,
+      env: input.env,
       ...(input.userHomeDir ? { userHomeDir: input.userHomeDir } : {}),
     });
   }
@@ -174,6 +307,7 @@ async function buildWorkShellContextSummary(input: {
   });
   const extensionSummaries = loadExtensionManifestSummaries({
     workspaceRoot: input.cwd,
+    env: input.env,
     ...(input.userHomeDir ? { userHomeDir: input.userHomeDir } : {}),
   });
 
@@ -371,16 +505,84 @@ export async function loadWorkCliBootstrap(
   input: WorkCliBootstrapInput,
 ): Promise<WorkCliBootstrapResult> {
   const env = input.env ?? process.env;
+  const runtimeRole = input.role ?? "owner";
   const userHomeDir = input.userHomeDir ?? env.HOME;
   const { cwd, provider, model, reasoning, sessionId, prompt, engine } = parseArgs([
     ...input.argv,
   ]);
   const activeEngine = engine ?? resolveDefaultWorkEngine(env);
+  if (runtimeRole === "client") {
+    const config = await loadConfig({
+      cwd,
+      env,
+      ...(provider !== undefined ? { provider } : {}),
+      ...(model !== undefined ? { model } : {}),
+      ...(reasoning !== undefined ? { reasoning } : {}),
+      allowProblematicOpenAIAuth: true,
+    });
+    const pluginOverlays = loadExtensionConfigOverlays({
+      workspaceRoot: cwd,
+      env,
+      ...(userHomeDir ? { userHomeDir } : {}),
+    });
+    const configExplanation = explainUncleCodeConfig({
+      workspaceRoot: cwd,
+      env,
+      pluginOverlays,
+    });
+    const contextProfile = resolveContextProfile(
+      configExplanation.settings.contextProfile.value,
+    );
+    const crpConfig = resolveWorkShellCrpConfig(configExplanation);
+    const runtimeProvider = resolveRuntimeProvider(config.provider);
+    const codexOAuthAvailable = Boolean(resolveCodexOAuthBridgeArgs({
+      provider: runtimeProvider,
+      apiKey: config.apiKey,
+      openAIRuntime: config.openAIRuntime,
+    }));
+    const authLabel = resolveWorkShellAuthLabel({
+      engine: activeEngine,
+      configuredLabel: config.authLabel,
+      codexOAuthAvailable,
+    });
+    const modeLabel = (await runRustCommand(
+      ["rust", "ux", "text", "mode-label"],
+      cwd,
+      config.mode,
+      env,
+    )).trim();
+
+    return {
+      agent: createRuntimeClientAgent(),
+      prompt: prompt ?? "",
+      options: {
+        provider: runtimeProvider,
+        model: config.model,
+        mode: config.mode,
+        authLabel,
+        reasoning: config.reasoning,
+        modelWindow: crpConfig.modelWindow,
+        contextProfile: contextProfile.id,
+        motion: configExplanation.settings.motion.value,
+        cwd,
+        contextSummaryLines: deriveAuthIssueLines({
+          ...(config.authIssueMessage
+            ? { authIssueMessage: config.authIssueMessage }
+            : {}),
+        }),
+        homeState: createInitialHomeState({ modeLabel, authLabel }),
+        ...(sessionId ? { sessionId } : {}),
+        browserOAuthAvailable: config.provider === "openai"
+          && Boolean(env.OPENAI_OAUTH_CLIENT_ID?.trim()),
+      },
+    };
+  }
   const resumedSession = sessionId
     ? await loadResumedWorkSession({ cwd, sessionId, env })
     : undefined;
   const config = await loadConfig({
     cwd,
+    env,
     ...(provider !== undefined ? { provider } : {}),
     ...(model !== undefined ? { model } : {}),
     ...(reasoning !== undefined
@@ -396,6 +598,7 @@ export async function loadWorkCliBootstrap(
   });
   const pluginOverlays = loadExtensionConfigOverlays({
     workspaceRoot: cwd,
+    env,
     ...(userHomeDir ? { userHomeDir } : {}),
   });
   const configExplanation = explainUncleCodeConfig({
@@ -404,6 +607,12 @@ export async function loadWorkCliBootstrap(
     pluginOverlays,
   });
   const contextProfile = resolveContextProfile(configExplanation.settings.contextProfile.value);
+  const terminalUiLocale = resolveWorkShellTerminalUiLocale(env, "en");
+  // Shell chrome follows the operator's terminal preference. The current
+  // provider turn detects its response language independently from user prose,
+  // so Korean conversation content can never relocalize or persist the TUI.
+  const initialUiLocale = terminalUiLocale;
+  const initialUiLocaleLocked = false;
   const systemPromptAppendix = [
     configExplanation.prompt.rendered
       ? `Configured prompt:\n\n${configExplanation.prompt.rendered}`
@@ -450,6 +659,10 @@ export async function loadWorkCliBootstrap(
     cwd,
     reasoning,
     mode,
+    ...(resumedSession?.initialAgentConsole?.securityApprovals
+      ? { initialPermissionRules: resumedSession.initialAgentConsole.securityApprovals }
+      : {}),
+    ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
     ...(systemPromptAppendix ? { systemPrompt: systemPromptAppendix } : {}),
     ...(config.openAIRuntime ? { openAIRuntime: config.openAIRuntime } : {}),
     ...(config.openAIAccountId !== undefined
@@ -464,7 +677,7 @@ export async function loadWorkCliBootstrap(
               apiKey,
               openAIRuntime: config.openAIRuntime,
             });
-            const baseUrl = resolvePiProviderBaseUrl(runtimeProviderName);
+            const baseUrl = resolvePiProviderBaseUrl(runtimeProviderName, env);
             return createPiBridgeProvider({
               provider: runtimeProviderName,
               apiKey,
@@ -482,15 +695,205 @@ export async function loadWorkCliBootstrap(
         }
       : {}),
   });
-  const directAgent = await createConfiguredCodingAgent(
-    config.apiKey,
-    config.model,
-    config.reasoning,
-    config.mode,
-  );
+  const directAgent = runtimeRole === "owner"
+    ? await createConfiguredCodingAgent(
+        config.apiKey,
+        config.model,
+        config.reasoning,
+        config.mode,
+      )
+    : undefined;
+  const directRuntimeProvider = resolveRuntimeProvider(config.provider);
+  const reviewSelection = resolveQualityReviewSelection({
+    directProvider: directRuntimeProvider,
+    directModel: config.model,
+    env,
+  });
+  const reviewConfig = reviewSelection.provider === directRuntimeProvider
+      && reviewSelection.model === config.model
+    ? config
+    : await loadConfig({
+        cwd,
+        env,
+        provider: reviewSelection.provider,
+        model: reviewSelection.model,
+        allowProblematicOpenAIAuth: true,
+      });
+  const reviewAgent = runtimeRole === "owner"
+    ? await createRuntimeCodingAgent({
+        provider: resolveRuntimeProvider(reviewConfig.provider),
+        apiKey: reviewConfig.apiKey,
+        model: reviewConfig.model,
+        cwd,
+        reasoning: reviewConfig.reasoning,
+        mode: reviewConfig.mode,
+        toolAccess: "none",
+        ...(reviewConfig.baseUrl ? { baseUrl: reviewConfig.baseUrl } : {}),
+        ...(systemPromptAppendix ? { systemPrompt: systemPromptAppendix } : {}),
+        ...(reviewConfig.openAIRuntime ? { openAIRuntime: reviewConfig.openAIRuntime } : {}),
+        ...(reviewConfig.openAIAccountId !== undefined
+          ? { openAIAccountId: reviewConfig.openAIAccountId }
+          : {}),
+      })
+    : undefined;
+  const heldOutReviewerSelection = reviewSelection.distinct
+    ? resolveCreatorHeldOutReviewerSelection({
+        creatorProvider: directRuntimeProvider,
+        evaluatorProvider: reviewSelection.provider,
+        env,
+      })
+    : undefined;
+  const heldOutReviewerConfig = heldOutReviewerSelection
+    ? await loadConfig({
+        cwd,
+        env,
+        provider: heldOutReviewerSelection.provider,
+        model: heldOutReviewerSelection.model,
+        allowProblematicOpenAIAuth: true,
+      })
+    : undefined;
 
-  const agent = new WorkAgent({
-    directAgent,
+  const recorder = createAgentOpsRecorder({
+    workspaceRoot: cwd,
+    command: "unclecode work",
+    ...(resumedSession?.sessionId ? { sessionId: resumedSession.sessionId } : {}),
+  });
+
+  let recordPluginDiagnostic: ((diagnostic: import("@unclecode/plugin-host").PluginInvocationDiagnostic) => void) | undefined;
+  const pluginHost = new PluginHost({
+    onDiagnostic: (diagnostic) => recordPluginDiagnostic?.(diagnostic),
+  });
+  let pluginHostDisposal: Promise<void> | undefined;
+  const disposePluginHost = (): Promise<void> => {
+    pluginHostDisposal ??= pluginHost.dispose();
+    return pluginHostDisposal;
+  };
+  try {
+    registerBuiltInSccQualityEngine(pluginHost, { workspaceRoot: cwd, env });
+    await pluginHost.loadFromDisk(cwd, {
+      env,
+      ...(input.userHomeDir ? { homeDir: input.userHomeDir } : {}),
+    });
+  const createHeldOutEvaluatorAgent = input.creatorEvolutionRuntime?.createHeldOutEvaluatorAgent
+    ?? (() => createRuntimeCodingAgent({
+        provider: resolveRuntimeProvider(reviewConfig.provider),
+        apiKey: reviewConfig.apiKey,
+        model: reviewConfig.model,
+        cwd,
+        reasoning: reviewConfig.reasoning,
+        mode: reviewConfig.mode,
+        toolAccess: "none",
+        ...(reviewConfig.baseUrl ? { baseUrl: reviewConfig.baseUrl } : {}),
+        ...(reviewConfig.openAIRuntime ? { openAIRuntime: reviewConfig.openAIRuntime } : {}),
+        ...(reviewConfig.openAIAccountId !== undefined
+          ? { openAIAccountId: reviewConfig.openAIAccountId }
+          : {}),
+      }));
+  const createHeldOutWorkloadAgent = input.creatorEvolutionRuntime?.createHeldOutWorkloadAgent
+    ?? ((workload: { readonly creatorSystemPrompt: string }) => createRuntimeCodingAgent({
+      provider: directRuntimeProvider,
+      apiKey: config.apiKey,
+      model: config.model,
+      cwd,
+      reasoning: config.reasoning,
+      mode: config.mode,
+      toolAccess: "none",
+      systemPrompt: workload.creatorSystemPrompt,
+      ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
+      ...(config.openAIRuntime ? { openAIRuntime: config.openAIRuntime } : {}),
+      ...(config.openAIAccountId !== undefined
+        ? { openAIAccountId: config.openAIAccountId }
+        : {}),
+    }));
+  const createHeldOutReviewerAgent = input.creatorEvolutionRuntime?.createHeldOutReviewerAgent
+    ?? (heldOutReviewerConfig
+      ? () => createRuntimeCodingAgent({
+          provider: resolveRuntimeProvider(heldOutReviewerConfig.provider),
+          apiKey: heldOutReviewerConfig.apiKey,
+          model: heldOutReviewerConfig.model,
+          cwd,
+          reasoning: heldOutReviewerConfig.reasoning,
+          mode: heldOutReviewerConfig.mode,
+          toolAccess: "none",
+          ...(heldOutReviewerConfig.baseUrl ? { baseUrl: heldOutReviewerConfig.baseUrl } : {}),
+          ...(heldOutReviewerConfig.openAIRuntime
+            ? { openAIRuntime: heldOutReviewerConfig.openAIRuntime }
+            : {}),
+          ...(heldOutReviewerConfig.openAIAccountId !== undefined
+            ? { openAIAccountId: heldOutReviewerConfig.openAIAccountId }
+            : {}),
+        })
+      : undefined);
+  const evaluateHeldOutWorktrees = reviewSelection.distinct
+    && heldOutReviewerSelection
+    && createHeldOutReviewerAgent
+      ? createHostHeldOutWorktreeEvaluator({
+          cwd,
+          creator: {
+            provider: directRuntimeProvider,
+            model: config.model,
+          },
+          evaluator: {
+            provider: reviewSelection.provider,
+            model: reviewSelection.model,
+          },
+          reviewer: {
+            provider: heldOutReviewerSelection.provider,
+            model: heldOutReviewerSelection.model,
+          },
+          createWorkloadAgent: createHeldOutWorkloadAgent,
+          createEvaluatorAgent: createHeldOutEvaluatorAgent,
+          createReviewerAgent: createHeldOutReviewerAgent,
+          ...(input.creatorEvolutionRuntime?.evaluatorTurnTimeoutMs === undefined
+            ? {}
+            : { evaluatorTurnTimeoutMs: input.creatorEvolutionRuntime.evaluatorTurnTimeoutMs }),
+          ...(input.creatorEvolutionRuntime?.evaluatorAbortSettlementGraceMs === undefined
+            ? {}
+            : {
+                evaluatorAbortSettlementGraceMs:
+                  input.creatorEvolutionRuntime.evaluatorAbortSettlementGraceMs,
+              }),
+        })
+      : undefined;
+  const creatorEvolutionService = createWorkCreatorEvolutionService({
+    cwd,
+    env,
+    reasoning: config.reasoning,
+    recorder,
+    ...(evaluateHeldOutWorktrees ? { evaluateHeldOutWorktrees } : {}),
+    ...(evaluateHeldOutWorktrees && heldOutReviewerSelection
+      ? {
+          heldOutProviderIdentities: {
+            creator: { provider: directRuntimeProvider, model: config.model },
+            evaluator: { provider: reviewSelection.provider, model: reviewSelection.model },
+            reviewer: {
+              provider: heldOutReviewerSelection.provider,
+              model: heldOutReviewerSelection.model,
+            },
+          },
+        }
+      : {}),
+    createCreatorAgent: input.creatorEvolutionRuntime?.createCreatorAgent
+      ?? (() => createRuntimeCodingAgent({
+        provider: directRuntimeProvider,
+        apiKey: config.apiKey,
+        model: config.model,
+        cwd,
+        reasoning: config.reasoning,
+        mode: config.mode,
+        toolAccess: "none",
+        ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
+        ...(systemPromptAppendix ? { systemPrompt: systemPromptAppendix } : {}),
+        ...(config.openAIRuntime ? { openAIRuntime: config.openAIRuntime } : {}),
+        ...(config.openAIAccountId !== undefined
+          ? { openAIAccountId: config.openAIAccountId }
+          : {}),
+      })),
+  });
+
+  const ownerAgent = directAgent && reviewAgent ? new WorkAgent({
+      directAgent,
+      reviewAgent,
     createExecutorAgent: async (settings) => createWorkExecutorAgent({
       cwd,
       env,
@@ -499,6 +902,21 @@ export async function loadWorkCliBootstrap(
     mode: config.mode,
     reasoning: config.reasoning,
     model: config.model,
+    workspaceRoot: cwd,
+    pluginHost,
+    creatorEvolutionService,
+    directRoute: {
+      provider: directRuntimeProvider,
+      model: config.model,
+    },
+    reviewRoute: {
+      provider: reviewSelection.provider,
+      model: reviewSelection.model,
+    },
+    commodityRoute: {
+      provider: OMP_WORKER_PROVIDER_ID,
+      model: OMP_WORKER_DEFAULT_MODEL,
+    },
     async runExecutableGuardianChecks(guardianInput) {
       const scripts = guardianInput.mode === "ultrawork" || guardianInput.mode === "yolo"
         ? ["lint", "check", "test"]
@@ -513,15 +931,27 @@ export async function loadWorkCliBootstrap(
         signal: guardianInput.signal,
       });
     },
-  });
+  }) : undefined;
+  recordPluginDiagnostic = (diagnostic) => ownerAgent?.recordPluginDiagnostic(diagnostic);
+  const agent: StartReplAgent = ownerAgent ?? createRuntimeClientAgent();
 
   const refreshAuthState = async (): Promise<{
     authLabel: string;
     authIssueLines?: readonly string[];
   }> => {
+    if (config.provider !== "openai") {
+      return {
+        authLabel: resolveWorkShellAuthLabel({
+          engine: activeEngine,
+          configuredLabel: config.authLabel,
+          codexOAuthAvailable: false,
+        }),
+        authIssueLines: [],
+      };
+    }
     const status = await resolveRustOpenAIAuthStatus({ cwd, env });
     const resolved = await resolveRustOpenAIAuth({ cwd, env });
-    directAgent.refreshAuthToken(resolved.status === "ok" ? resolved.bearerToken : "");
+    directAgent?.refreshAuthToken(resolved.status === "ok" ? resolved.bearerToken : "");
     return {
       authLabel: resolveWorkShellAuthLabel({
         engine: activeEngine,
@@ -541,6 +971,25 @@ export async function loadWorkCliBootstrap(
   const authStatus = config.provider === "openai"
     ? await resolveRustOpenAIAuthStatus({ cwd, env })
     : undefined;
+  const observabilityObservedAt = Date.now();
+  const mcpEvidence = (() => {
+    try {
+      const mcpServers = loadMcpHostRegistry({
+        workspaceRoot: cwd,
+        ...(userHomeDir ? { userHomeDir } : {}),
+      }).entries.slice(0, MAX_SESSION_MCP_OBSERVABILITY).map((entry) => ({
+        name: entry.name,
+        transport: entry.transport,
+        configured: true,
+        authentication: "unverified" as const,
+        liveProbe: "not-run" as const,
+        observedAt: observabilityObservedAt,
+      }));
+      return { status: "available" as const, mcpServers };
+    } catch {
+      return { status: "unavailable" as const, mcpServers: [] };
+    }
+  })();
   const browserOAuthAvailable = config.provider === "openai"
     ? Boolean(env.OPENAI_OAUTH_CLIENT_ID?.trim())
     : false;
@@ -572,11 +1021,6 @@ export async function loadWorkCliBootstrap(
     authLabel,
   });
 
-  const recorder = createAgentOpsRecorder({
-    workspaceRoot: cwd,
-    command: "unclecode work",
-    ...(resumedSession?.sessionId ? { sessionId: resumedSession.sessionId } : {}),
-  });
   const crpConfig = resolveWorkShellCrpConfig(configExplanation);
   let resumeIntegrityLines: readonly string[] = [];
   if (crpConfig.enabled && resumedSession !== undefined) {
@@ -628,6 +1072,22 @@ export async function loadWorkCliBootstrap(
   return {
     agent,
     prompt: prompt ?? "",
+    dispose: disposePluginHost,
+    readObservability: () => ({
+      provider: {
+        provider: directRuntimeProvider,
+        model: config.model,
+        configured: true,
+        authentication: config.provider === "openai"
+          ? authStatus?.activeSource === "none" ? "missing" : "unverified"
+          : config.apiKey.trim().length > 0 ? "unverified" : "missing",
+        liveProbe: "not-run",
+        observedAt: observabilityObservedAt,
+      },
+      mcpServers: mcpEvidence.mcpServers,
+      mcpConfigurationStatus: mcpEvidence.status,
+      plugins: pluginHost.getLifecycleSnapshot(),
+    }),
     options: {
       provider: resolveRuntimeProvider(config.provider),
       model: config.model,
@@ -657,6 +1117,8 @@ export async function loadWorkCliBootstrap(
       ...(resumedSession?.initialTraceMode
         ? { initialTraceMode: resumedSession.initialTraceMode }
         : {}),
+      initialUiLocale,
+      initialUiLocaleLocked,
       ...(resumedSession?.initialEntries
         ? { initialEntries: resumedSession.initialEntries }
         : {}),
@@ -672,7 +1134,10 @@ export async function loadWorkCliBootstrap(
       ...(resumedSession?.initialAgentConsole
         ? { initialAgentConsole: resumedSession.initialAgentConsole }
         : {}),
-      interactionBridge: directAgent.getInteractionBridge(),
+      ...(resumedSession?.initialPauseCheckpoint
+        ? { initialPauseCheckpoint: resumedSession.initialPauseCheckpoint }
+        : {}),
+      ...(directAgent ? { interactionBridge: directAgent.getInteractionBridge() } : {}),
       reloadWorkspaceContext: async (workspaceRoot: string) => {
         const refreshedBootstrap = await ingestWorkspaceBootstrapContext({
           cwd: workspaceRoot,
@@ -735,7 +1200,9 @@ export async function loadWorkCliBootstrap(
           prompt: raw,
           ...(userHomeDir ? { userHomeDir } : {}),
         }),
-      recordTurn: (turn) => recorder.recordTurn(turn),
+      ...(runtimeRole === "owner"
+        ? { recordTurn: (turn) => recorder.recordTurn(turn) }
+        : {}),
       mutateContextSource: crpRuntime.mutateContextSource,
       undoContextSourceAction: crpRuntime.undoLastContextSourceAction,
       previewContextPacket: ({ sessionId, packet, profile }) =>
@@ -764,4 +1231,8 @@ export async function loadWorkCliBootstrap(
         crpRuntime.refreshCondensedHistory(),
     },
   };
+  } catch (error) {
+    await disposePluginHost();
+    throw error;
+  }
 }

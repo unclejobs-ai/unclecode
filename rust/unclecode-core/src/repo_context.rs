@@ -3,7 +3,7 @@ use crate::time_iso::{epoch_iso, utc_now_iso};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const EXCLUDED_SEGMENTS: &[&str] = &[".git", "node_modules", "dist", "build"];
@@ -26,16 +26,17 @@ struct WorktreeFingerprint {
 }
 
 pub fn get_repo_map_cache_token(root_dir: &Path) -> String {
-    match run_git(root_dir, &["rev-parse", "HEAD"]) {
-        Ok(output) => output.trim().to_string(),
-        Err(_) => ZERO_SHA.to_string(),
+    let git_head_sha = get_git_head_sha(root_dir);
+    match get_worktree_fingerprint(root_dir) {
+        Ok(worktree) => format!("{git_head_sha}:{}", worktree.fingerprint),
+        Err(_) => format!("{git_head_sha}:unavailable"),
     }
 }
 
 pub fn build_repo_map_json(root_dir: &Path) -> Result<String, String> {
     let generated_at = utc_now_iso();
-    let git_head_sha = get_repo_map_cache_token(root_dir);
-    let tracked_files_output = run_git(root_dir, &["ls-files"])?;
+    let git_head_sha = get_git_head_sha(root_dir);
+    let tracked_files_output = run_git_bytes(root_dir, &["ls-files", "-z"])?;
     let (last_modified_output, change_frequency_output) = if git_head_sha == ZERO_SHA {
         (String::new(), String::new())
     } else {
@@ -70,7 +71,7 @@ pub fn build_repo_map_json(root_dir: &Path) -> Result<String, String> {
     let change_frequency = parse_change_frequency(&change_frequency_output);
     let mut raw_entries = Vec::new();
 
-    for file_path in split_lines(&tracked_files_output) {
+    for file_path in split_nul_paths(&tracked_files_output) {
         if is_excluded_path(&file_path) {
             continue;
         }
@@ -120,6 +121,13 @@ pub fn build_repo_map_json(root_dir: &Path) -> Result<String, String> {
         "totalLines": total_lines
     }))
     .map_err(|error| error.to_string())
+}
+
+fn get_git_head_sha(root_dir: &Path) -> String {
+    match run_git(root_dir, &["rev-parse", "HEAD"]) {
+        Ok(output) => output.trim().to_string(),
+        Err(_) => ZERO_SHA.to_string(),
+    }
 }
 
 pub fn build_worktree_fingerprint_json(root_dir: &Path) -> Result<String, String> {
@@ -197,14 +205,18 @@ pub fn check_freshness_json(root_dir: &Path, packet_json: &str) -> Result<String
 }
 
 fn run_git(root_dir: &Path, args: &[&str]) -> Result<String, String> {
+    String::from_utf8(run_git_bytes(root_dir, args)?)
+        .map_err(|error| format!("git {} returned non-utf8 stdout: {error}", args.join(" ")))
+}
+
+fn run_git_bytes(root_dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let output = Command::new("git")
         .args(args)
         .current_dir(root_dir)
         .output()
         .map_err(|error| format!("Failed to run git {}: {error}", args.join(" ")))?;
     if output.status.success() {
-        return String::from_utf8(output.stdout)
-            .map_err(|error| format!("git {} returned non-utf8 stdout: {error}", args.join(" ")));
+        return Ok(output.stdout);
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -213,6 +225,14 @@ fn run_git(root_dir: &Path, args: &[&str]) -> Result<String, String> {
     } else {
         format!("Git command failed: git {}: {stderr}", args.join(" "))
     })
+}
+
+fn split_nul_paths(output: &[u8]) -> Vec<Vec<u8>> {
+    output
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect()
 }
 
 fn split_lines(output: &str) -> Vec<String> {
@@ -224,25 +244,44 @@ fn split_lines(output: &str) -> Vec<String> {
         .collect()
 }
 
-fn parse_status_paths(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .map(str::trim_end)
-        .filter(|line| line.len() >= 4)
-        .map(|line| line[3..].to_string())
-        .map(|path| {
-            path.split(" -> ")
-                .last()
-                .map(ToString::to_string)
-                .unwrap_or(path)
-        })
-        .collect()
+fn parse_status_paths(output: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    let mut fields = output.split(|byte| *byte == 0);
+    let mut paths = Vec::new();
+
+    while let Some(record) = fields.next() {
+        if record.is_empty() {
+            continue;
+        }
+        if record.len() < 4 || record[2] != b' ' || record[3..].is_empty() {
+            return Err("git status --porcelain=v1 -z returned a malformed record".to_string());
+        }
+
+        paths.push(record[3..].to_vec());
+        if record[..2]
+            .iter()
+            .any(|status| *status == b'R' || *status == b'C')
+        {
+            let source_path = fields
+                .next()
+                .ok_or("git status --porcelain=v1 -z omitted a rename or copy source path")?;
+            if source_path.is_empty() {
+                return Err(
+                    "git status --porcelain=v1 -z returned an empty rename or copy source path"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    Ok(paths)
 }
 
-fn is_excluded_path(file_path: &str) -> bool {
-    file_path
-        .split('/')
-        .any(|segment| EXCLUDED_SEGMENTS.contains(&segment))
+fn is_excluded_path(file_path: &[u8]) -> bool {
+    file_path.split(|byte| *byte == b'/').any(|segment| {
+        EXCLUDED_SEGMENTS
+            .iter()
+            .any(|excluded| segment == excluded.as_bytes())
+    })
 }
 
 fn parse_last_modified(output: &str) -> HashMap<String, String> {
@@ -278,12 +317,13 @@ fn parse_change_frequency(output: &str) -> HashMap<String, usize> {
 
 fn read_repo_map_entry(
     root_dir: &Path,
-    file_path: &str,
+    file_path: &[u8],
     git_head_sha: &str,
     last_modified: &HashMap<String, String>,
     change_frequency: &HashMap<String, usize>,
 ) -> Result<Option<RepoMapEntry>, String> {
-    let path = root_dir.join(file_path);
+    let display_path = display_git_path(file_path);
+    let path = root_dir.join(path_from_git_bytes(file_path));
     let buffer = match fs::read(&path) {
         Ok(buffer) => buffer,
         Err(error)
@@ -304,25 +344,30 @@ fn read_repo_map_entry(
     }
 
     Ok(Some(RepoMapEntry {
-        path: file_path.to_string(),
-        last_modified: last_modified.get(file_path).cloned().unwrap_or_else(|| {
-            get_last_modified_fallback(root_dir, file_path, git_head_sha)
-                .unwrap_or_else(|_| epoch_iso())
-        }),
+        path: display_path.clone(),
+        last_modified: last_modified
+            .get(&display_path)
+            .cloned()
+            .unwrap_or_else(|| {
+                get_last_modified_fallback(root_dir, file_path, git_head_sha)
+                    .unwrap_or_else(|_| epoch_iso())
+            }),
         line_count: count_logical_lines(&buffer),
-        change_frequency: *change_frequency.get(file_path).unwrap_or(&0),
+        change_frequency: *change_frequency.get(&display_path).unwrap_or(&0),
         hotspot_score: 0.0,
     }))
 }
 
 fn get_last_modified_fallback(
     root_dir: &Path,
-    file_path: &str,
+    file_path: &[u8],
     git_head_sha: &str,
 ) -> Result<String, String> {
     if git_head_sha == ZERO_SHA {
         return Ok(epoch_iso());
     }
+    let file_path = std::str::from_utf8(file_path)
+        .map_err(|_| "Git path is not valid UTF-8 for log lookup".to_string())?;
     let timestamp = run_git(root_dir, &["log", "-1", "--format=%cI", "--", file_path])?
         .trim()
         .to_string();
@@ -334,22 +379,22 @@ fn get_last_modified_fallback(
 }
 
 fn get_worktree_fingerprint(root_dir: &Path) -> Result<WorktreeFingerprint, String> {
-    let output = run_git(
+    let output = run_git_bytes(
         root_dir,
-        &["status", "--porcelain=v1", "--untracked-files=no"],
+        &["status", "--porcelain=v1", "-z", "--untracked-files=no"],
     )?;
-    let modified_paths = parse_status_paths(&output);
-    if modified_paths.is_empty() {
+    let modified_path_bytes = parse_status_paths(&output)?;
+    if modified_path_bytes.is_empty() {
         return Ok(WorktreeFingerprint {
             fingerprint: "clean".to_string(),
-            modified_paths,
+            modified_paths: Vec::new(),
         });
     }
 
     let mut chunks = Vec::new();
-    for file_path in sorted_paths(&modified_paths) {
-        chunks.extend_from_slice(file_path.as_bytes());
-        match fs::read(root_dir.join(file_path)) {
+    for file_path in sorted_paths(&modified_path_bytes) {
+        chunks.extend_from_slice(file_path);
+        match fs::read(root_dir.join(path_from_git_bytes(file_path))) {
             Ok(bytes) => chunks.extend(bytes),
             Err(error) => {
                 chunks.extend_from_slice(b"[missing]");
@@ -360,8 +405,28 @@ fn get_worktree_fingerprint(root_dir: &Path) -> Result<WorktreeFingerprint, Stri
 
     Ok(WorktreeFingerprint {
         fingerprint: sha256_hex_bytes(&chunks),
-        modified_paths,
+        modified_paths: modified_path_bytes
+            .iter()
+            .map(|path| display_git_path(path))
+            .collect(),
     })
+}
+
+fn display_git_path(path: &[u8]) -> String {
+    String::from_utf8_lossy(path).into_owned()
+}
+
+#[cfg(unix)]
+fn path_from_git_bytes(path: &[u8]) -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    PathBuf::from(OsString::from_vec(path.to_vec()))
+}
+
+#[cfg(not(unix))]
+fn path_from_git_bytes(path: &[u8]) -> PathBuf {
+    PathBuf::from(display_git_path(path))
 }
 
 fn is_inside_git_worktree(root_dir: &Path) -> Result<bool, String> {
@@ -382,8 +447,8 @@ fn merge_paths(left: Vec<String>, right: Vec<String>) -> Vec<String> {
     merged
 }
 
-fn sorted_paths(paths: &[String]) -> Vec<&str> {
-    let mut sorted = paths.iter().map(String::as_str).collect::<Vec<_>>();
+fn sorted_paths(paths: &[Vec<u8>]) -> Vec<&[u8]> {
+    let mut sorted = paths.iter().map(Vec::as_slice).collect::<Vec<_>>();
     sorted.sort_unstable();
     sorted
 }

@@ -1,16 +1,32 @@
 import assert from "node:assert/strict";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 import React from "react";
 import { renderContextInspectorOverlay } from "../../packages/tui/src/work-shell-context-inspector.tsx";
 import { renderDebugFrame, waitForSettledFrame } from "../tui/work-shell-render-harness.mjs";
 
 import { CONTEXT_DESK_GROUPS } from "@unclecode/contracts";
+import { createOmpWorkerProvider, createOmpWorkerRunner } from "@unclecode/providers";
+import { LiveRuntimeEngineRegistry } from "../../apps/unclecode-server/src/runtime-engine-rpc.ts";
+import { createUsageRecorder } from "./usage-recorder-fixture.mjs";
 
 import {
   WorkShellEngine,
   createWorkShellEngine,
   createWorkShellInteractionBridge,
   createWorkShellPaneRuntime,
+  runRustCommandSync,
 } from "@unclecode/orchestrator";
 import {
   createAuthKeyBuiltinResult,
@@ -91,6 +107,14 @@ import {
   resolveSecureApiKeyEntrySubmission,
   writeWorkShellRememberCommand,
 } from "../../packages/orchestrator/src/work-shell-engine-operations.ts";
+
+function stripWorkShellLanguageInstruction(prompt) {
+  if (!/^(?:Respond in English for this turn\.|이번 요청에는 한국어로 답변하세요\.)/u.test(prompt)) {
+    return prompt;
+  }
+  const separator = prompt.indexOf("\n\n");
+  return separator < 0 ? prompt : prompt.slice(separator + 2);
+}
 import {
   createCollapsedContextPanel,
   createRecentSessionsLoadingPanel,
@@ -347,6 +371,201 @@ function createEngine(overrides = {}) {
     },
   };
 }
+
+test("WorkShellEngine restores a replay-safe approval pause without rerunning or overwriting it", async () => {
+  let providerCalls = 0;
+  const checkpoint = {
+    turnId: "turn-restored-1",
+    boundary: "before_approval",
+    decisionId: "decision-restored-1",
+    contextReceiptId: "receipt-restored-1",
+    attachmentRefs: [],
+    artifactRefs: ["artifact:sha256:restored"],
+  };
+  const { engine, calls } = createEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      initialPauseCheckpoint: checkpoint,
+      initialAgentConsole: {
+        profileId: "build",
+        pendingDecision: {
+          kind: "user-decision",
+          id: "decision-restored-1",
+          title: "Continue?",
+          questions: [{ id: "continue", question: "Continue?", options: [{ label: "Yes" }] }],
+        },
+        activity: [],
+        agents: [],
+        jobs: [],
+      },
+    },
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn() {
+        providerCalls += 1;
+        return { text: "must not run" };
+      },
+    },
+  });
+
+  await engine.initialize();
+
+  assert.deepEqual(engine.getTurnLifecycle(), {
+    state: "paused",
+    turnId: "turn-restored-1",
+    boundary: "before_approval",
+  });
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-restored-1");
+  assert.equal(providerCalls, 0);
+  assert.equal(calls.snapshots.at(-1)?.state, "paused");
+  assert.deepEqual(calls.snapshots.at(-1)?.pauseCheckpoint, checkpoint);
+  await engine.persistRuntimeRevision(17);
+  assert.equal(calls.snapshots.at(-1)?.ownerMutationRevision, 17);
+  assert.deepEqual(calls.snapshots.at(-1)?.pauseCheckpoint, checkpoint);
+  assert.equal(engine.resumeTurn(), false, "a recovered pause has no detached continuation to auto-rerun");
+});
+
+test("WorkShellEngine acknowledges pause only after the provider settles and resumes the same turn", async () => {
+  let releaseProvider;
+  let providerCalls = 0;
+  const { engine, calls } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      updateMode() {},
+      setTraceListener() {},
+      async runTurn() {
+        providerCalls += 1;
+        return new Promise((resolve) => { releaseProvider = resolve; });
+      },
+    },
+  });
+  await engine.initialize();
+
+  const turn = engine.handleSubmit("keep the same turn");
+  while (!releaseProvider) await new Promise((resolve) => setImmediate(resolve));
+  const turnId = engine.getTurnLifecycle().turnId;
+  let acknowledged = false;
+  const pause = engine.requestTurnPause().then((receipt) => {
+    acknowledged = true;
+    return receipt;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(engine.getTurnLifecycle().state, "pause_pending");
+  assert.equal(acknowledged, false);
+  assert.equal(providerCalls, 1);
+
+  releaseProvider({ text: "provider finished" });
+  const receipt = await pause;
+  assert.equal(receipt.turnId, turnId);
+  assert.equal(receipt.boundary, "after_provider");
+  assert.equal(engine.getTurnLifecycle().state, "paused");
+  assert.ok(calls.snapshots.some((snapshot) => snapshot.state === "paused"));
+
+  assert.equal(engine.resumeTurn(), true);
+  await turn;
+  assert.equal(providerCalls, 1, "resume must not create a second user or provider turn");
+  assert.equal(engine.getTurnLifecycle().state, "completed");
+});
+
+test("WorkShellEngine can suspend at a pending approval without cancelling or answering it", async () => {
+  const interactionBridge = createWorkShellInteractionBridge();
+  let decision;
+  const { engine, calls } = createEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      interactionBridge,
+      initialLastSubmittedContextReceiptId: "receipt-pause-1",
+      initialAgentConsole: {
+        profileId: "build",
+        activity: [],
+        agents: [],
+        jobs: [],
+        workGraph: {
+          id: "graph-pause",
+          qualityProfile: "deep",
+          currentStage: "critic",
+          gateStatus: "refine",
+          iteration: 2,
+          approval: "approved",
+          nodes: [{
+            id: "critic-1", title: "Independent review", prompt: "review",
+            status: "requires_action", dependsOn: [], fileOwnership: [],
+            evidenceRefs: [], stage: "critic", role: "critic", attempt: 3,
+            artifactRefs: ["artifact:sha256:abc"], reviewRequired: true,
+          }],
+        },
+      },
+    },
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn() {
+        decision = interactionBridge.ask({
+          id: "pause-at-approval",
+          title: "Permission",
+          questions: [{
+            id: "permission",
+            question: "Proceed?",
+            options: [{ label: "Approve" }, { label: "Reject" }],
+            recommended: 0,
+          }],
+        });
+        const answer = await decision;
+        return { text: answer.status };
+      },
+    },
+  });
+  await engine.initialize();
+
+  const turn = engine.handleSubmit("needs approval", [{
+    type: "image", mimeType: "image/png", displayName: "clipboard.png",
+    path: "(clipboard)", dataUrl: "data:image/png;base64,AA==",
+  }]);
+  while (!engine.getState().agentConsole.pendingDecision) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const receipt = await engine.requestTurnPause();
+
+  assert.equal(receipt.boundary, "before_approval");
+  assert.equal(engine.getTurnLifecycle().state, "paused");
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "pause-at-approval");
+  const paused = calls.snapshots.find((snapshot) => snapshot.state === "paused");
+  assert.deepEqual(paused?.pauseCheckpoint, {
+    turnId: receipt.turnId,
+    boundary: "before_approval",
+    activeNode: { id: "critic-1", attempt: 3 },
+    currentStage: "critic",
+    gateStatus: "refine",
+    iteration: 2,
+    decisionId: "pause-at-approval",
+    contextReceiptId: "receipt-pause-1",
+    attachmentRefs: ["image:image/png:clipboard.png"],
+    artifactRefs: ["artifact:sha256:abc"],
+  });
+
+  assert.equal(engine.resumeTurn(), true);
+  assert.equal(engine.answerPendingDecisionByIndex(1, "pause-at-approval"), true);
+  await decision;
+  await turn;
+  assert.equal(engine.getTurnLifecycle().state, "completed");
+});
 
 test("work-shell command helpers classify builtins, local commands, and reusable panels/prompts", () => {
   assert.deepEqual(resolveWorkShellBuiltinCommand("/help"), { kind: "help" });
@@ -2887,8 +3106,8 @@ test("createInitialWorkShellEngineState derives the shell defaults from options"
   assert.equal(defaultState.composerMode, "default");
   assert.equal(defaultState.isBusy, false);
   assert.deepEqual(defaultState.entries, [
-    { role: "user", text: "inspect repo" },
-    { role: "assistant", text: "repo inspected" },
+    { id: "entry-0", role: "user", text: "inspect repo" },
+    { id: "entry-1", role: "assistant", text: "repo inspected" },
   ]);
 });
 
@@ -2914,8 +3133,8 @@ test("work-shell state helpers append entries and update auth/busy transitions d
   };
 
   assert.deepEqual(withEntries.entries, [
-    { role: "system", text: "hello" },
-    { role: "assistant", text: "world" },
+    { id: "entry-0", role: "system", text: "hello" },
+    { id: "entry-1", role: "assistant", text: "world" },
   ]);
   assert.equal(withAuth.authLabel, "oauth-file");
   assert.deepEqual(withAuth.authLauncherLines, ["Saved auth found."]);
@@ -2926,6 +3145,22 @@ test("work-shell state helpers append entries and update auth/busy transitions d
   assert.equal(withBusy.isBusy, true);
   assert.equal(withBusy.busyStatus, "thinking");
   assert.equal(withBusy.currentTurnStartedAt, 123);
+});
+
+test("work-shell transcript projection retains only the newest 256 entries in long live sessions", () => {
+  const state = createState({
+    entries: Array.from({ length: 300 }, (_value, index) => ({
+      id: `entry-${index}`,
+      role: index % 2 === 0 ? "user" : "assistant",
+      text: `message-${index}`,
+    })),
+  });
+
+  const patch = appendWorkShellEntries(state, { role: "assistant", text: "message-300" });
+
+  assert.equal(patch.entries.length, 256);
+  assert.equal(patch.entries[0]?.text, "message-45");
+  assert.equal(patch.entries.at(-1)?.text, "message-300");
 });
 
 test("work-shell state helpers update trace mode and trace lines without mutating pinned panels", () => {
@@ -3083,17 +3318,31 @@ test("WorkShellEngine handles /clear without UI-owned business logic", async () 
   assert.deepEqual(engine.getState().entries, [{ role: "system", text: "Conversation cleared." }]);
 });
 
-test("WorkShellEngine /clear clears stale work board done snapshot", async () => {
+test("WorkShellEngine queue never mixes completed turn history into follow-ups", async () => {
   const { engine } = createEngine();
 
   await engine.initialize();
   await engine.handleSubmit("hello");
   await engine.handleSubmit("/queue");
-  assert.ok(engine.getState().panel?.lines.some((line) => /Done · 1/.test(line)));
+  assert.equal(engine.getState().panel.title, "Queue · follow-ups");
+  assert.ok(!engine.getState().panel.lines.some((line) => /Done|hello →/.test(line)));
 
   await engine.handleSubmit("/clear");
   await engine.handleSubmit("/queue");
-  assert.ok(engine.getState().panel?.lines.some((line) => /Done · 0/.test(line)));
+  assert.equal(engine.getState().panel.title, "Queue · follow-ups");
+  assert.ok(!engine.getState().panel.lines.some((line) => /Done|hello →/.test(line)));
+});
+
+test("WorkShellEngine replaces a queue overlay with the security policy projection", async () => {
+  const { engine } = createEngine();
+
+  await engine.initialize();
+  await engine.handleSubmit("/queue");
+  await engine.handleSubmit("/policy");
+
+  assert.equal(engine.getState().panel.title, "Security policy");
+  assert.match(engine.getState().panel.lines.join("\n"), /Security approval only/);
+  assert.doesNotMatch(engine.getState().panel.lines.join("\n"), /follow-ups/);
 });
 
 test("WorkShellEngine applies /reasoning updates and syncs agent runtime settings", async () => {
@@ -3138,11 +3387,12 @@ test("WorkShellEngine opens cache telemetry locally", async () => {
 });
 
 test("WorkShellEngine opens the agent console tab an idle slash command names", async () => {
-  for (const [line, tab] of [["/agents", "agents"], ["/jobs", "jobs"], ["/todo", "plan"]]) {
+  for (const [line, tab] of [["/agents", "agents"], ["/jobs", "jobs"], ["/todo", "plan"], ["/review", "quality"]]) {
     const { engine, calls } = createEngine();
 
     await engine.initialize();
     const entriesBefore = engine.getState().entries.length;
+    const runtimeProjectionBefore = engine.getState().agentConsole;
     await engine.handleSubmit(line);
 
     assert.equal(engine.getState().agentConsoleView.open, true, `${line} must open the console`);
@@ -3153,11 +3403,18 @@ test("WorkShellEngine opens the agent console tab an idle slash command names", 
       `${line} must not write a conversation entry`,
     );
     assert.equal(calls.turns.length, 0);
+    assert.equal(engine.getState().queuedCount, 0, `${line} must not enqueue work`);
+    assert.strictEqual(
+      engine.getState().agentConsole,
+      runtimeProjectionBefore,
+      `${line} must not revise the authoritative runtime projection`,
+    );
   }
 });
 
 test("WorkShellEngine projects provider cache usage into the session ledger", async () => {
   const { engine, emitTrace } = createEngine();
+  engine.bindRuntimeUsageRecorder(createUsageRecorder());
 
   await engine.initialize();
   emitTrace({
@@ -3175,25 +3432,23 @@ test("WorkShellEngine projects provider cache usage into the session ledger", as
   });
 
   assert.deepEqual(engine.getState().agentConsole.mainUsage, {
-    eventIds: ["usage-1"],
     inputTokens: 1_000,
     outputTokens: 200,
     cacheReadTokens: 750,
     cacheWriteTokens: 50,
     cacheSavingsUsd: 0.004,
     costUsd: 0.01,
-    routes: [{
+  });
+  assert.deepEqual(engine.getState().agentConsole.totalUsage?.routes, [{
       provider: "openai",
       model: "gpt-5.6-sol",
-      eventIds: ["usage-1"],
       inputTokens: 1_000,
       outputTokens: 200,
       cacheReadTokens: 750,
       cacheWriteTokens: 50,
       cacheSavingsUsd: 0.004,
       costUsd: 0.01,
-    }],
-  });
+    }]);
 });
 
 test("WorkShellEngine preserves GPT-5.6 reasoning overrides across model switches", async () => {
@@ -3451,7 +3706,9 @@ test("WorkShellEngine sends the manifest-owned provider prompt for a resolved pa
   await engine.handleSubmit("write focused tests");
 
   assert.deepEqual(manifestInputs, [{ packet, userPrompt: "write focused tests" }]);
-  assert.deepEqual(providerPrompts, ["manifest-owned:packet-manifest-1:write focused tests"]);
+  assert.deepEqual(providerPrompts, [
+    "Respond in English for this turn. Preserve code, paths, commands, and proper names when needed.\n\nmanifest-owned:packet-manifest-1:write focused tests",
+  ]);
   assert.deepEqual(engine.getState().agentConsole.manifest, packet.manifest);
   assert.deepEqual(calls.snapshots.at(-1)?.agentConsole?.manifest, packet.manifest);
 });
@@ -4409,7 +4666,7 @@ test("WorkShellEngine preserves queued follow-ups when context proof blocks a tu
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
   await engine.handleSubmit("queued follow-up");
-  assert.ok(engine.getState().entries.some((entry) => /Queued follow-up #1/.test(entry.text)));
+  assert.equal(engine.getState().entries.some((entry) => /Queued follow-up #1/.test(entry.text)), false);
   assert.equal(engine.getState().queuedCount, 1);
 
   releaseResolve();
@@ -4561,7 +4818,7 @@ test("WorkShellEngine binds ask_user to a durable composer decision", async () =
   assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-1");
   assert.equal(engine.getState().panel.title, "Decision");
 
-  await engine.handleSubmit("2");
+  assert.equal(await engine.submitPendingDecisionText("2", "decision-1"), true);
 
   assert.deepEqual(await result, {
     status: "answered",
@@ -4603,13 +4860,15 @@ test("WorkShellEngine answers and cancels a pending decision by one-key methods"
   // Out-of-range indices are rejected up front (handlePendingDecisionReply
   // is void, so the range check is the only guard) and keep the decision
   // pending for a later reply.
-  assert.equal(engine.answerPendingDecisionByIndex(0), false);
-  assert.equal(engine.answerPendingDecisionByIndex(99), false);
-  assert.equal(engine.answerPendingDecisionByIndex(1.5), false);
+  assert.equal(engine.answerPendingDecisionByIndex(0, "decision-one-key"), false);
+  assert.equal(engine.answerPendingDecisionByIndex(99, "decision-one-key"), false);
+  assert.equal(engine.answerPendingDecisionByIndex(1.5, "decision-one-key"), false);
   assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-one-key");
   assert.equal((await Promise.race([result, Promise.resolve("pending")])), "pending");
 
-  assert.equal(engine.answerPendingDecisionByIndex(2), true);
+  assert.equal(engine.answerPendingDecisionByIndex(2, "stale-decision"), false);
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-one-key");
+  assert.equal(engine.answerPendingDecisionByIndex(2, "decision-one-key"), true);
 
   assert.deepEqual(await result, {
     status: "answered",
@@ -4618,8 +4877,146 @@ test("WorkShellEngine answers and cancels a pending decision by one-key methods"
   assert.equal(engine.getState().agentConsole.pendingDecision, undefined);
   // A settled decision cannot be settled twice: the pending identity guard
   // makes both one-key methods no-ops after the fact.
-  assert.equal(engine.answerPendingDecisionByIndex(1), false);
-  assert.equal(engine.cancelPendingDecision(), false);
+  assert.equal(engine.answerPendingDecisionByIndex(1, "decision-one-key"), false);
+  assert.equal(engine.cancelPendingDecision("decision-one-key"), false);
+});
+
+test("WorkShellEngine never settles replacement decision B with delayed controls for A", async () => {
+  const interactionBridge = createWorkShellInteractionBridge();
+  const { engine } = createEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      interactionBridge,
+    },
+  });
+  await engine.initialize();
+
+  const resultA = interactionBridge.ask({
+    id: "decision-a",
+    title: "First choice",
+    questions: [{
+      id: "first",
+      question: "Choose first.",
+      options: [{ label: "One" }, { label: "Two" }],
+    }],
+  });
+  assert.equal(engine.cancelPendingDecision("decision-a"), true);
+  assert.deepEqual(await resultA, { status: "cancelled" });
+
+  const resultB = interactionBridge.ask({
+    id: "decision-b",
+    title: "Replacement choice",
+    questions: [{
+      id: "replacement",
+      question: "Choose replacement.",
+      options: [{ label: "Keep" }, { label: "Replace" }],
+    }],
+  });
+  assert.equal(engine.answerPendingDecisionByIndex(1, "decision-a"), false);
+  assert.equal(engine.cancelPendingDecision("decision-a"), false);
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-b");
+  assert.equal(await Promise.race([resultB, Promise.resolve("pending")]), "pending");
+
+  assert.equal(engine.answerPendingDecisionByIndex(2, "decision-b"), true);
+  assert.deepEqual(await resultB, {
+    status: "answered",
+    answers: [{ id: "replacement", selectedOptions: ["Replace"] }],
+  });
+});
+
+test("WorkShellEngine settles only the exact pending typed user decision", async () => {
+  const interactionBridge = createWorkShellInteractionBridge();
+  const { engine } = createEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      interactionBridge,
+    },
+  });
+  await engine.initialize();
+
+  const result = interactionBridge.ask({
+    id: "typed-decision",
+    title: "Release choice",
+    questions: [{
+      id: "lane",
+      question: "Which lane?",
+      options: [{ label: "Canary" }, { label: "Stable" }],
+    }],
+  });
+  assert.equal(engine.answerPendingUserDecision("stale-decision", [{ id: "lane", selectedOptions: ["Canary"] }]), false);
+  assert.equal(engine.answerPendingUserDecision("typed-decision", [{ id: "lane", selectedOptions: ["Unknown"] }]), false);
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "typed-decision");
+  assert.equal(engine.answerPendingUserDecision("typed-decision", [{ id: "lane", selectedOptions: ["Stable"] }]), true);
+  assert.deepEqual(await result, {
+    status: "answered",
+    answers: [{ id: "lane", selectedOptions: ["Stable"] }],
+  });
+  assert.equal(engine.answerPendingUserDecision("typed-decision", [{ id: "lane", selectedOptions: ["Canary"] }]), false);
+});
+
+test("WorkShellEngine never settles replacement B when typed text for A is delayed in routing", async () => {
+  const interactionBridge = createWorkShellInteractionBridge();
+  const { engine } = createEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      interactionBridge,
+    },
+  });
+  await engine.initialize();
+
+  const resultA = interactionBridge.ask({
+    id: "typed-a",
+    title: "First choice",
+    questions: [{
+      id: "lane",
+      question: "Choose first lane.",
+      options: [{ label: "Canary" }, { label: "Stable" }],
+    }],
+  });
+  const classifier = Promise.withResolvers();
+  engine.resolveBusySubmitDecision = async () => classifier.promise;
+  const delayedA = engine.submitPendingDecisionText("2", "typed-a");
+  await Promise.resolve();
+
+  assert.equal(engine.cancelPendingDecision("typed-a"), true);
+  assert.deepEqual(await resultA, { status: "cancelled" });
+  const resultB = interactionBridge.ask({
+    id: "typed-b",
+    title: "Replacement choice",
+    questions: [{
+      id: "lane",
+      question: "Choose replacement lane.",
+      options: [{ label: "Blue" }, { label: "Green" }],
+    }],
+  });
+  classifier.resolve({ action: "queue" });
+
+  assert.equal(await delayedA, false);
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "typed-b");
+  assert.equal(await Promise.race([resultB, Promise.resolve("pending")]), "pending");
+  assert.equal(await engine.submitPendingDecisionText("2", "typed-b"), true);
+  assert.deepEqual(await resultB, {
+    status: "answered",
+    answers: [{ id: "lane", selectedOptions: ["Green"] }],
+  });
 });
 
 test("WorkShellEngine one-key decision methods refuse multi-question and absent decisions", async () => {
@@ -4638,8 +5035,8 @@ test("WorkShellEngine one-key decision methods refuse multi-question and absent 
   });
   await engine.initialize();
 
-  assert.equal(engine.answerPendingDecisionByIndex(1), false);
-  assert.equal(engine.cancelPendingDecision(), false);
+  assert.equal(engine.answerPendingDecisionByIndex(1, "absent-decision"), false);
+  assert.equal(engine.cancelPendingDecision("absent-decision"), false);
 
   const result = interactionBridge.ask({
     id: "decision-multi",
@@ -4660,10 +5057,10 @@ test("WorkShellEngine one-key decision methods refuse multi-question and absent 
   assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-multi");
   // Multi-question decisions need typed `question-id: n` replies; digits
   // must stay ordinary input instead of half-answering.
-  assert.equal(engine.answerPendingDecisionByIndex(1), false);
+  assert.equal(engine.answerPendingDecisionByIndex(1, "decision-multi"), false);
   assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-multi");
 
-  assert.equal(engine.cancelPendingDecision(), true);
+  assert.equal(engine.cancelPendingDecision("decision-multi"), true);
 
   assert.deepEqual(await result, { status: "cancelled" });
   assert.equal(engine.getState().agentConsole.pendingDecision, undefined);
@@ -4707,16 +5104,16 @@ test("WorkShellEngine still settles a pending decision when console routing thro
   };
   const replies = [];
   const handleReply = engine.handlePendingDecisionReply.bind(engine);
-  engine.handlePendingDecisionReply = (value) => {
-    replies.push(value);
-    handleReply(value);
+  engine.handlePendingDecisionReply = (value, decisionId) => {
+    replies.push([value, decisionId]);
+    return handleReply(value, decisionId);
   };
   const entriesBefore = engine.getState().entries.length;
 
-  await engine.handleSubmit("2");
+  assert.equal(await engine.submitPendingDecisionText("2", "decision-1"), true);
 
   assert.equal(routeCalls, 1, "the classifier is consulted exactly once");
-  assert.deepEqual(replies, ["2"], "the original line settles the decision exactly once");
+  assert.deepEqual(replies, [["2", "decision-1"]], "the original line settles the exact decision once");
   assert.deepEqual(await result, {
     status: "answered",
     answers: [{ id: "strategy", selectedOptions: ["Fast"] }],
@@ -5320,6 +5717,7 @@ test("WorkShellEngine reuses the previewed /context packet for the next chat tur
 
 test("WorkShellEngine shows a busy spinner state while resolving composer context", async () => {
   let releaseComposer;
+  let holdComposer = true;
   let agentCalled = false;
   const { engine } = createEngine({
     agent: {
@@ -5331,13 +5729,19 @@ test("WorkShellEngine shows a busy spinner state while resolving composer contex
         return { text: `reply:${prompt}` };
       },
     },
-    resolveComposerInput: async (value) => new Promise((resolve) => {
-      releaseComposer = () => resolve({
+    resolveComposerInput: async (value) => holdComposer
+      ? new Promise((resolve) => {
+        releaseComposer = () => resolve({
+          prompt: value.trim(),
+          attachments: [],
+          transcriptText: value.trim(),
+        });
+      })
+      : ({
         prompt: value.trim(),
         attachments: [],
         transcriptText: value.trim(),
-      });
-    }),
+      }),
   });
 
   await engine.initialize();
@@ -5348,17 +5752,22 @@ test("WorkShellEngine shows a busy spinner state while resolving composer contex
 
   assert.equal(engine.getState().isBusy, true);
   assert.equal(engine.getState().busyStatus, "preparing context");
+  assert.equal(engine.getState().uiLocale, "ko", "Korean turn chrome must switch before the provider reply");
   assert.equal(agentCalled, false);
   for (let attempt = 0; attempt < 100 && typeof releaseComposer !== "function"; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
   assert.equal(typeof releaseComposer, "function");
 
+  holdComposer = false;
   releaseComposer();
   await submit;
 
   assert.equal(agentCalled, true);
   assert.equal(engine.getState().isBusy, false);
+
+  await engine.handleSubmit("is the input stable now");
+  assert.equal(engine.getState().uiLocale, "en", "English follow-up chrome must switch with its turn");
 });
 
 test("WorkShellEngine treats /con as the human context shortcut", async () => {
@@ -5570,7 +5979,7 @@ test("WorkShellEngine clears stale auth issue context after auth recovers", asyn
   assert.match(contextText, /Loaded guidance: AGENTS\.md/);
 });
 
-test("WorkShellEngine shows auth progress while inline oauth is pending", async () => {
+test("WorkShellEngine shows the copyable auth URL while inline oauth is pending", async () => {
   let resolveInline;
   const inlinePromise = new Promise((resolve) => {
     resolveInline = resolve;
@@ -5580,9 +5989,9 @@ test("WorkShellEngine shows auth progress while inline oauth is pending", async 
       return input === "/auth login" ? ["auth", "login"] : undefined;
     },
     async resolveWorkShellInlineCommand(_args, _runInlineCommand, onProgress) {
-      onProgress?.("Opening browser…");
-      onProgress?.("Enter code: ABCD-1234");
-      onProgress?.("Waiting for device approval…");
+      onProgress?.("Open this URL in your browser:");
+      onProgress?.("https://auth.openai.com/oauth/authorize?client_id=test");
+      onProgress?.("Waiting for callback…");
       return inlinePromise;
     },
   });
@@ -5593,9 +6002,9 @@ test("WorkShellEngine shows auth progress while inline oauth is pending", async 
 
   assert.equal(engine.getState().panel.title, "Auth");
   assert.deepEqual(engine.getState().panel.lines, [
-    "Enter code: ABCD-1234",
-    "Waiting for device approval…",
-    "Opening browser…",
+    "Waiting for callback…",
+    "Open this URL in your browser:",
+    "https://auth.openai.com/oauth/authorize?client_id=test",
   ]);
 
   resolveInline({ lines: ["OAuth login complete.", "Auth: oauth-file", "Route: device-oauth"], failed: false });
@@ -5698,7 +6107,7 @@ test("WorkShellEngine keeps skill summaries visible in the skills panel", async 
   assert.deepEqual(engine.getState().panel.lines, ["autopilot · project", "  Keep moving."]);
 });
 
-test("WorkShellEngine turns /review into a focused review prompt", async () => {
+test("WorkShellEngine turns /review run into a focused review prompt", async () => {
   const prompts = [];
   const { engine } = createEngine({
     agent: {
@@ -5711,12 +6120,12 @@ test("WorkShellEngine turns /review into a focused review prompt", async () => {
       },
     },
     resolveWorkShellSlashCommand(input) {
-      return input === "/review auth flow" ? ["prompt", "review", "auth", "flow"] : undefined;
+      return input === "/review run auth flow" ? ["prompt", "review", "auth", "flow"] : undefined;
     },
   });
 
   await engine.initialize();
-  await engine.handleSubmit("/review auth flow");
+  await engine.handleSubmit("/review run auth flow");
 
   assert.equal(prompts.length, 1);
   assert.match(prompts[0] ?? "", /Review the current repository changes and implementation/);
@@ -5950,7 +6359,7 @@ test("WorkShellEngine keeps a lightweight busy status even outside verbose trace
   assert.match(engine.getState().busyStatus ?? "", /read/i);
   assert.deepEqual(
     engine.getState().entries,
-    [{ role: "tool", text: "read\n5ms" }],
+    [{ id: "entry-0", role: "tool", text: "read\n5ms" }],
     "a completed read appends the assembled tool detail entry even in minimal trace mode",
   );
   assert.deepEqual(engine.getState().traceLines, []);
@@ -6106,6 +6515,426 @@ test("WorkShellEngine soft-interrupts a busy turn and ignores late assistant out
   );
   assert.deepEqual(bridgeWrites, []);
   assert.deepEqual(memoryWrites, []);
+});
+
+test("WorkShellEngine shutdown aborts the active turn and fails visibly when its provider will not settle", async () => {
+  let releaseTurn;
+  let turnSignal;
+  const { engine } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(_prompt, _attachments, options) {
+        turnSignal = options?.signal;
+        await new Promise(resolve => { releaseTurn = resolve; });
+        return { text: "late shutdown result" };
+      },
+    },
+  });
+
+  await engine.initialize();
+  const turn = engine.handleSubmit("hold provider open");
+  while (!turnSignal) await new Promise(resolve => setImmediate(resolve));
+  try {
+    await assert.rejects(
+      engine.shutdown({ timeoutMs: 25 }),
+      /did not settle/i,
+    );
+    assert.equal(turnSignal.aborted, true);
+  } finally {
+    releaseTurn?.();
+    await turn;
+    engine.dispose();
+  }
+});
+
+test("WorkShellEngine shutdown waits for a queue drain and fences the next post-ack follow-up", {
+  skip: process.platform === "win32",
+}, async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-shutdown-drain-fence-"));
+  const sessionId = "shutdown-drain-fence";
+  let releaseFirst;
+  let releaseCleanup;
+  let markCleanupReached;
+  const cleanupReached = new Promise((resolve) => { markCleanupReached = resolve; });
+  const cleanupRelease = new Promise((resolve) => { releaseCleanup = resolve; });
+  const prompts = [];
+  const options = {
+    provider: "openai",
+    model: "gpt-5.4",
+    mode: "default",
+    authLabel: "api-key-env",
+    reasoning: supportedReasoning,
+    cwd,
+    contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+  };
+  const { engine } = createEngine({
+    sessionId,
+    options,
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(prompt) {
+        const userPrompt = stripWorkShellLanguageInstruction(prompt);
+        prompts.push(userPrompt);
+        if (userPrompt === "first") {
+          await new Promise((resolve) => { releaseFirst = resolve; });
+        }
+        return { text: `reply:${userPrompt}` };
+      },
+    },
+  });
+  let restarted;
+  try {
+    await engine.initialize();
+    let cleanupCalls = 0;
+    engine.sweepQueuedAttachmentCleanup = async () => {
+      cleanupCalls += 1;
+      if (cleanupCalls === 1) {
+        markCleanupReached();
+        await cleanupRelease;
+      }
+    };
+
+    const firstTurn = engine.handleSubmit("first");
+    while (typeof releaseFirst !== "function") {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await engine.handleSubmit("second");
+    await engine.handleSubmit("third");
+    releaseFirst();
+    await cleanupReached;
+
+    let shutdownSettled = false;
+    const shutdown = engine.shutdown({ timeoutMs: 20_000 }).then((result) => {
+      shutdownSettled = true;
+      return result;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(shutdownSettled, false, "shutdown must own the in-progress queue drain");
+    assert.deepEqual(prompts, ["first", "second"]);
+
+    releaseCleanup();
+    assert.equal(await shutdown, true);
+    await firstTurn;
+    assert.deepEqual(prompts, ["first", "second"], "third must not dispatch after the shutdown fence");
+    await engine.handleSubmit("after-shutdown");
+    assert.deepEqual(prompts, ["first", "second"], "disposed engines must reject new provider turns");
+    assert.deepEqual(
+      JSON.parse(runRustCommandSync(["rust", "queue", "list", sessionId], cwd))
+        .map((item) => [item.line, item.status]),
+      [["third", "pending"]],
+      "the undispatched follow-up remains recoverable exactly once",
+    );
+
+    const resumedPrompts = [];
+    ({ engine: restarted } = createEngine({
+      sessionId,
+      options,
+      agent: {
+        clear() {},
+        updateRuntimeSettings() {},
+        setTraceListener() {},
+        async runTurn(prompt) {
+          const userPrompt = stripWorkShellLanguageInstruction(prompt);
+          resumedPrompts.push(userPrompt);
+          return { text: `reply:${userPrompt}` };
+        },
+      },
+    }));
+    await restarted.initialize();
+    await restarted.handleSubmit("resume");
+    assert.deepEqual(resumedPrompts, ["resume", "third"]);
+    assert.deepEqual(JSON.parse(runRustCommandSync(["rust", "queue", "list", sessionId], cwd)), []);
+    await restarted.shutdown();
+  } finally {
+    releaseFirst?.();
+    releaseCleanup?.();
+    await engine.dispose().catch(() => undefined);
+    await restarted?.dispose().catch(() => undefined);
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("WorkShellEngine shutdown returns a claimed follow-up before provider dispatch", {
+  skip: process.platform === "win32",
+}, async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-shutdown-claim-fence-"));
+  const sessionId = "shutdown-claim-fence";
+  let releaseFirst;
+  let releaseClaim;
+  let markClaimReached;
+  const claimReached = new Promise((resolve) => { markClaimReached = resolve; });
+  const claimRelease = new Promise((resolve) => { releaseClaim = resolve; });
+  const prompts = [];
+  const options = {
+    provider: "openai",
+    model: "gpt-5.4",
+    mode: "default",
+    authLabel: "api-key-env",
+    reasoning: supportedReasoning,
+    cwd,
+    contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+  };
+  const { engine } = createEngine({
+    sessionId,
+    options,
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(prompt) {
+        const userPrompt = stripWorkShellLanguageInstruction(prompt);
+        prompts.push(userPrompt);
+        if (userPrompt === "first") {
+          await new Promise((resolve) => { releaseFirst = resolve; });
+        }
+        return { text: `reply:${userPrompt}` };
+      },
+    },
+  });
+  let restarted;
+  try {
+    await engine.initialize();
+    const claimQueuedSubmit = engine.claimQueuedSubmit.bind(engine);
+    engine.claimQueuedSubmit = async () => {
+      const item = await claimQueuedSubmit();
+      markClaimReached();
+      await claimRelease;
+      return item;
+    };
+
+    const firstTurn = engine.handleSubmit("first");
+    while (typeof releaseFirst !== "function") {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await engine.handleSubmit("second");
+    releaseFirst();
+    await claimReached;
+
+    let shutdownSettled = false;
+    const shutdown = engine.shutdown({ timeoutMs: 20_000 }).then((result) => {
+      shutdownSettled = true;
+      return result;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(shutdownSettled, false);
+    releaseClaim();
+    assert.equal(await shutdown, true);
+    await firstTurn;
+    assert.deepEqual(prompts, ["first"], "a claimed item must not reach the provider after shutdown");
+    assert.deepEqual(
+      JSON.parse(runRustCommandSync(["rust", "queue", "list", sessionId], cwd))
+        .map((item) => [item.line, item.status]),
+      [["second", "pending"]],
+      "the claim is nacked to one retryable pending item",
+    );
+
+    const resumedPrompts = [];
+    ({ engine: restarted } = createEngine({
+      sessionId,
+      options,
+      agent: {
+        clear() {},
+        updateRuntimeSettings() {},
+        setTraceListener() {},
+        async runTurn(prompt) {
+          const userPrompt = stripWorkShellLanguageInstruction(prompt);
+          resumedPrompts.push(userPrompt);
+          return { text: `reply:${userPrompt}` };
+        },
+      },
+    }));
+    await restarted.initialize();
+    await restarted.handleSubmit("resume");
+    assert.deepEqual(resumedPrompts, ["resume", "second"]);
+    assert.deepEqual(JSON.parse(runRustCommandSync(["rust", "queue", "list", sessionId], cwd)), []);
+    await restarted.shutdown();
+  } finally {
+    releaseFirst?.();
+    releaseClaim?.();
+    await engine.dispose().catch(() => undefined);
+    await restarted?.dispose().catch(() => undefined);
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("WorkShellEngine shutdown reports a failed claimed-follow-up recovery", {
+  skip: process.platform === "win32",
+}, async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-shutdown-claim-recovery-failure-"));
+  const sessionId = "shutdown-claim-recovery-failure";
+  let releaseFirst;
+  let releaseClaim;
+  let markClaimReached;
+  const claimReached = new Promise((resolve) => { markClaimReached = resolve; });
+  const claimRelease = new Promise((resolve) => { releaseClaim = resolve; });
+  const { engine } = createEngine({
+    sessionId,
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd,
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+    },
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(prompt) {
+        if (stripWorkShellLanguageInstruction(prompt) === "first") {
+          await new Promise((resolve) => { releaseFirst = resolve; });
+        }
+        return { text: "reply" };
+      },
+    },
+  });
+  const originalNackQueuedSubmit = engine.nackQueuedSubmit.bind(engine);
+  try {
+    await engine.initialize();
+    const claimQueuedSubmit = engine.claimQueuedSubmit.bind(engine);
+    engine.claimQueuedSubmit = async () => {
+      const item = await claimQueuedSubmit();
+      markClaimReached();
+      await claimRelease;
+      return item;
+    };
+    engine.nackQueuedSubmit = async () => undefined;
+
+    const firstTurn = engine.handleSubmit("first");
+    const observedFirstTurn = firstTurn.catch((error) => error);
+    while (typeof releaseFirst !== "function") {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await engine.handleSubmit("second");
+    releaseFirst();
+    await claimReached;
+
+    const shutdown = engine.shutdown({ timeoutMs: 20_000 });
+    releaseClaim();
+    await assert.rejects(
+      shutdown,
+      /lost in-flight follow-up.*shutdown recovery/iu,
+      "shutdown must surface a durable claim-recovery failure",
+    );
+    assert.match(String(await observedFirstTurn), /lost in-flight follow-up.*shutdown recovery/iu);
+  } finally {
+    releaseFirst?.();
+    releaseClaim?.();
+    engine.nackQueuedSubmit = originalNackQueuedSubmit;
+    await originalNackQueuedSubmit(1).catch(() => undefined);
+    await engine.dispose().catch(() => undefined);
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("an admitted remote turn cancelled before busy state never reaches the provider", async () => {
+  let providerCalls = 0;
+  const { engine } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn() { providerCalls += 1; return { text: "must not run" }; },
+    },
+  });
+  await engine.initialize();
+
+  engine.admitRuntimeTurn();
+  assert.equal(engine.getState().isBusy, false);
+  assert.equal(engine.interruptTurn(), true);
+  await engine.handleSubmit("accepted before projected busy");
+
+  assert.equal(providerCalls, 0);
+  assert.equal(engine.getState().isBusy, false);
+  assert.match(engine.getState().entries.at(-1)?.text ?? "", /cancelled before it started/i);
+  assert.equal(engine.interruptTurn(), false, "an idle cancel must not report success");
+});
+
+test("owner shutdown waits for a SIGTERM-ignoring provider process group to be SIGKILLed", {
+  skip: process.platform === "win32" ? "process-group settlement is POSIX-only" : false,
+}, async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "unclecode-owner-child-shutdown-"));
+  const entryPath = path.join(workspace, "stubborn-provider.mjs");
+  const pidPath = path.join(workspace, "provider.pid");
+  const termPath = path.join(workspace, "provider.term");
+  const readyPath = path.join(workspace, "provider.ready");
+  let childPid;
+  writeFileSync(entryPath, [
+    'import { writeFileSync } from "node:fs";',
+    `writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));`,
+    `process.on("SIGTERM", () => writeFileSync(${JSON.stringify(termPath)}, "SIGTERM"));`,
+    `writeFileSync(${JSON.stringify(readyPath)}, "ready");`,
+    "process.stdin.resume();",
+    "setInterval(() => {}, 1_000);",
+    "",
+  ].join("\n"), "utf8");
+
+  const provider = createOmpWorkerProvider({
+    cwd: workspace,
+    reasoning: supportedReasoning,
+    env: {},
+    runWorker: createOmpWorkerRunner({
+      env: {},
+      bunPath: process.execPath,
+      workerEntryPath: entryPath,
+      forceKillDelayMs: 500,
+    }),
+  });
+  const { engine } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      runTurn(prompt, attachments, options) {
+        return provider.runTurn(prompt, attachments, options);
+      },
+    },
+    options: {
+      provider: "omp",
+      model: "kimi-code/k3",
+      mode: "default",
+      authLabel: "omp-managed",
+      reasoning: supportedReasoning,
+      cwd: workspace,
+      contextSummaryLines: [],
+    },
+  });
+  const registry = new LiveRuntimeEngineRegistry();
+
+  try {
+    await engine.initialize();
+    registry.attach("child-shutdown", engine, { projectPath: workspace });
+    const turn = engine.handleSubmit("hold provider child open");
+    const deadline = Date.now() + 5_000;
+    while (!existsSync(readyPath) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(existsSync(readyPath), true, "the production provider child must install its signal handler");
+    childPid = Number(readFileSync(pidPath, "utf8"));
+
+    await registry.disposeAll();
+    await turn;
+
+    assert.equal(readFileSync(termPath, "utf8"), "SIGTERM");
+    assert.throws(
+      () => process.kill(childPid, 0),
+      (error) => error?.code === "ESRCH",
+      "owner shutdown cannot return while the provider process group is alive",
+    );
+  } finally {
+    if (Number.isInteger(childPid)) {
+      try { process.kill(-childPid, "SIGKILL"); } catch {}
+    }
+    try { await registry.disposeAll(); } catch {}
+    engine.dispose();
+    rmSync(workspace, { recursive: true, force: true });
+  }
 });
 
 test("WorkShellEngine retracts a bridge when interruption lands during publication", async () => {
@@ -6269,18 +7098,19 @@ test("WorkShellEngine resumes interrupted queued follow-ups after the next chat 
       updateRuntimeSettings() {},
       setTraceListener() {},
       async runTurn(prompt) {
-        prompts.push(prompt);
-        if (prompt === "first") {
+        const userPrompt = stripWorkShellLanguageInstruction(prompt);
+        prompts.push(userPrompt);
+        if (userPrompt === "first") {
           await new Promise((resolve) => {
             releaseFirst = resolve;
           });
         }
-        if (prompt === "third") {
+        if (userPrompt === "third") {
           await new Promise((resolve) => {
             releaseThird = resolve;
           });
         }
-        return { text: `reply:${prompt}` };
+        return { text: `reply:${userPrompt}` };
       },
     },
   });
@@ -6295,6 +7125,11 @@ test("WorkShellEngine resumes interrupted queued follow-ups after the next chat 
   engine.interruptTurn();
   assert.equal(engine.getState().queuePaused, true);
   const thirdTurn = engine.handleSubmit("third");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(prompts, ["first"]);
+
+  releaseFirst();
+  await firstTurn;
   while (typeof releaseThird !== "function") {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
@@ -6304,11 +7139,6 @@ test("WorkShellEngine resumes interrupted queued follow-ups after the next chat 
 
   assert.deepEqual(prompts, ["first", "third", "second"]);
   assert.equal(engine.getState().queuePaused, false);
-
-  releaseFirst();
-  await firstTurn;
-
-  assert.deepEqual(prompts, ["first", "third", "second"]);
 });
 
 test("WorkShellEngine queues follow-up chat while a turn is busy", async () => {
@@ -6320,13 +7150,14 @@ test("WorkShellEngine queues follow-up chat while a turn is busy", async () => {
       updateRuntimeSettings() {},
       setTraceListener() {},
       async runTurn(prompt) {
-        prompts.push(prompt);
-        if (prompt === "first") {
+        const userPrompt = stripWorkShellLanguageInstruction(prompt);
+        prompts.push(userPrompt);
+        if (userPrompt === "first") {
           await new Promise((resolve) => {
             releaseFirst = resolve;
           });
         }
-        return { text: `reply:${prompt}` };
+        return { text: `reply:${userPrompt}` };
       },
     },
   });
@@ -6337,23 +7168,145 @@ test("WorkShellEngine queues follow-up chat while a turn is busy", async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
 
-  await engine.handleSubmit("second");
-  assert.ok(engine.getState().entries.some((entry) => /Queued follow-up #1/.test(entry.text)));
-  assert.ok(engine.getState().entries.some((entry) => /run automatically/.test(entry.text)));
-  assert.ok(engine.getState().entries.some((entry) => /\/queue shows backlog/.test(entry.text)));
+  await engine.handleSubmit("second", [{ id: "queued-attachment" }]);
+  assert.equal(engine.getState().entries.some((entry) => /Queued follow-up #1/.test(entry.text)), false);
   await engine.handleSubmit("/queue");
-  assert.equal(engine.getState().panel?.title, "Work board");
-  assert.ok(engine.getState().panel?.lines.some((line) => line === "Board"));
-  assert.ok(engine.getState().panel?.lines.some((line) => /Queued · 1/.test(line)));
-  assert.ok(engine.getState().panel?.lines.some((line) => /#1 second/.test(line)));
-  assert.ok(engine.getState().panel?.lines.some((line) => /Enter queues follow-up/.test(line)));
-  assert.ok(engine.getState().panel?.lines.some((line) => /\/queue clear drops queued follow-ups/.test(line)));
+  assert.equal(engine.getState().panel?.title, "Queue · follow-ups");
+  assert.ok(
+    engine
+      .getState()
+      .panel?.lines.some((line) =>
+        /Running · 1 total · 1 pending · 0 in flight · 0 requires action/.test(line),
+      ),
+  );
+  assert.ok(engine.getState().panel?.lines.some((line) => /Next · id 1 · pending(?: · wait \d+s)? · second · 1 attachment/.test(line)));
+  assert.ok(engine.getState().panel?.lines.some((line) => /Enter queues one follow-up exactly once/.test(line)));
+  assert.ok(engine.getState().panel?.lines.some((line) => /\/queue clear · \/queue resume/.test(line)));
 
   releaseFirst();
   await firstTurn;
 
   assert.deepEqual(prompts, ["first", "second"]);
-  assert.ok(engine.getState().entries.some((entry) => /Running queued follow-up #1: second/.test(entry.text)));
+  assert.equal(engine.getState().entries.some((entry) => /Running queued follow-up/.test(entry.text)), false);
+});
+
+test("WorkShellEngine never nacks completed work when post-ack attachment cleanup must retry", {
+  skip: process.platform === "win32",
+}, async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-work-shell-cleanup-retry-"));
+  const sessionId = "queue-cleanup-retry";
+  const outside = path.join(cwd, "outside.json");
+  let releaseFirst;
+  let artifactPath;
+  const prompts = [];
+  writeFileSync(outside, "{}\n", "utf8");
+  try {
+    const options = {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd,
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+    };
+    const { engine } = createEngine({
+      sessionId,
+      options,
+      agent: {
+        clear() {},
+        updateRuntimeSettings() {},
+        setTraceListener() {},
+        async runTurn(prompt) {
+          const userPrompt = stripWorkShellLanguageInstruction(prompt);
+          prompts.push(userPrompt);
+          if (userPrompt === "first") {
+            await new Promise((resolve) => { releaseFirst = resolve; });
+          } else if (userPrompt === "second") {
+            const directory = path.join(
+              cwd,
+              ".unclecode",
+              "artifacts",
+              sessionId,
+              "queue-attachments",
+            );
+            artifactPath = path.join(directory, readdirSync(directory)[0]);
+            unlinkSync(artifactPath);
+            symlinkSync(outside, artifactPath);
+          }
+          return { text: `reply:${userPrompt}` };
+        },
+      },
+    });
+
+    await engine.initialize();
+    const firstTurn = engine.handleSubmit("first");
+    while (typeof releaseFirst !== "function") {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    await engine.handleSubmit("second", [{ id: "queued-attachment" }]);
+    releaseFirst();
+    await firstTurn;
+
+    assert.deepEqual(prompts, ["first", "second"]);
+    assert.deepEqual(JSON.parse(runRustCommandSync(
+      ["rust", "queue", "list", sessionId], cwd,
+    )), [], "the acknowledged ID stays removed when deletion fails");
+    assert.equal(JSON.parse(runRustCommandSync(
+      ["rust", "queue", "cleanup-list-json", sessionId, "64"], cwd,
+    )).length, 1, "the orphan remains durably tracked for retry");
+    assert.equal(
+      engine.getState().entries.some((entry) => /symbolic-link|symlink/i.test(entry.text)),
+      false,
+      "post-ack cleanup does not turn a completed provider turn into a queue failure",
+    );
+
+    unlinkSync(artifactPath);
+    const { engine: restarted } = createEngine({ sessionId, options });
+    await restarted.initialize();
+    assert.deepEqual(JSON.parse(runRustCommandSync(
+      ["rust", "queue", "cleanup-list-json", sessionId, "64"], cwd,
+    )), [], "startup retries and completes the bounded cleanup batch");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("WorkShellEngine keeps a queued follow-up stable while paused and drains it once after resume", async () => {
+  let releaseFirst;
+  const prompts = [];
+  const { engine } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(prompt) {
+        const userPrompt = stripWorkShellLanguageInstruction(prompt);
+        prompts.push(userPrompt);
+        if (userPrompt === "first") {
+          await new Promise((resolve) => { releaseFirst = resolve; });
+        }
+        return { text: `reply:${userPrompt}` };
+      },
+    },
+  });
+  await engine.initialize();
+  const firstTurn = engine.handleSubmit("first");
+  while (!releaseFirst) await new Promise((resolve) => setImmediate(resolve));
+  await engine.handleSubmit("second");
+  assert.equal(engine.getState().queuedCount, 1);
+
+  const pause = engine.requestTurnPause();
+  releaseFirst();
+  const receipt = await pause;
+  assert.equal(receipt.boundary, "after_provider");
+  assert.deepEqual(prompts, ["first"]);
+  assert.equal(engine.getState().queuedCount, 1);
+
+  assert.equal(engine.resumeTurn(), true);
+  await firstTurn;
+  assert.deepEqual(prompts, ["first", "second"]);
+  assert.equal(engine.getState().queuedCount, 0);
 });
 
 function createBusyEngine() {
@@ -6365,13 +7318,14 @@ function createBusyEngine() {
       updateRuntimeSettings() {},
       setTraceListener() {},
       async runTurn(prompt) {
-        prompts.push(prompt);
-        if (prompt === "first") {
+        const userPrompt = stripWorkShellLanguageInstruction(prompt);
+        prompts.push(userPrompt);
+        if (userPrompt === "first") {
           await new Promise((resolve) => {
             releaseTurn = resolve;
           });
         }
-        return { text: `reply:${prompt}` };
+        return { text: `reply:${userPrompt}` };
       },
     },
   });
@@ -6379,7 +7333,7 @@ function createBusyEngine() {
 }
 
 test("WorkShellEngine opens the agent console during a busy turn without queueing it", async () => {
-  for (const [line, tab] of [["/agents", "agents"], ["/jobs", "jobs"], ["/todo", "plan"]]) {
+  for (const [line, tab] of [["/agents", "agents"], ["/jobs", "jobs"], ["/todo", "plan"], ["/review", "quality"]]) {
     const { engine, prompts, release } = createBusyEngine();
 
     await engine.initialize();
@@ -6435,7 +7389,7 @@ test("WorkShellEngine still refuses unrelated slash commands during a busy turn"
 });
 
 test("WorkShellEngine opens the agent console while a busy turn waits on a decision", async () => {
-  for (const [line, tab] of [["/agents", "agents"], ["/jobs", "jobs"], ["/todo", "plan"]]) {
+  for (const [line, tab] of [["/agents", "agents"], ["/jobs", "jobs"], ["/todo", "plan"], ["/review", "quality"]]) {
     const interactionBridge = createWorkShellInteractionBridge();
     const prompts = [];
     let releaseTurn;
@@ -6457,7 +7411,8 @@ test("WorkShellEngine opens the agent console while a busy turn waits on a decis
         updateRuntimeSettings() {},
         setTraceListener() {},
         async runTurn(prompt) {
-          prompts.push(prompt);
+          const userPrompt = stripWorkShellLanguageInstruction(prompt);
+          prompts.push(userPrompt);
           // The turn stays in flight while it waits on the operator, so the
           // shell is genuinely busy with a decision open — the exact state the
           // console has to stay reachable in.
@@ -6477,7 +7432,7 @@ test("WorkShellEngine opens the agent console while a busy turn waits on a decis
           await new Promise((resolve) => {
             releaseTurn = resolve;
           });
-          return { text: `reply:${prompt}` };
+          return { text: `reply:${userPrompt}` };
         },
       },
     });
@@ -6500,7 +7455,7 @@ test("WorkShellEngine opens the agent console while a busy turn waits on a decis
     };
     const entriesBefore = engine.getState().entries.map((entry) => entry.text);
 
-    await engine.handleSubmit(line);
+    assert.equal(await engine.submitPendingDecisionText(line, "decision-1"), true);
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     assert.deepEqual(classified, [line], `${line} must consult the Rust classifier once`);
@@ -6516,7 +7471,7 @@ test("WorkShellEngine opens the agent console while a busy turn waits on a decis
     assert.equal(engine.getState().queuedCount, 0, `${line} must not queue`);
     assert.deepEqual(engine.getState().entries.map((entry) => entry.text), entriesBefore);
 
-    await engine.handleSubmit("2");
+    assert.equal(await engine.submitPendingDecisionText("2", "decision-1"), true);
     assert.deepEqual(await decision, {
       status: "answered",
       answers: [{ id: "strategy", selectedOptions: ["Fast"] }],
@@ -6634,7 +7589,7 @@ test("WorkShellEngine binds queued follow-up chat to a fresh context packet", as
   }
 
   await engine.handleSubmit("second");
-  assert.ok(engine.getState().entries.some((entry) => /Queued follow-up #1/.test(entry.text)));
+  assert.equal(engine.getState().entries.some((entry) => /Queued follow-up #1/.test(entry.text)), false);
 
   releaseFirst();
   await firstTurn;
@@ -6645,7 +7600,7 @@ test("WorkShellEngine binds queued follow-up chat to a fresh context packet", as
   assert.match(prompts[0] ?? "", /User request:\nfirst$/);
   assert.match(prompts[1] ?? "", /<unclecode_context_packet id="packet-2" version="1">/);
   assert.match(prompts[1] ?? "", /User request:\nsecond$/);
-  assert.ok(engine.getState().entries.some((entry) => /Running queued follow-up #1: second/.test(entry.text)));
+  assert.equal(engine.getState().entries.some((entry) => /Running queued follow-up/.test(entry.text)), false);
 });
 
 test("WorkShellEngine clears queued follow-ups while busy", async () => {
@@ -6657,13 +7612,14 @@ test("WorkShellEngine clears queued follow-ups while busy", async () => {
       updateRuntimeSettings() {},
       setTraceListener() {},
       async runTurn(prompt) {
-        prompts.push(prompt);
-        if (prompt === "first") {
+        const userPrompt = stripWorkShellLanguageInstruction(prompt);
+        prompts.push(userPrompt);
+        if (userPrompt === "first") {
           await new Promise((resolve) => {
             releaseFirst = resolve;
           });
         }
-        return { text: `reply:${prompt}` };
+        return { text: `reply:${userPrompt}` };
       },
     },
   });
@@ -6684,9 +7640,15 @@ test("WorkShellEngine clears queued follow-ups while busy", async () => {
     engine.getState().entries.filter((entry) => /Queue shown/.test(entry.text)).length,
     0,
   );
-  assert.equal(engine.getState().panel?.title, "Work board");
-  assert.ok(engine.getState().panel?.lines.some((line) => /Queued · 0/.test(line)));
-  assert.ok(engine.getState().panel?.lines.some((line) => /Running · 1/.test(line)));
+  assert.equal(engine.getState().panel?.title, "Queue · follow-ups");
+  assert.ok(
+    engine
+      .getState()
+      .panel?.lines.some((line) =>
+        /Running · 0 total · 0 pending · 0 in flight · 0 requires action/.test(line),
+      ),
+  );
+  assert.ok(engine.getState().panel?.lines.some((line) => /Queue empty/.test(line)));
 
   releaseFirst();
   await firstTurn;
@@ -6694,31 +7656,140 @@ test("WorkShellEngine clears queued follow-ups while busy", async () => {
   assert.deepEqual(prompts, ["first"]);
 });
 
-test("WorkShellEngine queue panel respects terminal width for board layout", async () => {
+test("WorkShellEngine clear during a claimed follow-up cannot replace or duplicate the executing id", async () => {
+  let releaseFirst;
+  let releaseSecond;
+  const prompts = [];
+  const { engine } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(prompt) {
+        const userPrompt = stripWorkShellLanguageInstruction(prompt);
+        prompts.push(userPrompt);
+        if (userPrompt === "first") {
+          await new Promise((resolve) => { releaseFirst = resolve; });
+        }
+        if (userPrompt === "second") {
+          await new Promise((resolve) => { releaseSecond = resolve; });
+        }
+        return { text: `reply:${userPrompt}` };
+      },
+    },
+  });
+
+  await engine.initialize();
+  const drain = engine.handleSubmit("first");
+  while (typeof releaseFirst !== "function") {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  await engine.handleSubmit("second");
+  await engine.handleSubmit("third");
+  releaseFirst();
+  while (typeof releaseSecond !== "function") {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  await engine.handleSubmit("/queue clear");
+  assert.equal(engine.getState().queuedCount, 0, "the count remains pending-only");
+  assert.ok(
+    engine.getState().panel?.lines.some((line) =>
+      /Running · 1 total · 0 pending · 1 in flight · 0 requires action/.test(line),
+    ),
+    "clear must render the surviving claimed item from the full snapshot",
+  );
+  assert.ok(engine.getState().panel?.lines.some((line) => /id 1 · in flight/.test(line)));
+  releaseSecond();
+  await drain;
+
+  assert.deepEqual(prompts, ["first", "second"]);
+  assert.equal(engine.getState().queuedCount, 0);
+  assert.equal(engine.getState().entries.some((entry) => /Running queued follow-up/.test(entry.text)), false);
+});
+
+test("WorkShellEngine startup quarantines a persisted claim until explicit retry", async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-work-shell-queue-restart-"));
+  const sessionId = "queue-restart-session";
+  const turns = [];
+  try {
+    const pushed = JSON.parse(runRustCommandSync(
+      ["rust", "queue", "push-json", sessionId, "stale claimed follow-up"], cwd,
+    ));
+    assert.equal(JSON.parse(runRustCommandSync(
+      ["rust", "queue", "claim-json", sessionId], cwd,
+    )).id, pushed.id);
+
+    const { engine } = createEngine({
+      sessionId,
+      options: {
+        provider: "openai",
+        model: "gpt-5.4",
+        mode: "default",
+        authLabel: "api-key-env",
+        reasoning: supportedReasoning,
+        cwd,
+        contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      },
+      agent: {
+        clear() {},
+        updateRuntimeSettings() {},
+        setTraceListener() {},
+        async runTurn(prompt) {
+          turns.push(stripWorkShellLanguageInstruction(prompt));
+          return { text: "done" };
+        },
+      },
+    });
+
+    await engine.initialize();
+    assert.deepEqual(turns, [], "startup recovery must never execute a stale claim");
+    assert.equal(engine.getState().queuedCount, 0, "requires-action is not a pending count");
+    assert.equal(engine.getState().queuePaused, true);
+    assert.ok(engine.getState().entries.some((entry) => /requires action.*retry or discard/i.test(entry.text)));
+
+    await engine.handleSubmit("/queue");
+    const panelText = engine.getState().panel.lines.join("\n");
+    assert.match(panelText, /1 total · 0 pending · 0 in flight · 1 requires action/);
+    assert.match(panelText, new RegExp(`id ${pushed.id} · requires action`));
+    assert.match(panelText, /UncleCode restarted before this…/);
+
+    assert.equal(await engine.retryQueueItem(pushed.id), true);
+    assert.equal(engine.getState().queuedCount, 1);
+    assert.deepEqual(turns, [], "retry only makes the stable id pending");
+    await engine.resumeQueueItems();
+    assert.deepEqual(turns, ["stale claimed follow-up"]);
+    assert.equal(engine.getState().queuedCount, 0);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("WorkShellEngine queue panel keeps follow-up separation across terminal widths", async () => {
   const { engine } = createEngine();
 
   await engine.initialize();
   engine.updateTerminalColumns(80);
   await engine.handleSubmit("/queue");
   const narrowLines = engine.getState().panel?.lines ?? [];
-  assert.equal(engine.getState().panel?.title, "Work board");
+  assert.equal(engine.getState().panel?.title, "Queue · follow-ups");
   assert.ok(
-    !narrowLines.some((line) => /Queued ·/.test(line) && /Done ·/.test(line)),
-    "80-column layout should use 2×2 rows instead of a single four-column header",
+    narrowLines.some((line) => /Queue = user follow-ups/.test(line) && /Plan\/PDCA/.test(line)),
+    "80-column layout should explain that Queue and Plan/PDCA are different models",
   );
 
   engine.updateTerminalColumns(120);
   let wideLines = engine.getState().panel?.lines ?? [];
   for (let attempt = 0; attempt < 50; attempt += 1) {
     wideLines = engine.getState().panel?.lines ?? [];
-    if (wideLines.some((line) => /Queued ·/.test(line) && /Done ·/.test(line))) {
+    if (wideLines.some((line) => /Queue = user follow-ups/.test(line))) {
       break;
     }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert.ok(
-    wideLines.some((line) => /Queued ·/.test(line) && /Done ·/.test(line)),
-    "wide layout should rebuild on resize without re-running /queue",
+    wideLines.some((line) => /Queue = user follow-ups/.test(line) && /Agents|agents/.test(line)),
+    "wide layout should preserve Queue/Plan/Agents separation without re-running /queue",
   );
 });
 
@@ -6830,6 +7901,319 @@ test("WorkShellEngine can restore a persisted trace mode for a resumed work sess
   await engine.initialize();
 
   assert.equal(engine.getState().traceMode, "verbose");
+});
+
+test("WorkShellEngine Ctrl+O path reprojects retained tool history through the one persisted trace mode", async () => {
+  const retained = [
+    { id: "tool-running", role: "tool", text: "bash npm test\nrunning" },
+    { id: "tool-done", role: "tool", text: "bash npm test\n12 lines · 34ms\npassed" },
+    { id: "tool-error", role: "tool", text: "read missing.txt\nENOENT · 2ms\nmissing" },
+    { id: "approval", role: "tool", text: "Security approval · write_file\nAllowed once" },
+  ];
+  const { engine, calls } = createEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      initialTraceMode: "minimal",
+      initialEntries: retained,
+    },
+  });
+  await engine.initialize();
+  const before = engine.getState().entries;
+
+  await engine.toggleToolHistoryDisplay();
+  assert.equal(engine.getState().traceMode, "verbose");
+  assert.deepEqual(engine.getState().entries, before);
+  assert.equal(calls.snapshots.at(-1)?.traceMode, "verbose");
+
+  await engine.toggleToolHistoryDisplay();
+  assert.equal(engine.getState().traceMode, "minimal");
+  assert.deepEqual(engine.getState().entries, before);
+  assert.equal(calls.snapshots.at(-1)?.traceMode, "minimal");
+});
+
+test("WorkShellEngine honors an explicitly configured locale lock across turns", async () => {
+  const { engine, calls } = createEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      initialUiLocale: "ko",
+    },
+  });
+  await engine.initialize();
+
+  await engine.handleSubmit("이 파일을 설명해 주세요");
+  assert.equal(engine.getState().uiLocale, "ko");
+  assert.match(calls.turns[0], /^이번 요청에는 한국어로 답변하세요/u);
+  assert.doesNotMatch(calls.turns[0], /Respond in English/u);
+  assert.equal(calls.snapshots.at(-1)?.uiLocale, "ko");
+
+  await engine.handleSubmit("Explain the next file in English");
+  assert.equal(engine.getState().uiLocale, "ko");
+  assert.match(calls.turns[1], /^이번 요청에는 한국어로 답변하세요/u);
+  assert.doesNotMatch(calls.turns[1], /Respond in English/u);
+  assert.equal(calls.snapshots.at(-1)?.uiLocale, "ko");
+});
+
+test("WorkShellEngine switches unlocked chrome and provider locale together per user turn", async () => {
+  const previousLcAll = process.env.LC_ALL;
+  try {
+    for (const fixture of [
+      {
+        terminal: "en_US.UTF-8",
+        initial: "en",
+        first: "첫 요청을 처리해 주세요",
+        later: "Explain the next file",
+        firstLocale: "ko",
+        laterLocale: "en",
+        firstInstruction: /^이번 요청에는 한국어로 답변하세요/u,
+        laterInstruction: /^Respond in English for this turn/u,
+      },
+      {
+        terminal: "ko_KR.UTF-8",
+        initial: "ko",
+        first: "Handle the first request",
+        later: "다음 파일도 설명해 주세요",
+        firstLocale: "en",
+        laterLocale: "ko",
+        firstInstruction: /^Respond in English for this turn/u,
+        laterInstruction: /^이번 요청에는 한국어로 답변하세요/u,
+      },
+    ]) {
+      process.env.LC_ALL = fixture.terminal;
+      const { engine, calls } = createEngine({
+        options: {
+          provider: "openai",
+          model: "gpt-5.4",
+          mode: "default",
+          authLabel: "api-key-env",
+          reasoning: supportedReasoning,
+          cwd: "/repo",
+          contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+        },
+      });
+      await engine.initialize();
+      assert.equal(engine.getState().uiLocale, fixture.initial);
+      assert.equal(engine.getState().uiLocaleLocked, false);
+
+      await engine.handleSubmit(fixture.first);
+      assert.equal(engine.getState().uiLocale, fixture.firstLocale);
+      assert.equal(engine.getState().uiLocaleLocked, false);
+      assert.match(calls.turns[0], fixture.firstInstruction);
+      assert.equal(calls.snapshots.at(-1)?.uiLocale, fixture.firstLocale);
+
+      await engine.handleSubmit(fixture.later);
+      assert.equal(engine.getState().uiLocale, fixture.laterLocale);
+      assert.equal(engine.getState().uiLocaleLocked, false);
+      assert.match(calls.turns[1], fixture.laterInstruction);
+      assert.equal(calls.snapshots.at(-1)?.uiLocale, fixture.laterLocale);
+
+      await engine.handleSubmit("./fixtures/한국어.json");
+      assert.equal(engine.getState().uiLocale, fixture.laterLocale);
+      assert.match(
+        calls.turns[2],
+        fixture.laterLocale === "ko"
+          ? /^이번 요청에는 한국어로 답변하세요/u
+          : /^Respond in English for this turn/u,
+      );
+      assert.equal(stripWorkShellLanguageInstruction(calls.turns[2]), "./fixtures/한국어.json");
+    }
+  } finally {
+    if (previousLcAll === undefined) delete process.env.LC_ALL;
+    else process.env.LC_ALL = previousLcAll;
+  }
+});
+
+test("WorkShellEngine ignores local command prose until the first provider-bound request", async () => {
+  const previousLcAll = process.env.LC_ALL;
+  try {
+    for (const fixture of [
+      {
+        terminal: "en_US.UTF-8",
+        command: "/remember session keep this note",
+        first: "첫 요청을 처리해 주세요",
+        initial: "en",
+        expected: "ko",
+      },
+      {
+        terminal: "ko_KR.UTF-8",
+        command: "/remember session 이 메모를 보관해 주세요",
+        first: "Handle the first request",
+        initial: "ko",
+        expected: "en",
+      },
+    ]) {
+      process.env.LC_ALL = fixture.terminal;
+      const { engine, calls } = createEngine();
+      await engine.initialize();
+
+      await engine.handleSubmit(fixture.command);
+      assert.equal(engine.getState().uiLocale, fixture.initial);
+      assert.equal(engine.getState().uiLocaleLocked, false);
+      assert.deepEqual(calls.turns, []);
+
+      await engine.handleSubmit(fixture.first);
+      assert.equal(engine.getState().uiLocale, fixture.expected);
+      assert.equal(engine.getState().uiLocaleLocked, false);
+      assert.equal(calls.turns.length, 1);
+    }
+  } finally {
+    if (previousLcAll === undefined) delete process.env.LC_ALL;
+    else process.env.LC_ALL = previousLcAll;
+  }
+});
+
+test("WorkShellEngine switches unlocked chrome and provider locale from prompt-command focus", async () => {
+  const previousLcAll = process.env.LC_ALL;
+  try {
+    process.env.LC_ALL = "ko_KR.UTF-8";
+    const { engine, calls } = createEngine({
+      resolveWorkShellSlashCommand(input) {
+        return input.startsWith("/review") ? ["prompt", "review", ...input.split(/\s+/u).slice(1)] : undefined;
+      },
+    });
+    await engine.initialize();
+
+    await engine.handleSubmit("/review Handle the authentication flow");
+    assert.equal(engine.getState().uiLocale, "en");
+    assert.equal(engine.getState().uiLocaleLocked, false);
+    assert.match(calls.turns[0], /^Respond in English for this turn/u);
+    assert.equal(calls.snapshots.at(-1)?.uiLocale, "en");
+  } finally {
+    if (previousLcAll === undefined) delete process.env.LC_ALL;
+    else process.env.LC_ALL = previousLcAll;
+  }
+});
+
+test("WorkShellEngine updates persisted unlocked locale when a resumed turn changes language", async () => {
+  const { engine, calls } = createEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      initialUiLocale: "ko",
+      initialUiLocaleLocked: false,
+      initialEntries: [
+        { role: "user", text: "이전 요청을 처리해 주세요" },
+        { role: "assistant", text: "처리했습니다" },
+      ],
+    },
+  });
+  await engine.initialize();
+
+  assert.equal(engine.getState().uiLocale, "ko");
+  assert.equal(engine.getState().uiLocaleLocked, false);
+
+  await engine.handleSubmit("Explain the resumed work");
+  assert.equal(engine.getState().uiLocale, "en");
+  assert.match(calls.turns[0], /^Respond in English for this turn/u);
+  assert.equal(calls.snapshots.at(-1)?.uiLocale, "en");
+});
+
+test("WorkShellEngine advances unlocked chrome locale as queued turns begin", async () => {
+  let releaseFirst;
+  const prompts = [];
+  const { engine } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(prompt) {
+        prompts.push(prompt);
+        if (stripWorkShellLanguageInstruction(prompt) === "첫 요청을 처리해 주세요") {
+          await new Promise((resolve) => {
+            releaseFirst = resolve;
+          });
+        }
+        return { text: "done" };
+      },
+    },
+  });
+  await engine.initialize();
+
+  const firstTurn = engine.handleSubmit("첫 요청을 처리해 주세요");
+  while (!engine.getState().isBusy || typeof releaseFirst !== "function") {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.equal(engine.getState().uiLocale, "ko");
+
+  await engine.handleSubmit("Explain the queued follow-up");
+  assert.equal(engine.getState().uiLocale, "ko");
+  assert.equal(engine.getState().queuedCount, 1);
+
+  releaseFirst();
+  await firstTurn;
+
+  assert.match(prompts[0], /^이번 요청에는 한국어로 답변하세요/u);
+  assert.match(prompts[1], /^Respond in English for this turn/u);
+  assert.deepEqual(prompts.map(stripWorkShellLanguageInstruction), [
+    "첫 요청을 처리해 주세요",
+    "Explain the queued follow-up",
+  ]);
+  assert.equal(engine.getState().uiLocale, "en");
+});
+
+test("WorkShellEngine keeps bare review local and bare commit in the active unlocked UI language", async () => {
+  for (const fixture of [
+    {
+      locale: "ko",
+      instruction: /^이번 요청에는 한국어로 답변하세요/u,
+      opposite: /Respond in English for this turn/u,
+    },
+    {
+      locale: "en",
+      instruction: /^Respond in English for this turn/u,
+      opposite: /이번 요청에는 한국어로 답변하세요/u,
+    },
+  ]) {
+    const { engine, calls } = createEngine({
+      options: {
+        provider: "openai",
+        model: "gpt-5.4",
+        mode: "default",
+        authLabel: "api-key-env",
+        reasoning: supportedReasoning,
+        cwd: "/repo",
+        contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+        initialUiLocale: fixture.locale,
+        initialUiLocaleLocked: false,
+      },
+      resolveWorkShellSlashCommand(input) {
+        if (input === "/review") return ["prompt", "review"];
+        if (input === "/commit") return ["prompt", "commit"];
+        return undefined;
+      },
+    });
+    await engine.initialize();
+
+    await engine.handleSubmit("/review");
+    assert.equal(calls.turns.length, 0);
+    assert.equal(engine.getState().uiLocale, fixture.locale);
+    await engine.handleSubmit("/commit");
+
+    assert.equal(engine.getState().uiLocale, fixture.locale);
+    assert.equal(engine.getState().uiLocaleLocked, false);
+    assert.equal(calls.turns.length, 1);
+    for (const prompt of calls.turns) {
+      assert.match(prompt, fixture.instruction);
+      assert.doesNotMatch(prompt, fixture.opposite);
+    }
+    assert.equal(calls.snapshots.at(-1)?.uiLocale, fixture.locale);
+  }
 });
 
 test("WorkShellEngine keeps bridge bookkeeping and unproven memory out of the transcript", async () => {
@@ -7100,6 +8484,33 @@ test("WorkShellEngine delivers a trimmed steer as control input and leaves the s
   assert.equal(engine.getState().entries.some((entry) => entry.text.includes("narrow the diff")), false);
 });
 
+test("WorkShellEngine binds a steer draft to the run selected when composition begins", async () => {
+  const { engine, calls, control, emitTrace } = createAgentConsoleEngine();
+  await engine.initialize();
+
+  emitRunStarted(emitTrace, "run-a");
+  emitRunStarted(emitTrace, "run-b", { startedAt: 50 });
+  engine.openAgentConsole("agents");
+  engine.beginAgentSteer();
+  assert.deepEqual(engine.getState().agentSteerTarget, {
+    kind: "agent-steer",
+    agentRunId: "run-a",
+  });
+
+  // The selected run settles while the operator is still composing. Even if
+  // the cursor now points at run B, the stale draft must never retarget B.
+  emitRunSettled(emitTrace, "run-a", { summary: "A completed." });
+  engine.moveAgentConsoleCursor(1);
+  await engine.handleSubmit("do not retarget this");
+
+  assert.deepEqual(control.steer, []);
+  assert.deepEqual(calls.turns, []);
+  assert.equal(engine.getState().composerMode, "default");
+  assert.equal(engine.getState().agentSteerTarget, undefined);
+  assert.equal(engine.getState().agentConsoleView.receipt?.status, "rejected");
+  assert.match(engine.getState().agentConsoleView.receipt?.message ?? "", /run-a|finished/i);
+});
+
 test("WorkShellEngine cancels a selected run exactly once and only after confirmation", async () => {
   const { engine, control, emitTrace } = createAgentConsoleEngine();
   await engine.initialize();
@@ -7249,7 +8660,7 @@ test("WorkShellEngine keeps the console snapshot when a durable write fails and 
     false,
   );
 
-  engine.dispose();
+  await assert.rejects(engine.dispose(), /ENOSPC: no space left on device/u);
 });
 
 test("WorkShellEngine treats a cleared work turn as cancellation, not assistant output", async () => {
@@ -7264,7 +8675,7 @@ test("WorkShellEngine treats a cleared work turn as cancellation, not assistant 
       updateMode() {},
       setTraceListener() {},
       async runTurn(prompt) {
-        prompts.push(prompt);
+        prompts.push(stripWorkShellLanguageInstruction(prompt));
         return { text: "Work turn cancelled by the operator.", cancelled: true };
       },
     },
@@ -7515,7 +8926,7 @@ test("WorkShellEngine reduces lifecycle events from the newest decision and mani
   assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-1");
   assert.equal(engine.getState().agentConsole.activity[0]?.status, "completed");
 
-  await engine.handleSubmit("2");
+  assert.equal(await engine.submitPendingDecisionText("2", "decision-1"), true);
   assert.deepEqual(await answer, {
     status: "answered",
     answers: [{ id: "strategy", selectedOptions: ["Fast"] }],
@@ -7586,6 +8997,249 @@ test("WorkShellEngine serializes checkpoint writes so an older snapshot cannot o
   assert.equal(writes[5]?.snapshot.state, "running");
   assert.equal(writes[5]?.snapshot.agentConsole?.agents.length, 2);
   writes[5].resolve();
+});
+
+test("WorkShellEngine coalesces queued checkpoints to the latest pending snapshot", async () => {
+  const writes = [];
+  const { engine } = createAgentConsoleEngine({
+    persistWorkShellSessionSnapshot(snapshot) {
+      return new Promise((resolve, reject) => {
+        writes.push({ snapshot, resolve, reject });
+      });
+    },
+  });
+
+  const initializing = engine.initialize();
+  await waitFor(() => writes.length === 1, "the initialize checkpoint");
+  writes[0].resolve();
+  await initializing;
+
+  const first = engine.setMode("analyze");
+  await waitFor(() => writes.length === 2, "the first mode checkpoint");
+  const pending = Array.from({ length: 256 }, (_, index) => engine.enqueueSessionSnapshotWrite({
+    ...writes[1].snapshot,
+    mode: index === 255 ? "default" : index % 2 === 0 ? "search" : "analyze",
+  }));
+  await delay(20);
+  assert.equal(writes.length, 2, "256 pending snapshots stay coalesced behind the active write");
+
+  writes[1].resolve();
+  await waitFor(() => writes.length === 3, "the latest coalesced checkpoint");
+  assert.equal(writes[2].snapshot.mode, "default");
+  writes[2].resolve();
+  await Promise.all([first, ...pending]);
+  assert.equal(writes.length, 3);
+  await engine.dispose();
+});
+
+test("WorkShellEngine dispose is awaitable through its final console checkpoint", async () => {
+  const writes = [];
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    persistWorkShellSessionSnapshot(snapshot) {
+      return new Promise((resolve, reject) => {
+        writes.push({ snapshot, resolve, reject });
+      });
+    },
+  });
+
+  const initializing = engine.initialize();
+  await waitFor(() => writes.length === 1, "the initialize checkpoint");
+  writes[0].resolve();
+  await initializing;
+
+  emitRunStarted(emitTrace, "run-final-write");
+  let disposed = false;
+  const disposal = engine.dispose().then(() => { disposed = true; });
+  await waitFor(() => writes.length === 2, "the dispose checkpoint");
+  await delay(10);
+  assert.equal(disposed, false);
+  assert.equal(writes[1].snapshot.agentConsole?.agents[0]?.id, "run-final-write");
+
+  writes[1].resolve();
+  await disposal;
+  assert.equal(disposed, true);
+});
+
+test("WorkShellEngine dispose rejects when its final console checkpoint cannot be written", async () => {
+  const writes = [];
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    persistWorkShellSessionSnapshot(snapshot) {
+      return new Promise((resolve, reject) => {
+        writes.push({ snapshot, resolve, reject });
+      });
+    },
+  });
+
+  const initializing = engine.initialize();
+  await waitFor(() => writes.length === 1, "the initialize checkpoint");
+  writes[0].resolve();
+  await initializing;
+
+  emitRunStarted(emitTrace, "run-failed-final-write");
+  const disposal = engine.dispose();
+  assert.equal(engine.dispose(), disposal, "dispose remains idempotent while the flush is pending");
+  await waitFor(() => writes.length === 2, "the dispose checkpoint");
+  writes[1].reject(new Error("ENOSPC: no space left on device"));
+
+  await assert.rejects(disposal, /ENOSPC: no space left on device/u);
+});
+
+test("WorkShellEngine dispose observes a background console checkpoint already in flight", async () => {
+  const writes = [];
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    persistWorkShellSessionSnapshot(snapshot) {
+      return new Promise((resolve, reject) => {
+        writes.push({ snapshot, resolve, reject });
+      });
+    },
+  });
+
+  const initializing = engine.initialize();
+  await waitFor(() => writes.length === 1, "the initialize checkpoint");
+  writes[0].resolve();
+  await initializing;
+
+  emitRunStarted(emitTrace, "run-background-final-write");
+  await waitFor(() => writes.length === 2, "the timer-fired background checkpoint");
+  const disposal = engine.dispose();
+  assert.equal(engine.dispose(), disposal, "dispose remains idempotent after the timer fires");
+  writes[1].reject(new Error("ENOSPC: background checkpoint failed"));
+
+  await assert.rejects(disposal, /ENOSPC: background checkpoint failed/u);
+});
+
+test("WorkShellEngine dispose rejects an unsuperseded background failure that already settled", async () => {
+  const writes = [];
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    persistWorkShellSessionSnapshot(snapshot) {
+      return new Promise((resolve, reject) => {
+        writes.push({ snapshot, resolve, reject });
+      });
+    },
+  });
+
+  const initializing = engine.initialize();
+  await waitFor(() => writes.length === 1, "the initialize checkpoint");
+  writes[0].resolve();
+  await initializing;
+
+  emitRunStarted(emitTrace, "run-settled-failed-write");
+  await waitFor(() => writes.length === 2, "the timer-fired background checkpoint");
+  writes[1].reject(new Error("ENOSPC: settled background checkpoint failed"));
+  await delay(0);
+
+  const disposal = engine.dispose();
+  assert.equal(engine.dispose(), disposal, "dispose remains idempotent after failure settlement");
+  await assert.rejects(disposal, /ENOSPC: settled background checkpoint failed/u);
+});
+
+test("WorkShellEngine successful checkpoint supersedes a settled background failure", async () => {
+  const writes = [];
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    persistWorkShellSessionSnapshot(snapshot) {
+      return new Promise((resolve, reject) => {
+        writes.push({ snapshot, resolve, reject });
+      });
+    },
+  });
+
+  const initializing = engine.initialize();
+  await waitFor(() => writes.length === 1, "the initialize checkpoint");
+  writes[0].resolve();
+  await initializing;
+
+  emitRunStarted(emitTrace, "run-superseded-failed-write");
+  await waitFor(() => writes.length === 2, "the timer-fired background checkpoint");
+  writes[1].reject(new Error("ENOSPC: superseded background checkpoint failed"));
+  await delay(0);
+
+  const modePersist = engine.setMode("analyze");
+  await waitFor(() => writes.length === 3, "the successful superseding checkpoint");
+  writes[2].resolve();
+  await modePersist;
+
+  const disposal = engine.dispose();
+  assert.equal(engine.dispose(), disposal, "dispose remains idempotent after supersession");
+  await disposal;
+});
+
+test("WorkShellEngine shutdown flushes pending console timers before awaiting durable writes", async () => {
+  const writes = [];
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    persistWorkShellSessionSnapshot(snapshot) {
+      return new Promise((resolve, reject) => {
+        writes.push({ snapshot, resolve, reject });
+      });
+    },
+  });
+
+  const initializing = engine.initialize();
+  await waitFor(() => writes.length === 1, "the initialize checkpoint");
+  writes[0].resolve();
+  await initializing;
+
+  emitRunStarted(emitTrace, "run-shutdown-write");
+  let shutdownSettled = false;
+  const shutdown = engine.shutdown({ timeoutMs: 1_000 }).then((result) => {
+    shutdownSettled = true;
+    return result;
+  });
+  await waitFor(() => writes.length === 2, "the shutdown checkpoint");
+  await delay(10);
+  assert.equal(shutdownSettled, false);
+  assert.equal(writes[1].snapshot.agentConsole?.agents[0]?.id, "run-shutdown-write");
+
+  writes[1].resolve();
+  assert.equal(await shutdown, true);
+});
+
+test("WorkShellEngine shutdown reports a failed final durable write", async () => {
+  const writes = [];
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    persistWorkShellSessionSnapshot(snapshot) {
+      return new Promise((resolve, reject) => {
+        writes.push({ snapshot, resolve, reject });
+      });
+    },
+  });
+
+  const initializing = engine.initialize();
+  await waitFor(() => writes.length === 1, "the initialize checkpoint");
+  writes[0].resolve();
+  await initializing;
+
+  emitRunStarted(emitTrace, "run-failed-shutdown-write");
+  const shutdown = engine.shutdown({ timeoutMs: 1_000 });
+  await waitFor(() => writes.length === 2, "the shutdown checkpoint");
+  writes[1].reject(new Error("ENOSPC: no space left on device"));
+
+  await assert.rejects(shutdown, /ENOSPC: no space left on device/u);
+});
+
+test("WorkShellEngine shutdown reports an unsuperseded background failure that already settled", async () => {
+  const writes = [];
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    persistWorkShellSessionSnapshot(snapshot) {
+      return new Promise((resolve, reject) => {
+        writes.push({ snapshot, resolve, reject });
+      });
+    },
+  });
+
+  const initializing = engine.initialize();
+  await waitFor(() => writes.length === 1, "the initialize checkpoint");
+  writes[0].resolve();
+  await initializing;
+
+  emitRunStarted(emitTrace, "run-settled-shutdown-failure");
+  await waitFor(() => writes.length === 2, "the timer-fired background checkpoint");
+  writes[1].reject(new Error("ENOSPC: settled shutdown checkpoint failed"));
+  await delay(0);
+
+  await assert.rejects(
+    engine.shutdown({ timeoutMs: 1_000 }),
+    /ENOSPC: settled shutdown checkpoint failed/u,
+  );
 });
 
 // ---------------------------------------------------------------------------

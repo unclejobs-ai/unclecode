@@ -4,7 +4,12 @@ import test from "node:test";
 import {
   ALT_SCREEN_SEQUENCES,
   enterAlternateScreen,
+  enterMouseTracking,
 } from "../../packages/tui/src/alt-screen.ts";
+import {
+  RUNTIME_CONNECTION_STATUS,
+  showRuntimeConnectionStatus,
+} from "../../packages/tui/src/tui-entry.tsx";
 
 function fakeStdout({ isTTY = true } = {}) {
   const writes = [];
@@ -42,8 +47,27 @@ test("entering the alternate screen swaps the buffer and hides the cursor", () =
     session.restore();
     assert.equal(
       stdout.output,
-      `${ALT_SCREEN_SEQUENCES.enter}${ALT_SCREEN_SEQUENCES.hideCursor}${ALT_SCREEN_SEQUENCES.showCursor}${ALT_SCREEN_SEQUENCES.leave}`,
+      `${ALT_SCREEN_SEQUENCES.enter}${ALT_SCREEN_SEQUENCES.hideCursor}${ALT_SCREEN_SEQUENCES.disableMouseTracking}${ALT_SCREEN_SEQUENCES.showCursor}${ALT_SCREEN_SEQUENCES.leave}`,
     );
+  });
+});
+
+test("mouse tracking is scoped to the work pane and restores idempotently", () => {
+  withoutDisableFlag(() => {
+    const stdout = fakeStdout();
+    const session = enterMouseTracking(stdout);
+
+    assert.equal(session.active, true);
+    assert.equal(stdout.output, ALT_SCREEN_SEQUENCES.enableMouseTracking);
+
+    session.restore();
+    const restored = stdout.output;
+    assert.equal(
+      restored,
+      `${ALT_SCREEN_SEQUENCES.enableMouseTracking}${ALT_SCREEN_SEQUENCES.disableMouseTracking}`,
+    );
+    session.restore();
+    assert.equal(stdout.output, restored);
   });
 });
 
@@ -68,6 +92,11 @@ test("a non-TTY stdout is left completely alone", () => {
     assert.equal(stdout.output, "");
     session.restore();
     assert.equal(stdout.output, "");
+
+    const mouse = enterMouseTracking(stdout);
+    assert.equal(mouse.active, false);
+    mouse.restore();
+    assert.equal(stdout.output, "");
   });
 });
 
@@ -91,5 +120,21 @@ test("entering does not leave process listeners behind after restore", () => {
     session.restore();
     const after = process.listenerCount("SIGINT") + process.listenerCount("exit");
     assert.equal(after, before, "restore must unregister its exit and signal hooks");
+  });
+});
+
+test("runtime owner startup paints a localized first frame synchronously", () => {
+  withoutDisableFlag(() => {
+    const english = fakeStdout();
+    const englishFrame = showRuntimeConnectionStatus({ locale: "en", stdout: english });
+    assert.match(english.output, new RegExp(RUNTIME_CONNECTION_STATUS.en));
+    assert.match(english.output, /UncleCode/);
+    englishFrame.restore();
+
+    const korean = fakeStdout();
+    const koreanFrame = showRuntimeConnectionStatus({ locale: "ko", stdout: korean });
+    assert.match(korean.output, new RegExp(RUNTIME_CONNECTION_STATUS.ko));
+    assert.doesNotMatch(korean.output, new RegExp(RUNTIME_CONNECTION_STATUS.en));
+    koreanFrame.restore();
   });
 });

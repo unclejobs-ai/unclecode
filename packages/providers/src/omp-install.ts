@@ -94,6 +94,26 @@ function findOmpPackageRoot(entrypoint: string): string | undefined {
   return undefined;
 }
 
+function findStandaloneOmpPackageRoot(binPath: string): string | undefined {
+  const candidate = path.resolve(
+    path.dirname(binPath),
+    "..",
+    "install",
+    "global",
+    "node_modules",
+    "@oh-my-pi",
+    "pi-coding-agent",
+  );
+  if (readPackageName(path.join(candidate, "package.json")) !== "@oh-my-pi/pi-coding-agent") {
+    return undefined;
+  }
+  try {
+    return realpathSync(candidate);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Returns undefined when omp is not installed / not resolvable. Never throws. */
 export function findOmpInstall(env: NodeJS.ProcessEnv = process.env): OmpInstall | undefined {
   try {
@@ -104,7 +124,9 @@ export function findOmpInstall(env: NodeJS.ProcessEnv = process.env): OmpInstall
     if (!binPath || !isExecutableFile(binPath)) {
       return undefined;
     }
-    const packageRoot = findOmpPackageRoot(realpathSync(binPath));
+    const resolvedBinPath = realpathSync(binPath);
+    const packageRoot = findOmpPackageRoot(resolvedBinPath)
+      ?? findStandaloneOmpPackageRoot(resolvedBinPath);
     if (!packageRoot) {
       return undefined;
     }

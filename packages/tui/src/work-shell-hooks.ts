@@ -1,4 +1,4 @@
-import { useInput } from "ink";
+import { useInput, useStdin } from "ink";
 import {
   type SetStateAction,
   useCallback,
@@ -8,6 +8,8 @@ import {
   useState,
 } from "react";
 import {
+  getWorkShellMessages,
+  resolveAgentConsoleSelection,
   runRustCommandSync,
   type AgentConsoleViewState,
   type WorkShellComposerMode,
@@ -47,6 +49,8 @@ import {
 import {
   resolveWorkShellContextInspectorAction,
   resolveWorkShellInputAction,
+  resolveWorkShellRawTranscriptNavigations,
+  resolveWorkShellTranscriptNavigation,
   resolveWorkShellSubmitAction,
 } from "./work-shell-input.js";
 import {
@@ -58,9 +62,12 @@ import {
   type AgentConsoleKeyState,
 } from "./work-shell-agent-console-input.js";
 import {
-  getWorkShellTranscriptEntryCapacity,
+  createWorkShellTranscriptAnchor,
+  getWorkShellTranscriptAvailableRows,
+  measureWorkShellEntryRows,
+  projectWorkShellTranscript,
+  resolveWorkShellTranscriptOffsetFromAnchor,
   shouldShowWorkShellConversationEntry,
-  WORK_SHELL_STARTER_PROMPTS,
   type WorkShellEntry,
   type WorkShellPanel,
 } from "./work-shell-view.js";
@@ -152,8 +159,14 @@ export interface WorkShellStateSource<State> {
   dispose(): void;
 }
 
-export function useWorkShellEngineState<State>(engine: WorkShellStateSource<State>): State {
+export type WorkShellEngineOwnership = "owned" | "shared";
+
+export function useWorkShellEngineState<State>(
+  engine: WorkShellStateSource<State>,
+  lifecycle: { readonly ownership?: WorkShellEngineOwnership } = {},
+): State {
   const [state, setState] = useState(() => engine.getState());
+  const ownership = lifecycle.ownership ?? "owned";
 
   useEffect(() => {
     setState(engine.getState());
@@ -161,9 +174,11 @@ export function useWorkShellEngineState<State>(engine: WorkShellStateSource<Stat
     void engine.initialize();
     return () => {
       unsubscribe();
-      engine.dispose();
+      if (ownership === "owned") {
+        engine.dispose();
+      }
     };
-  }, [engine]);
+  }, [engine, ownership]);
 
   return state;
 }
@@ -293,6 +308,9 @@ export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
   // tool feed in the composer dock). Optional so hosts and test fakes
   // without engine trace state render no feed.
   readonly traceLines?: readonly string[];
+  /** Shared `/minimal`/`/verbose` tool-history presentation preference. */
+  readonly traceMode?: "minimal" | "verbose" | undefined;
+  readonly uiLocale?: "en" | "ko" | undefined;
   // Always-filled live trace tail (engine-owned, capped at 8). The pane's
   // dock feed reads THIS buffer — not the verbose-only `traceLines` above —
   // so the busy feed stays alive in default (minimal) trace mode.
@@ -333,6 +351,7 @@ export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
 export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>
   extends WorkShellStateSource<State> {
   handleSubmit(line: string, attachments?: readonly unknown[]): Promise<void>;
+  toggleToolHistoryDisplay?(): Promise<void>;
   setMode(mode: string): void | Promise<void>;
   openSessionsPanel(): Promise<void>;
   interruptTurn?(): void;
@@ -362,15 +381,23 @@ export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>
   selectAgentConsoleTab?(tab: AgentConsoleTab): void;
   moveAgentConsoleCursor?(delta: number): void;
   toggleAgentConsoleInspector?(): void;
-  beginAgentSteer?(): void;
+  beginAgentSteer?(agentRunId?: string): unknown;
+  submitAgentSteer?(value: string): Promise<void>;
   requestAgentCancel?(): void;
   confirmAgentCancel?(confirm: boolean): Promise<void>;
   continueSelectedAgent?(): Promise<void>;
   // Decision bar (main-screen UX overhaul) — one-key replies and Esc cancel
   // for a pending AskUserQuestion. Both optional so hosts without decision
   // plumbing keep digits and Esc on their existing meanings.
-  answerPendingDecisionByIndex?(index: number): boolean;
-  cancelPendingDecision?(): boolean;
+  submitPendingDecisionText?(value: string, decisionId: string): boolean | Promise<boolean>;
+  answerPendingDecisionByIndex?(index: number, decisionId: string): boolean | Promise<boolean>;
+  cancelPendingDecision?(decisionId: string): boolean | Promise<boolean>;
+  removeQueueItem?(id: number): Promise<boolean>;
+  moveQueueItem?(id: number, direction: "up" | "down"): Promise<boolean>;
+  clearQueueItems?(): Promise<void>;
+  resumeQueueItems?(): Promise<void>;
+  retryQueueItem?(id: number): Promise<boolean>;
+  discardQueueItem?(id: number): Promise<boolean>;
   // Optional because not every pane host wires trace plumbing — when
   // absent, the hook silently drops the event. In practice WorkShellEngine
   // always implements this since commit b891c19's follow-up.
@@ -553,6 +580,9 @@ export type ShellActionKeyOwnershipState = {
   readonly ctrl: boolean;
   /** Whether the keystroke was Esc (Ink delivers it with an empty `input`). */
   readonly escape?: boolean | undefined;
+  readonly upArrow?: boolean | undefined;
+  readonly downArrow?: boolean | undefined;
+  readonly return?: boolean | undefined;
   /** Whether the composer is raw-empty (no pending local draft either). */
   readonly composerEmpty: boolean;
   /** Whether the conversation transcript already has entries. */
@@ -567,11 +597,15 @@ export type ShellActionKeyOwnershipState = {
 };
 
 /** Hotkey → starter prompt; only exact single digits `1`-`3` match. */
-function getWorkShellStarterPromptForKey(key: string): string | undefined {
-  const index = WORK_SHELL_STARTER_PROMPTS.findIndex((_, promptIndex) =>
+function getWorkShellStarterPromptForKey(
+  key: string,
+  uiLocale: "en" | "ko" = "en",
+): string | undefined {
+  const prompts = getWorkShellMessages(uiLocale).starterPrompts;
+  const index = prompts.findIndex((_, promptIndex) =>
     key === String(promptIndex + 1)
   );
-  return index >= 0 ? WORK_SHELL_STARTER_PROMPTS[index] : undefined;
+  return index >= 0 ? prompts[index] : undefined;
 }
 
 /**
@@ -614,6 +648,12 @@ export function resolveShellActionKeyOwnership(
   // swallowed without an action behind it.
   if (state.decisionPending) {
     if (state.escape) {
+      return "decision";
+    }
+    if (
+      state.decisionOptionCount !== undefined
+      && (state.upArrow || state.downArrow || state.return)
+    ) {
       return "decision";
     }
     if (isDecisionOneKeyDigit(state.input, state.decisionOptionCount)) {
@@ -661,8 +701,52 @@ export function isShellActionKeyOverlayOpen(input: {
   );
 }
 
+export type QueueOverlayKeyAction =
+  | { readonly action: "pass" | "consume" | "remove" | "clear" | "resume" | "retry" | "discard" | "close" }
+  | { readonly action: "select"; readonly delta: -1 | 1 }
+  | { readonly action: "move"; readonly direction: "up" | "down" };
+
+export function resolveQueueOverlayKeyAction(
+  value: string,
+  key: {
+    readonly upArrow?: boolean;
+    readonly downArrow?: boolean;
+    readonly shift?: boolean;
+    readonly escape?: boolean;
+    readonly delete?: boolean;
+    readonly backspace?: boolean;
+    readonly ctrl?: boolean;
+  },
+  queueOpen: boolean,
+): QueueOverlayKeyAction {
+  if (!queueOpen) return { action: "pass" };
+  if (key.escape) return { action: "close" };
+  if (key.upArrow || key.downArrow) {
+    const direction = key.upArrow ? "up" : "down";
+    return key.shift
+      ? { action: "move", direction }
+      : { action: "select", delta: direction === "up" ? -1 : 1 };
+  }
+  if (key.delete || key.backspace || value.toLowerCase() === "d") return { action: "remove" };
+  if (!key.ctrl && value.toLowerCase() === "c") return { action: "clear" };
+  if (!key.ctrl && value.toLowerCase() === "r") return { action: "resume" };
+  if (!key.ctrl && value.toLowerCase() === "t") return { action: "retry" };
+  if (!key.ctrl && value.toLowerCase() === "x") return { action: "discard" };
+  return { action: "consume" };
+}
+
+export function parseQueuePanelItemIds(lines: readonly string[]): readonly number[] {
+  return lines.flatMap((line) => {
+    const match = line.match(/^(?:Next|#\d+) · id (\d+) ·/u);
+    if (!match?.[1]) return [];
+    const id = Number(match[1]);
+    return Number.isSafeInteger(id) && id >= 0 ? [id] : [];
+  });
+}
+
 export function useWorkShellInputController(input: {
   readonly value: string;
+  readonly uiLocale?: "en" | "ko" | undefined;
   readonly replaceValue: (value: string) => void;
   readonly slashSuggestionCount: number;
   readonly selectedSlashCommand?: string;
@@ -672,6 +756,8 @@ export function useWorkShellInputController(input: {
   readonly currentMode: string;
   readonly onExit: () => void;
   readonly onRequestSessionsView?: (() => void) | undefined;
+  readonly toggleQualityPlan?: (() => void) | undefined;
+  readonly toggleToolHistoryDisplay?: (() => void | Promise<void>) | undefined;
   readonly openEngineSessions: () => void;
   readonly cycleMode: (nextMode: string) => void | Promise<void>;
   readonly shouldBlockSlashSubmit: (line: string) => boolean;
@@ -695,10 +781,23 @@ export function useWorkShellInputController(input: {
    * agent console snapshot because the controller has no snapshot of its own.
    */
   readonly decisionPending?: boolean | undefined;
+  readonly pendingDecisionId?: string | undefined;
   readonly decisionOptionCount?: number | undefined;
   /** Decision bar capability probes — wired by engines that own decisions. */
-  readonly answerPendingDecisionByIndex?: ((index: number) => boolean) | undefined;
-  readonly cancelPendingDecision?: (() => boolean) | undefined;
+  readonly submitPendingDecisionText?: ((value: string, decisionId: string) => boolean | Promise<boolean>) | undefined;
+  readonly answerPendingDecisionByIndex?: ((index: number, decisionId: string) => boolean | Promise<boolean>) | undefined;
+  readonly movePendingDecisionSelection?: ((delta: -1 | 1) => void) | undefined;
+  readonly answerPendingDecisionSelection?: ((decisionId: string) => boolean | Promise<boolean>) | undefined;
+  readonly cancelPendingDecision?: ((decisionId: string) => boolean | Promise<boolean>) | undefined;
+  readonly queueOverlayOpen?: boolean | undefined;
+  readonly queueSelectedId?: number | undefined;
+  readonly moveQueueSelection?: ((delta: -1 | 1) => void) | undefined;
+  readonly removeSelectedQueueItem?: (() => Promise<void>) | undefined;
+  readonly moveSelectedQueueItem?: ((direction: "up" | "down") => Promise<void>) | undefined;
+  readonly clearQueueItems?: (() => Promise<void>) | undefined;
+  readonly resumeQueueItems?: (() => Promise<void>) | undefined;
+  readonly retrySelectedQueueItem?: (() => Promise<void>) | undefined;
+  readonly discardSelectedQueueItem?: (() => Promise<void>) | undefined;
   readonly activePanelTitle?: string;
   readonly closeSlashPicker?: ((panelTitle?: string) => void) | undefined;
   readonly interruptTurn?: (() => void) | undefined;
@@ -763,6 +862,83 @@ export function useWorkShellInputController(input: {
   readonly agentConsole?: WorkShellAgentConsoleKeyboard | undefined;
 }): { readonly submit: (value: string) => Promise<boolean> } {
   const escapeResetArmedAtRef = useRef<number | undefined>(undefined);
+  const { stdin } = useStdin();
+  const rawTranscriptNavigationRef = useRef<(value: unknown) => void>(() => undefined);
+
+  // Ink's public `useInput` flags cover the normal VT/SS3 PageUp/PageDown and
+  // End sequences, but Kitty's CSI-u keypad variants are delivered to the
+  // stdin stream as `kppageup`/`kppagedown`/`kpend` and then become an empty
+  // value with no public flag. Subscribe at the raw stream boundary so the
+  // fallback is part of the same ownership ladder as ordinary keys. The ref
+  // keeps this listener stable while giving it the latest overlay/draft state;
+  // re-subscribing on every render would race a partially delivered escape
+  // sequence and make key ownership flicker.
+  rawTranscriptNavigationRef.current = (rawValue: unknown): void => {
+    if (typeof rawValue !== "string") return;
+    const navigations = resolveWorkShellRawTranscriptNavigations(rawValue);
+    if (navigations.length === 0) return;
+
+    const telemetryPanelOpen =
+      input.activePanelTitle === "Cache Telemetry"
+      || input.activePanelTitle === "Agent History";
+    const contextDeskOwnsKeyboard = input.contextInspectorOpen
+      ?? input.activePanelTitle === "Context expanded";
+    const transcriptOverlayOpen = isShellActionKeyOverlayOpen({
+      hasOverlayOpen: input.hasOverlayOpen,
+      contextInspectorOpen: input.contextInspectorOpen,
+      telemetryPanelOpen,
+      agentConsoleOpen: input.agentConsoleOpen,
+      activeSlashInput: input.activeSlashInput,
+    });
+
+    // Queue, agent-console, telemetry, slash-picker, and generic overlays are
+    // authoritative owners. A raw page key must not leak through and move the
+    // transcript underneath an overlay that cannot render that movement.
+    if (input.queueOverlayOpen === true || transcriptOverlayOpen) {
+      if (input.hasOverlayOpen && contextDeskOwnsKeyboard) {
+        for (const navigation of navigations) {
+          if (navigation.type === "page") {
+            input.moveContextInspectorPage?.(navigation.direction);
+          }
+        }
+      }
+      return;
+    }
+    if (contextDeskOwnsKeyboard) {
+      for (const navigation of navigations) {
+        if (navigation.type === "page") {
+          input.moveContextInspectorPage?.(navigation.direction);
+        }
+      }
+      return;
+    }
+
+    for (const navigation of navigations) {
+      if (navigation.type === "page") {
+        input.moveTranscriptPage?.(navigation.direction);
+        continue;
+      }
+      if (
+        navigation.type === "latest"
+        && input.transcriptScrolledUp
+        && input.returnTranscriptToNewest
+        && !input.isBusy
+        && input.composerMode !== "api-key-entry"
+      ) {
+        input.returnTranscriptToNewest();
+      }
+    }
+  };
+
+  useEffect(() => {
+    const onInput = (value: unknown): void => {
+      rawTranscriptNavigationRef.current(value);
+    };
+    stdin.on("data", onInput);
+    return () => {
+      stdin.removeListener("data", onInput);
+    };
+  }, [stdin]);
 
   // The controller's own submit — the exact route Enter takes on a typed
   // line. Defined ahead of `useInput` so single-key dispatches (`?` → /help)
@@ -788,6 +964,21 @@ export function useWorkShellInputController(input: {
         // No provider turn opened and no attachment was delivered, so the
         // pane must keep its pending clipboard badge intact.
         return false;
+      }
+      // A typed answer is a control for the exact decision rendered when
+      // Enter was pressed, never a generic prompt. Keeping the identity in
+      // this call prevents a delayed remote A submission from being replayed
+      // against replacement decision B at the same owner revision.
+      if (input.pendingDecisionId && input.submitPendingDecisionText) {
+        if (value.trim().length === 0) return false;
+        try {
+          return await input.submitPendingDecisionText(value, input.pendingDecisionId);
+        } catch {
+          // The Composer interprets false as "not accepted" and restores the
+          // submitted draft. The owner remains the authority on the current
+          // decision, so a transport/revision rejection changes no UI state.
+          return false;
+        }
       }
       const typedLine = value.trim();
       const submitValue =
@@ -836,20 +1027,45 @@ export function useWorkShellInputController(input: {
       input.selectedSlashCommand,
       input.shouldBlockSlashSubmit,
       input.agentConsole?.buildContext,
+      input.pendingDecisionId,
+      input.submitPendingDecisionText,
     ],
   );
 
   useInput((value, key) => {
-    const ctrlOCount = value.split("\u000f").length - 1;
+    const ctrlTCount = value.split("\u0014").length - 1;
     if (
-      input.onRequestSessionsView &&
-      (ctrlOCount > 0 || (key.ctrl && value.toLowerCase() === "o"))
+      input.toggleQualityPlan
+      && (ctrlTCount > 0 || (key.ctrl && value.toLowerCase() === "t"))
     ) {
       escapeResetArmedAtRef.current = undefined;
-      input.replaceValue("");
+      for (let index = 0; index < Math.max(1, ctrlTCount); index += 1) {
+        input.toggleQualityPlan();
+      }
+      return;
+    }
+    const ctrlOCount = value.split("\u000f").length - 1;
+    if (input.toggleToolHistoryDisplay && (ctrlOCount > 0 || (key.ctrl && value.toLowerCase() === "o"))) {
+      escapeResetArmedAtRef.current = undefined;
       const requestCount = Math.max(1, ctrlOCount);
       for (let index = 0; index < requestCount; index += 1) {
-        input.onRequestSessionsView();
+        void Promise.resolve(input.toggleToolHistoryDisplay()).catch(() => undefined);
+      }
+      return;
+    }
+    const queueAction = resolveQueueOverlayKeyAction(value, key, input.queueOverlayOpen === true);
+    if (queueAction.action !== "pass") {
+      escapeResetArmedAtRef.current = undefined;
+      switch (queueAction.action) {
+        case "close": input.closeOverlay?.(); break;
+        case "select": input.moveQueueSelection?.(queueAction.delta); break;
+        case "remove": void input.removeSelectedQueueItem?.().catch(() => undefined); break;
+        case "move": void input.moveSelectedQueueItem?.(queueAction.direction).catch(() => undefined); break;
+        case "clear": void input.clearQueueItems?.().catch(() => undefined); break;
+        case "resume": void input.resumeQueueItems?.().catch(() => undefined); break;
+        case "retry": void input.retrySelectedQueueItem?.().catch(() => undefined); break;
+        case "discard": void input.discardSelectedQueueItem?.().catch(() => undefined); break;
+        case "consume": break;
       }
       return;
     }
@@ -986,6 +1202,9 @@ export function useWorkShellInputController(input: {
       input: value,
       ctrl: key.ctrl === true,
       escape: key.escape === true,
+      upArrow: key.upArrow === true,
+      downArrow: key.downArrow === true,
+      return: key.return === true,
       composerEmpty: composerRawEmpty,
       hasConversation: input.hasConversation ?? true,
       isBusy: input.isBusy,
@@ -1001,7 +1220,7 @@ export function useWorkShellInputController(input: {
       }),
     });
     if (shellActionOwnership === "starter") {
-      const starterPrompt = getWorkShellStarterPromptForKey(value);
+      const starterPrompt = getWorkShellStarterPromptForKey(value, input.uiLocale ?? "en");
       if (starterPrompt !== undefined) {
         escapeResetArmedAtRef.current = undefined;
         input.replaceValue(starterPrompt);
@@ -1013,20 +1232,42 @@ export function useWorkShellInputController(input: {
     // decision, so consuming it here keeps the Rust Esc ladder (busy-turn
     // interrupt, overlay close) untouched whenever no decision is pending.
     if (shellActionOwnership === "decision") {
-      if (key.escape && input.cancelPendingDecision) {
+      if (key.upArrow && input.movePendingDecisionSelection) {
+        input.movePendingDecisionSelection(-1);
+        return;
+      }
+      if (key.downArrow && input.movePendingDecisionSelection) {
+        input.movePendingDecisionSelection(1);
+        return;
+      }
+      if (key.return && input.answerPendingDecisionSelection && input.pendingDecisionId) {
+        const decisionId = input.pendingDecisionId;
+        void Promise.resolve()
+          .then(() => input.answerPendingDecisionSelection?.(decisionId))
+          .catch(() => undefined);
+        return;
+      }
+      if (key.escape && input.cancelPendingDecision && input.pendingDecisionId) {
         escapeResetArmedAtRef.current = undefined;
-        input.cancelPendingDecision();
+        const decisionId = input.pendingDecisionId;
+        void Promise.resolve()
+          .then(() => input.cancelPendingDecision?.(decisionId))
+          .catch(() => undefined);
         return;
       }
       const oneKeyIndex = Number(value);
       if (
         !key.escape
         && input.answerPendingDecisionByIndex
+        && input.pendingDecisionId
         && Number.isSafeInteger(oneKeyIndex)
         && oneKeyIndex >= 1
       ) {
         escapeResetArmedAtRef.current = undefined;
-        input.answerPendingDecisionByIndex(oneKeyIndex);
+        const decisionId = input.pendingDecisionId;
+        void Promise.resolve()
+          .then(() => input.answerPendingDecisionByIndex?.(oneKeyIndex, decisionId))
+          .catch(() => undefined);
         return;
       }
     }
@@ -1060,14 +1301,15 @@ export function useWorkShellInputController(input: {
       // when a draft has already taken the desk branch out of play — the
       // transcript is not rendered there, so a scroll would be invisible.
       || contextDeskOwnsKeyboard;
+    const transcriptNavigation = resolveWorkShellTranscriptNavigation({ value, key });
     if (
       !key.ctrl
       && !transcriptScrollOverlayOpen
-      && (key.pageUp || key.pageDown)
+      && transcriptNavigation.type === "page"
       && input.moveTranscriptPage
     ) {
       escapeResetArmedAtRef.current = undefined;
-      input.moveTranscriptPage(key.pageUp ? -1 : 1);
+      input.moveTranscriptPage(transcriptNavigation.direction);
       return;
     }
     // Esc gains one meaning: while the transcript is scrolled, an Esc that no
@@ -1086,6 +1328,19 @@ export function useWorkShellInputController(input: {
       && !input.isBusy
       && input.composerMode !== "api-key-entry"
       && composerRawEmpty
+    ) {
+      escapeResetArmedAtRef.current = undefined;
+      input.returnTranscriptToNewest();
+      return;
+    }
+    if (
+      !key.ctrl
+      && !transcriptScrollOverlayOpen
+      && transcriptNavigation.type === "latest"
+      && input.transcriptScrolledUp
+      && input.returnTranscriptToNewest
+      && !input.isBusy
+      && input.composerMode !== "api-key-entry"
     ) {
       escapeResetArmedAtRef.current = undefined;
       input.returnTranscriptToNewest();
@@ -1154,9 +1409,6 @@ export function useWorkShellInputController(input: {
       case "close-overlay":
         input.closeOverlay?.();
         return;
-      case "open-sessions-view":
-        input.onRequestSessionsView?.();
-        return;
       case "open-engine-sessions":
         input.openEngineSessions();
         return;
@@ -1220,14 +1472,19 @@ export function useWorkShellPaneState<
   readonly onSyncHomeState?: ((homeState: Partial<TuiShellHomeState>) => void) | undefined;
   readonly refreshHomeState?: (() => Promise<TuiShellHomeState>) | undefined;
   readonly shouldBlockSlashSubmit: (line: string) => boolean;
+  /** The pane disposes only engines it created; shared runtime owners outlive a view detach. */
+  readonly engineOwnership?: WorkShellEngineOwnership | undefined;
   /**
    * Task 11 scrollback: the pane's measured terminal rows, threaded so the
    * PageUp/PageDown step and the rendered window derive from one capacity
    * calculation. Left undefined, a legacy host keeps a default-rows step.
    */
   readonly terminalRows?: number | undefined;
+  /** Physical columns used for wrapped rendered-row scroll anchoring. */
+  readonly terminalColumns?: number | undefined;
 }) {
   const [inputValue, setInputValueState] = useState("");
+  const [composerResetEpoch, setComposerResetEpoch] = useState(0);
   const pendingInputValueRef = useRef("");
   const setInputValue = useCallback((value: SetStateAction<string>): void => {
     const nextValue = typeof value === "function"
@@ -1309,54 +1566,91 @@ export function useWorkShellPaneState<
       return remaining.length === current.length ? current : remaining;
     });
   }, []);
-  const engineState = useWorkShellEngineState(input.engine);
-  // Task 11 transcript scrollback: the offset counts transcript entries
+  const engineState = useWorkShellEngineState(input.engine, {
+    ownership: input.engineOwnership ?? "owned",
+  });
+  // Task 11 transcript scrollback: the offset counts rendered terminal rows
   // hidden below the visible window; 0 is bottom-follow. New entries arrive
   // from the engine outside React events, so the arrival reset is a
-  // subscription-shaped effect keyed on the transcript anchor (visible entry
-  // count + last entry), not a prop mirror: an engine emit that rebuilds the
-  // entries array without changing the anchor must not yank the view down.
-  const [transcriptScrollOffset, setTranscriptScrollOffset] = useState(0);
-  const transcriptArrivalAnchorRef = useRef<string | undefined>(undefined);
-  useEffect(() => {
-    const visibleEntries = engineState.entries.filter(shouldShowWorkShellConversationEntry);
-    const lastVisibleEntry = visibleEntries.at(-1);
-    const lastEntry = lastVisibleEntry !== undefined
-      ? `${lastVisibleEntry.role}:${lastVisibleEntry.text}`
-      : "";
-    const anchor = `${visibleEntries.length}:${lastEntry}`;
-    const previousAnchor = transcriptArrivalAnchorRef.current;
-    transcriptArrivalAnchorRef.current = anchor;
-    if (previousAnchor !== undefined && previousAnchor !== anchor) {
-      setTranscriptScrollOffset(0);
-    }
-  }, [engineState.entries]);
-  // One page is exactly the rendered window's capacity, so PageUp/PageDown
-  // never move by a different amount than the view shows. The capacity comes
-  // from the same entry-weight function the view's window slices with
-  // (measureWorkShellEntryRows via getWorkShellTranscriptEntryCapacity) — a
-  // multi-row tool entry shrinks both the step and the window by the same
-  // amount, so the clamp (`visible − capacity`) always matches what rendering
-  // can actually anchor.
+  // subscription-shaped effect keyed on rendered row count, not a prop mirror:
+  // an engine emit that rebuilds the array without new rows does not move it.
+  const [transcriptAnchor, setTranscriptAnchor] = useState<
+    ReturnType<typeof createWorkShellTranscriptAnchor>
+  >(undefined);
+  const transcriptEntries = projectWorkShellTranscript(
+    engineState.entries,
+    engineState.streamingAssistantText,
+  );
+  const transcriptRowWidth = Math.max(8, (input.terminalColumns ?? 80) - 4);
+  // The SCC/Agent Console quiet HUD expands the original ten-row shell budget
+  // to thirteen. A pending single-question decision is also pinned below the
+  // transcript: margin + header + options + hint, with one conservative row
+  // for rejection feedback. Reserve that variable height before row-slicing,
+  // otherwise Yoga shrinks the already-sliced reply and creates holes in it.
+  const pendingDecisionForTranscriptBudget = engineState.agentConsole?.pendingDecision;
+  const singleDecisionForTranscriptBudget =
+    pendingDecisionForTranscriptBudget?.questions.length === 1
+      ? pendingDecisionForTranscriptBudget.questions[0]
+      : undefined;
+  const decisionReservedRows = pendingDecisionForTranscriptBudget === undefined
+    ? 0
+    : singleDecisionForTranscriptBudget === undefined
+      // Multi-question decisions render a pinned margin + header and can add
+      // one rejected-input feedback row even though they have no option list.
+      ? 3
+      : singleDecisionForTranscriptBudget.options.length + 4;
+  const transcriptReservedRows =
+    (engineState.agentConsole === undefined ? 10 : 13) + decisionReservedRows;
+  // The scroll position is content-addressed, not a mutable row delta. New
+  // entries, streaming updates, and terminal resize all recompute from the
+  // same entry id + intra-entry row and therefore cannot reinterpret wrapping
+  // growth as an append.
+  const transcriptScrollOffset = resolveWorkShellTranscriptOffsetFromAnchor(
+    transcriptEntries,
+    transcriptRowWidth,
+    transcriptAnchor,
+    engineState.traceMode ?? "verbose",
+  );
+  // One page is exactly the rendered row budget used by the view. Wrapped CJK
+  // and multi-row tool output therefore move and clamp in the same units.
   const moveTranscriptPage = useCallback(
     (direction: -1 | 1) => {
-      setTranscriptScrollOffset((current) => {
-        const visibleEntries = engineState.entries.filter(shouldShowWorkShellConversationEntry);
-        const transcriptPageCapacity = getWorkShellTranscriptEntryCapacity(
-          visibleEntries,
-          input.terminalRows,
+      setTranscriptAnchor((currentAnchor) => {
+        const visibleEntries = projectWorkShellTranscript(
+          engineState.entries,
+          engineState.streamingAssistantText,
         );
-        const maxOffset = Math.max(0, visibleEntries.length - transcriptPageCapacity);
+        const rowWidth = Math.max(8, (input.terminalColumns ?? 80) - 4);
+        const current = resolveWorkShellTranscriptOffsetFromAnchor(
+          visibleEntries,
+          rowWidth,
+          currentAnchor,
+          engineState.traceMode ?? "verbose",
+        );
+        const transcriptPageRows = getWorkShellTranscriptAvailableRows(
+          input.terminalRows,
+          transcriptReservedRows + (engineState.agentConsole === undefined ? 0 : 1),
+        );
+        const totalRows = visibleEntries.reduce(
+          (sum, entry) => sum + measureWorkShellEntryRows(entry, rowWidth, engineState.traceMode ?? "verbose"),
+          0,
+        );
+        const maxOffset = Math.max(0, totalRows - transcriptPageRows);
         // PageUp (direction -1) moves toward older entries, which hides more
         // of them below the window — the offset grows, not shrinks.
-        const next = current - direction * transcriptPageCapacity;
-        return Math.max(0, Math.min(maxOffset, next));
+        const next = current - direction * transcriptPageRows;
+        return createWorkShellTranscriptAnchor(
+          visibleEntries,
+          rowWidth,
+          Math.max(0, Math.min(maxOffset, next)),
+          engineState.traceMode ?? "verbose",
+        );
       });
     },
-    [engineState.entries, input.terminalRows],
+    [engineState.entries, engineState.streamingAssistantText, engineState.traceMode, input.terminalColumns, input.terminalRows, transcriptReservedRows],
   );
   const returnTranscriptToNewest = useCallback(() => {
-    setTranscriptScrollOffset(0);
+    setTranscriptAnchor(undefined);
   }, []);
   const contextExpandActionsEnabled = resolveContextInspectorExpandOwnership({
     hostExpandAvailable: typeof input.engine.toggleContextInspectorExpanded === "function",
@@ -1416,6 +1710,33 @@ export function useWorkShellPaneState<
   });
   const isStickySlashPicker =
     activeSlashInput !== undefined && !inputValue.trim().startsWith("/");
+  const queueOverlayOpen = activePanel.title === "Queue · follow-ups";
+  const queueItemIds = useMemo(
+    () => queueOverlayOpen ? parseQueuePanelItemIds(activePanel.lines) : [],
+    [activePanel.lines, queueOverlayOpen],
+  );
+  const [storedQueueSelectedId, setQueueSelectedId] = useState<number | undefined>(undefined);
+  const [queueActionError, setQueueActionError] = useState<string | undefined>(undefined);
+  const queueSelectedId = storedQueueSelectedId !== undefined && queueItemIds.includes(storedQueueSelectedId)
+    ? storedQueueSelectedId
+    : queueItemIds[0];
+  // Ink rebinds useInput in a passive effect. Keep the visible selection in a
+  // synchronous ref so a mutation key arriving in the same terminal burst as
+  // ↑/↓ can never act on the previously rendered row.
+  const queueSelectedIdRef = useRef<number | undefined>(queueSelectedId);
+  queueSelectedIdRef.current = queueSelectedId;
+  const moveQueueSelection = useCallback((delta: -1 | 1) => {
+    if (queueItemIds.length === 0) return;
+    const selectedId = queueSelectedIdRef.current;
+    const currentIndex = selectedId === undefined ? 0 : queueItemIds.indexOf(selectedId);
+    const nextIndex = Math.max(0, Math.min(queueItemIds.length - 1, currentIndex + delta));
+    const nextId = queueItemIds[nextIndex];
+    queueSelectedIdRef.current = nextId;
+    setQueueSelectedId(nextId);
+  }, [queueItemIds]);
+  const presentedActivePanel = queueOverlayOpen && queueActionError
+    ? { ...activePanel, lines: [...activePanel.lines, "", `Queue action failed · ${queueActionError}`] }
+    : activePanel;
   useEffect(() => {
     if (inputValue.trim().startsWith("/")) {
       if (ignoreNextSlashDismissResetRef.current) {
@@ -1440,8 +1761,11 @@ export function useWorkShellPaneState<
     (line: string) => {
       // A submission always returns the transcript to the newest entry:
       // the operator has moved on from reading history.
-      setTranscriptScrollOffset(0);
-      return input.engine.handleSubmit(line, pendingClipboardAttachments);
+      setTranscriptAnchor(undefined);
+      return input.engine.getState().composerMode === "agent-steer"
+        && input.engine.submitAgentSteer !== undefined
+        ? input.engine.submitAgentSteer(line)
+        : input.engine.handleSubmit(line, pendingClipboardAttachments);
     },
     [input.engine, pendingClipboardAttachments],
   );
@@ -1534,8 +1858,9 @@ export function useWorkShellPaneState<
   // take the draft with it: a half-typed message addressed to an agent must
   // never be left behind as a chat prompt one Enter away from the provider.
   const leaveAgentSteerComposer = () => {
-    input.engine.cancelSensitiveInput?.();
     setInputValue("");
+    setComposerResetEpoch((current) => current + 1);
+    input.engine.cancelSensitiveInput?.();
   };
   const buildAgentConsoleContextForScope = (
     scope: AgentConsoleDecisionScope,
@@ -1600,9 +1925,15 @@ export function useWorkShellPaneState<
     if (phase === "suppress") {
       agentConsoleDecisionCacheRef.current = undefined;
     }
-    const decision = resolveAgentConsoleInputDecision(
+    const resolvedDecision = resolveAgentConsoleInputDecision(
       buildAgentConsoleContextForScope(scope, value, key, composerEmpty),
     );
+    const decision: AgentConsoleInputDecision =
+      scope.composerMode === "agent-steer"
+      && resolvedDecision.kind === "dispatch"
+      && (resolvedDecision.action.kind === "close" || resolvedDecision.action.kind === "cancel-steer")
+        ? { ...resolvedDecision, discardComposer: true }
+        : resolvedDecision;
     if (phase === "dispatch") {
       const next = { value, keyMask, composerEmpty, decision };
       agentConsoleDecisionCacheRef.current = next;
@@ -1631,7 +1962,22 @@ export function useWorkShellPaneState<
             selectTab: (tab) => input.engine.selectAgentConsoleTab?.(tab),
             moveCursor: (delta) => input.engine.moveAgentConsoleCursor?.(delta),
             toggleInspector: () => input.engine.toggleAgentConsoleInspector?.(),
-            beginSteer: () => input.engine.beginAgentSteer?.(),
+            beginSteer: () => {
+              const liveState = input.engine.getState();
+              const liveView = liveState.agentConsoleView;
+              const liveSnapshot = liveState.agentConsole;
+              const selection = liveView && liveSnapshot
+                ? resolveAgentConsoleSelection(liveView, liveSnapshot)
+                : undefined;
+              const started = input.engine.beginAgentSteer?.(
+                selection?.tab === "agents" ? selection.run.id : undefined,
+              );
+              if (started && typeof (started as PromiseLike<unknown>).then === "function") {
+                void Promise.resolve(started).catch(() => {
+                  leaveAgentSteerComposer();
+                });
+              }
+            },
             cancelSteer: leaveAgentSteerComposer,
             requestCancel: () => input.engine.requestAgentCancel?.(),
             confirmCancel: (confirmed) => {
@@ -1645,8 +1991,14 @@ export function useWorkShellPaneState<
       : undefined;
   const suppressAgentConsoleKey = agentConsoleKeyboard
     ? (value: string, key: AgentConsoleKeyState, composerEmpty: boolean) => {
-      const kind = agentConsoleKeyboard.decide(value, key, composerEmpty, "suppress").kind;
-      return kind === "dispatch" || kind === "consume";
+      const decision = agentConsoleKeyboard.decide(value, key, composerEmpty, "suppress");
+      if (decision.kind === "compose") {
+        return "compose" as const;
+      }
+      if (decision.kind === "dispatch" && decision.discardComposer === true) {
+        return "consume-reset" as const;
+      }
+      return decision.kind === "dispatch" || decision.kind === "consume";
     }
     : undefined;
   const agentConsoleOwnsKeyboard = agentConsoleWired
@@ -1664,17 +2016,65 @@ export function useWorkShellPaneState<
   const decisionOneKeyWired = input.engine.answerPendingDecisionByIndex !== undefined
     && input.engine.cancelPendingDecision !== undefined;
   const decisionPending = decisionOneKeyWired && pendingDecisionRequest !== undefined;
+  const decisionSelectionActive = decisionPending && decisionSingleQuestion !== undefined;
   const decisionOptionCount = decisionSingleQuestion?.options.length;
+  const [decisionSelection, setDecisionSelection] = useState<{
+    readonly decisionId: string;
+    readonly index: number;
+  } | undefined>(undefined);
+  const defaultDecisionSelection = Math.max(
+    0,
+    Math.min(
+      Math.max(0, (decisionOptionCount ?? 1) - 1),
+      decisionSingleQuestion?.recommended ?? 0,
+    ),
+  );
+  const decisionSelectedIndex = decisionSelection !== undefined
+    && decisionSelection.decisionId === pendingDecisionRequest?.id
+    ? Math.max(0, Math.min(Math.max(0, (decisionOptionCount ?? 1) - 1), decisionSelection.index))
+    : defaultDecisionSelection;
+  const decisionSelectionRef = useRef({
+    decisionId: pendingDecisionRequest?.id,
+    index: decisionSelectedIndex,
+  });
+  decisionSelectionRef.current = {
+    decisionId: pendingDecisionRequest?.id,
+    index: decisionSelectedIndex,
+  };
+  const movePendingDecisionSelection = useCallback((delta: -1 | 1) => {
+    const request = input.engine.getState().agentConsole?.pendingDecision;
+    const question = request?.questions.length === 1 ? request.questions[0] : undefined;
+    if (!request || !question || question.options.length === 0) return;
+    const current = decisionSelectionRef.current.decisionId === request.id
+      ? decisionSelectionRef.current.index
+      : Math.max(0, Math.min(question.options.length - 1, question.recommended ?? 0));
+    const index = Math.max(0, Math.min(question.options.length - 1, current + delta));
+    decisionSelectionRef.current = { decisionId: request.id, index };
+    setDecisionSelection({ decisionId: request.id, index });
+  }, [input.engine]);
+  const answerPendingDecisionSelection = useCallback((decisionId: string) => {
+    const selection = decisionSelectionRef.current;
+    if (selection.decisionId !== decisionId) return false;
+    return input.engine.answerPendingDecisionByIndex?.(selection.index + 1, decisionId) ?? false;
+  }, [input.engine]);
 
   // The Composer asks the same shared ownership predicate the input
   // controller dispatched on, so a shell action character (a starter digit,
   // a decision one-key reply) never also lands in the draft. Ctrl chords
   // arrive as control codes, which the predicate's exact character match
   // already rejects, so the keystroke's ctrl flag is not needed on this side.
-  const suppressShellActionKeys = (value: string, composerEmpty: boolean): boolean =>
+  const suppressShellActionKeys = (
+    value: string,
+    composerEmpty: boolean,
+    key: AgentConsoleKeyState,
+  ): boolean =>
     resolveShellActionKeyOwnership({
       input: value,
       ctrl: false,
+      escape: key.escape === true,
+      upArrow: key.upArrow === true,
+      downArrow: key.downArrow === true,
+      return: key.return === true,
       composerEmpty,
       hasConversation: engineState.entries.some(shouldShowWorkShellConversationEntry),
       isBusy: engineState.isBusy,
@@ -1699,6 +2099,7 @@ export function useWorkShellPaneState<
 
   const { submit } = useWorkShellInputController({
     value: inputValue,
+    uiLocale: engineState.uiLocale ?? "en",
     replaceValue: setInputValue,
     slashSuggestionCount: slashSuggestions.length,
     ...(selectedSuggestion?.command
@@ -1710,6 +2111,18 @@ export function useWorkShellPaneState<
     currentMode: engineState.mode,
     onExit: input.onExit,
     onRequestSessionsView: input.onRequestSessionsView,
+    ...(input.engine.toggleToolHistoryDisplay
+      ? { toggleToolHistoryDisplay: () => input.engine.toggleToolHistoryDisplay!() }
+      : {}),
+    ...(engineState.agentConsole?.workGraph?.qualityProfile
+      ? {
+          toggleQualityPlan: () => {
+            const view = input.engine.getState().agentConsoleView;
+            if (view?.open && view.tab === "plan") input.engine.closeAgentConsole?.();
+            else input.engine.openAgentConsole?.("plan");
+          },
+        }
+      : {}),
     openEngineSessions,
     cycleMode,
     shouldBlockSlashSubmit: input.shouldBlockSlashSubmit,
@@ -1735,15 +2148,115 @@ export function useWorkShellPaneState<
     // engine capability probes, so the ladder can answer or cancel with one
     // key while the decision is on screen.
     decisionPending,
+    ...(pendingDecisionRequest?.id ? { pendingDecisionId: pendingDecisionRequest.id } : {}),
     ...(decisionOptionCount !== undefined ? { decisionOptionCount } : {}),
+    ...(input.engine.submitPendingDecisionText
+      ? {
+          submitPendingDecisionText: (value: string, decisionId: string) =>
+            input.engine.submitPendingDecisionText?.(value, decisionId) ?? false,
+        }
+      : {}),
     ...(input.engine.answerPendingDecisionByIndex
       ? {
-          answerPendingDecisionByIndex: (index: number) =>
-            input.engine.answerPendingDecisionByIndex?.(index) ?? false,
+          answerPendingDecisionByIndex: (index: number, decisionId: string) =>
+            input.engine.answerPendingDecisionByIndex?.(index, decisionId) ?? false,
+        }
+      : {}),
+    ...(decisionSingleQuestion && input.engine.answerPendingDecisionByIndex
+      ? {
+          movePendingDecisionSelection,
+          answerPendingDecisionSelection,
         }
       : {}),
     ...(input.engine.cancelPendingDecision
-      ? { cancelPendingDecision: () => input.engine.cancelPendingDecision?.() ?? false }
+      ? {
+          cancelPendingDecision: (decisionId: string) =>
+            input.engine.cancelPendingDecision?.(decisionId) ?? false,
+        }
+      : {}),
+    queueOverlayOpen,
+    ...(queueSelectedId !== undefined ? { queueSelectedId } : {}),
+    moveQueueSelection,
+    ...(queueSelectedId !== undefined && input.engine.removeQueueItem
+      ? {
+          removeSelectedQueueItem: async () => {
+            const selectedId = queueSelectedIdRef.current;
+            if (selectedId === undefined) return;
+            const index = queueItemIds.indexOf(selectedId);
+            const fallback = queueItemIds[index + 1] ?? queueItemIds[index - 1];
+            try {
+              const removed = await input.engine.removeQueueItem?.(selectedId);
+              if (!removed) throw new Error(`item ${selectedId} is not pending`);
+              setQueueActionError(undefined);
+              queueSelectedIdRef.current = fallback;
+              setQueueSelectedId(fallback);
+            } catch (error) {
+              setQueueActionError(error instanceof Error ? error.message : String(error));
+            }
+          },
+        }
+      : {}),
+    ...(queueSelectedId !== undefined && input.engine.moveQueueItem
+      ? { moveSelectedQueueItem: async (direction: "up" | "down") => {
+          const selectedId = queueSelectedIdRef.current;
+          if (selectedId === undefined) return;
+          try {
+            const moved = await input.engine.moveQueueItem?.(selectedId, direction);
+            if (!moved) throw new Error(`item ${selectedId} cannot move ${direction}`);
+            setQueueActionError(undefined);
+          } catch (error) {
+            setQueueActionError(error instanceof Error ? error.message : String(error));
+          }
+        } }
+      : {}),
+    ...(input.engine.clearQueueItems
+      ? { clearQueueItems: async () => {
+          try {
+            await input.engine.clearQueueItems?.();
+            setQueueActionError(undefined);
+          } catch (error) {
+            setQueueActionError(error instanceof Error ? error.message : String(error));
+          }
+        } }
+      : {}),
+    ...(input.engine.resumeQueueItems
+      ? { resumeQueueItems: async () => {
+          try {
+            await input.engine.resumeQueueItems?.();
+            setQueueActionError(undefined);
+          } catch (error) {
+            setQueueActionError(error instanceof Error ? error.message : String(error));
+          }
+        } }
+      : {}),
+    ...(queueSelectedId !== undefined && input.engine.retryQueueItem
+      ? { retrySelectedQueueItem: async () => {
+          const selectedId = queueSelectedIdRef.current;
+          if (selectedId === undefined) return;
+          try {
+            const retried = await input.engine.retryQueueItem?.(selectedId);
+            if (!retried) throw new Error(`item ${selectedId} cannot be retried`);
+            setQueueActionError(undefined);
+          } catch (error) {
+            setQueueActionError(error instanceof Error ? error.message : String(error));
+          }
+        } }
+      : {}),
+    ...(queueSelectedId !== undefined && input.engine.discardQueueItem
+      ? { discardSelectedQueueItem: async () => {
+          const selectedId = queueSelectedIdRef.current;
+          if (selectedId === undefined) return;
+          try {
+            const discarded = await input.engine.discardQueueItem?.(selectedId);
+            if (!discarded) throw new Error(`item ${selectedId} cannot be discarded`);
+            setQueueActionError(undefined);
+            const fallback = queueItemIds.find((id) => id !== selectedId);
+            queueSelectedIdRef.current = fallback;
+            setQueueSelectedId(fallback);
+          } catch (error) {
+            setQueueActionError(error instanceof Error ? error.message : String(error));
+          }
+        } }
       : {}),
     activePanelTitle: activePanel.title,
     closeSlashPicker: (panelTitle) => {
@@ -1857,13 +2370,18 @@ export function useWorkShellPaneState<
   return {
     inputValue,
     setInputValue,
+    composerResetEpoch,
     engineState,
     /** Task 11 scrollback: entries hidden below the transcript window. */
     transcriptScrollOffset,
+    transcriptReservedRows,
     composerPreview,
-    activePanel,
+    activePanel: presentedActivePanel,
+    queueSelectedId,
     slashSuggestionCount: slashSuggestions.length,
     selectedSlashCommand: selectedSuggestion?.command,
+    decisionSelectedIndex,
+    decisionSelectionActive,
     contextAdviceKeyActionsEnabled: contextAdviceActionsAvailable,
     contextUndoKeyActionsEnabled: contextUndoActionsAvailable,
     contextPinKeyActionsEnabled: contextPinActionsAvailable,

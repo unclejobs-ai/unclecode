@@ -4,6 +4,8 @@ import {
   type AgentConsoleSnapshot,
   type ModeReasoningEffort,
 } from "@unclecode/contracts";
+import type { WorkShellSessionState } from "./work-shell-engine-persistence.js";
+import type { WorkShellDurablePauseCheckpoint } from "./work-shell-engine-persistence.js";
 
 export async function listSessionLines(
   workspaceRoot: string,
@@ -26,13 +28,20 @@ export async function persistWorkShellSessionSnapshot(input: {
   readonly sessionId: string;
   readonly model: string;
   readonly mode: string;
-  readonly state: "running" | "idle" | "requires_action";
+  readonly state: WorkShellSessionState;
   readonly summary: string;
   readonly traceMode?: "minimal" | "verbose" | undefined;
+  readonly uiLocale?: "en" | "ko" | undefined;
   readonly reasoningEffort?: ModeReasoningEffort | undefined;
   readonly lastSubmittedContextReceiptId?: string | undefined;
-  readonly entries?: readonly { readonly role: "system" | "user" | "assistant" | "tool"; readonly text: string }[] | undefined;
+  readonly ownerMutationRevision?: number | undefined;
+  readonly entries?: readonly {
+    readonly id?: string | undefined;
+    readonly role: "system" | "user" | "assistant" | "tool";
+    readonly text: string;
+  }[] | undefined;
   readonly agentConsole?: AgentConsoleSnapshot | undefined;
+  readonly pauseCheckpoint?: WorkShellDurablePauseCheckpoint | undefined;
 }): Promise<void> {
   await runRustCommand(
     ["rust", "session", "persist-json"],
@@ -44,12 +53,15 @@ export async function persistWorkShellSessionSnapshot(input: {
       state: input.state,
       summary: input.summary,
       traceMode: input.traceMode,
+      uiLocale: input.uiLocale,
       reasoningEffort: input.reasoningEffort,
       lastSubmittedContextReceiptId: input.lastSubmittedContextReceiptId,
+      ownerMutationRevision: input.ownerMutationRevision,
       entries: input.entries ?? [],
       ...(input.agentConsole
         ? { agentConsole: createAgentConsoleSnapshot(input.agentConsole) }
         : {}),
+      ...(input.pauseCheckpoint ? { pauseCheckpoint: input.pauseCheckpoint } : {}),
     }),
     input.env ?? process.env,
   );

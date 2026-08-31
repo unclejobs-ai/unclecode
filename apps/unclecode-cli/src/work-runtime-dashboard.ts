@@ -36,10 +36,12 @@ import {
   type CodingAgentTraceEvent,
   type OrchestratedWorkAgentTraceEvent,
   type WorkShellChatEntry,
+  type WorkShellReplaySafePauseCheckpoint,
   type WorkShellReasoningConfig,
   type WorkShellPromptManifestResolver,
 } from "@unclecode/orchestrator";
 import type { WorkShellInteractionBridge } from "@unclecode/orchestrator";
+import type { WorkShellControlEngine } from "@unclecode/server";
 import type {
   OmpAuthCatalogClient,
   ProviderInputAttachment,
@@ -75,9 +77,12 @@ export type StartReplOptions = {
   homeState: TuiShellHomeState;
   sessionId?: string | undefined;
   initialTraceMode?: "minimal" | "verbose" | undefined;
+  initialUiLocale?: "en" | "ko" | undefined;
+  initialUiLocaleLocked?: boolean | undefined;
   initialEntries?: readonly WorkShellChatEntry[] | undefined;
   initialSessionSummary?: string | undefined;
   initialAgentConsole?: AgentConsoleSnapshot | undefined;
+  initialPauseCheckpoint?: WorkShellReplaySafePauseCheckpoint | undefined;
   initialLastSubmittedContextReceiptId?: string | undefined;
   interactionBridge?: WorkShellInteractionBridge | undefined;
   reloadWorkspaceContext?: ((cwd: string) => Promise<readonly string[]>) | undefined;
@@ -136,6 +141,8 @@ export type StartReplOptions = {
   refreshCondensedHistory?: (() => Promise<void>) | undefined;
   memoryLineage?: MemoryLineageAdapter | undefined;
   promoteScopedMemory?: ((input: PromoteScopedMemoryInput) => Promise<{ memoryId: string }>) | undefined;
+  /** Same-process attachment for the loopback web control room. */
+  onWorkShellEngineReady?: ((engine: WorkShellControlEngine & { getSessionId(): string }) => void) | undefined;
 };
 
 type StartReplTraceEvent =
@@ -178,8 +185,12 @@ export function createManagedDashboardInput(
     userHomeDir?: string;
   },
 ) {
+  const onEngineReady = session.options.onWorkShellEngineReady
+    ? oncePerEngine(session.options.onWorkShellEngineReady)
+    : undefined;
   return {
     homeState: session.options.homeState,
+    ...(onEngineReady ? { onEngineReady } : {}),
     ...(session.options.refreshHomeState
       ? { refreshHomeState: session.options.refreshHomeState }
       : {}),
@@ -217,7 +228,8 @@ export function createManagedDashboardInput(
       formatInlineCommandResultSummary,
       formatAgentTraceLine: (
         event: ExecutionTraceEvent | { readonly type: "bridge.published" | "memory.written"; readonly [key: string]: unknown },
-      ) => formatAgentTraceLine(event as ExecutionTraceEvent),
+        uiLocale?: "en" | "ko",
+      ) => formatAgentTraceLine(event as ExecutionTraceEvent, uiLocale),
       formatWorkShellError,
       listProjectBridgeLines,
       listScopedMemoryLines,
@@ -348,5 +360,14 @@ export function createManagedDashboardInput(
     getReasoningLabel: describeReasoning,
     isReasoningSupported: (reasoning: WorkShellReasoningConfig) =>
       reasoning.support.status === "supported",
+  };
+}
+
+function oncePerEngine<T extends object>(callback: (engine: T) => void): (engine: T) => void {
+  const attached = new WeakSet<T>();
+  return (engine) => {
+    if (attached.has(engine)) return;
+    callback(engine);
+    attached.add(engine);
   };
 }

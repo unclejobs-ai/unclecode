@@ -1,4 +1,5 @@
 import { explainUncleCodeConfig } from "@unclecode/config-core";
+import { createInstrumentedLruCache, type CacheTelemetrySnapshot } from "@unclecode/contracts";
 import { isModeReasoningEffort } from "@unclecode/contracts";
 import {
   type ModeProfileId,
@@ -18,19 +19,30 @@ import { runRustCommand, runRustCommandSync } from "./rust-command.js";
 
 loadEnv({ quiet: true });
 
-const providerSchema = z.enum(["anthropic", "gemini", "openai"]);
+const providerSchema = z.enum(["anthropic", "gemini", "openai", "deepseek"]);
+
+const DEEPSEEK_DEFAULT_ENDPOINT = "https://api.deepseek.com/chat/completions";
 
 const envSchema = z.object({
   LLM_PROVIDER: providerSchema.default("openai"),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().min(1).default("gpt-5.6-sol"),
+  DEEPSEEK_API_KEY: z.string().optional(),
+  DEEPSEEK_MODEL: z.string().min(1).default("deepseek-chat"),
+  DEEPSEEK_BASE_URL: z.string().optional(),
   ANTHROPIC_API_KEY: z.string().optional(),
   ANTHROPIC_MODEL: z.string().min(1).default("claude-sonnet-4-20250514"),
   GEMINI_API_KEY: z.string().optional(),
   GEMINI_MODEL: z.string().min(1).default("gemini-2.5-flash"),
 });
 
-const appReasoningConfigCache = new Map<string, AppReasoningConfig>();
+const APP_REASONING_CACHE_MAX_ENTRIES = 64;
+const APP_REASONING_CACHE_MAX_RETAINED_BYTES = 256 * 1024;
+const appReasoningConfigCache = createInstrumentedLruCache<string, AppReasoningConfig>({
+  name: "orchestrator-app-reasoning-config",
+  maxEntries: APP_REASONING_CACHE_MAX_ENTRIES,
+  maxRetainedBytes: APP_REASONING_CACHE_MAX_RETAINED_BYTES,
+});
 
 export type AppReasoningConfig = {
   effort: ModeReasoningEffort | "unsupported";
@@ -48,13 +60,25 @@ export type AppConfig = {
   openAIRuntime?: "api" | "codex";
   openAIAccountId?: string | null;
   authIssueMessage?: string;
+  baseUrl?: string;
 };
+
+function resolveDeepSeekEndpoint(baseUrl: string | undefined): string {
+  const normalized = baseUrl?.trim().replace(/\/+$/, "");
+  if (!normalized) {
+    return DEEPSEEK_DEFAULT_ENDPOINT;
+  }
+  return /\/chat\/completions$/i.test(normalized)
+    ? normalized
+    : `${normalized}/chat/completions`;
+}
 
 function resolveReasoningConfig(input: {
   provider: ProviderId;
   model: string;
   mode: ModeProfileId;
   override?: ModeReasoningEffort;
+  env: NodeJS.ProcessEnv;
 }): AppReasoningConfig {
   const cacheKey = JSON.stringify({
     provider: input.provider,
@@ -62,9 +86,9 @@ function resolveReasoningConfig(input: {
     mode: input.mode,
     override: input.override ?? null,
   });
-  const cached = appReasoningConfigCache.get(cacheKey);
-  if (cached) {
-    return cached;
+  const cached = appReasoningConfigCache.lookup(cacheKey);
+  if (cached.hit) {
+    return cached.value;
   }
   const raw = runRustCommandSync(
     [
@@ -77,6 +101,8 @@ function resolveReasoningConfig(input: {
       input.override ?? "-",
     ],
     process.cwd(),
+    undefined,
+    input.env,
   ).trim();
   const parsed = JSON.parse(raw) as unknown;
   if (!isAppReasoningConfig(parsed)) {
@@ -84,6 +110,10 @@ function resolveReasoningConfig(input: {
   }
   appReasoningConfigCache.set(cacheKey, parsed);
   return parsed;
+}
+
+export function getAppReasoningConfigCacheTelemetrySnapshot(): CacheTelemetrySnapshot {
+  return appReasoningConfigCache.snapshot();
 }
 
 function isAppReasoningConfig(value: unknown): value is AppReasoningConfig {
@@ -204,9 +234,12 @@ export async function loadConfig(
     reasoning?: ModeReasoningEffort;
     readOpenAiAuthFile?: () => Promise<string>;
     allowProblematicOpenAIAuth?: boolean;
+    /** Complete environment override for deterministic embedding/bootstrap callers. */
+    env?: NodeJS.ProcessEnv;
   },
 ): Promise<AppConfig> {
-  const parsed = envSchema.safeParse(process.env);
+  const env = overrides?.env ?? process.env;
+  const parsed = envSchema.safeParse(env);
   if (!parsed.success) {
     const message = parsed.error.issues.map((issue) => issue.message).join(", ");
     throw new Error(message);
@@ -215,17 +248,18 @@ export async function loadConfig(
   const workspaceRoot = overrides?.cwd ?? process.cwd();
   const mode = explainUncleCodeConfig({
     workspaceRoot,
-    env: process.env,
+    env,
     pluginOverlays: loadExtensionConfigOverlays({
       workspaceRoot,
-      ...(process.env.HOME ? { userHomeDir: process.env.HOME } : {}),
+      env,
+      ...(env.HOME ? { userHomeDir: env.HOME } : {}),
     }),
   }).activeMode.id;
 
   if (provider === "openai") {
     const auth = await resolveOpenAIAuthForConfig({
       cwd: workspaceRoot,
-      env: process.env,
+      env,
       ...(overrides?.readOpenAiAuthFile
         ? { readOpenAiAuthFile: overrides.readOpenAiAuthFile }
         : {}),
@@ -260,6 +294,7 @@ export async function loadConfig(
           provider,
           model,
           mode,
+          env,
           ...(overrides?.reasoning ? { override: overrides.reasoning } : {}),
         }),
       };
@@ -280,6 +315,7 @@ export async function loadConfig(
           provider,
           model,
           mode,
+          env,
           ...(overrides?.reasoning ? { override: overrides.reasoning } : {}),
         }),
         authIssueMessage:
@@ -298,6 +334,23 @@ export async function loadConfig(
     );
   }
 
+  if (provider === "deepseek") {
+    const apiKey = parsed.data.DEEPSEEK_API_KEY?.trim();
+    if (!apiKey) {
+      throw new Error("DEEPSEEK_API_KEY is required when LLM_PROVIDER=deepseek");
+    }
+    const model = overrides?.model ?? parsed.data.DEEPSEEK_MODEL;
+    return {
+      provider,
+      apiKey,
+      model,
+      mode,
+      authLabel: "env-key",
+      baseUrl: resolveDeepSeekEndpoint(parsed.data.DEEPSEEK_BASE_URL),
+      reasoning: resolveReasoningConfig({ provider, model, mode, env }),
+    };
+  }
+
   if (provider === "gemini") {
     const apiKey = parsed.data.GEMINI_API_KEY?.trim();
     if (!apiKey) {
@@ -310,7 +363,7 @@ export async function loadConfig(
       model,
       mode,
       authLabel: "env-key",
-      reasoning: resolveReasoningConfig({ provider, model, mode }),
+      reasoning: resolveReasoningConfig({ provider, model, mode, env }),
     };
   }
 
@@ -326,6 +379,6 @@ export async function loadConfig(
     model,
     mode,
     authLabel: "env-key",
-    reasoning: resolveReasoningConfig({ provider, model, mode }),
+    reasoning: resolveReasoningConfig({ provider, model, mode, env }),
   };
 }

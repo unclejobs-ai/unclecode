@@ -15,8 +15,10 @@
     { "path": "../../packages/mcp-host" },
     { "path": "../../packages/orchestrator" },
     { "path": "../../packages/pi-bridge" },
+    { "path": "../../packages/plugin-host" },
     { "path": "../../packages/providers" },
     { "path": "../../packages/runtime-broker" },
+    { "path": "../unclecode-server" },
     { "path": "../../packages/session-store" },
     { "path": "../../packages/tui" }
   ]

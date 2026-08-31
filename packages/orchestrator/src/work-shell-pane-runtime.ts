@@ -38,8 +38,9 @@ export function createWorkShellPaneRuntime<
       input.options.provider === "openai"
       || input.options.provider === "anthropic"
       || input.options.provider === "gemini"
+      || input.options.provider === "deepseek"
         ? {
-            provider: input.options.provider as "openai" | "anthropic" | "gemini",
+            provider: input.options.provider as "openai" | "anthropic" | "gemini" | "deepseek",
           }
         : {}
     ),

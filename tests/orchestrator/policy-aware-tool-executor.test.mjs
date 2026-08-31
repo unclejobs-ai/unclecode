@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createPolicyAwareToolExecutor } from "@unclecode/orchestrator";
+import {
+  createCanonicalPermissionRuleStore,
+  createPolicyAwareToolExecutor,
+  resolveModeExecutionPolicyProfile,
+} from "@unclecode/orchestrator";
 
 function toolDefinition(name, mode, kind) {
   return {
@@ -157,6 +161,214 @@ test("risky tool metadata requires confirmation even when execution policy defau
   assert.match(result.content, /confirmation.*not granted/i);
 });
 
+test("one-shot shell actions require fresh approval despite autonomy and a bash grant", async () => {
+  const commands = [
+    "git ls-files",
+    "git config --get core.fsmonitor",
+    "git push origin main",
+    "git switch main && git merge feature/release-safety",
+    "npm publish --access public",
+    "npm --workspace @scope/package publish",
+    "pnpm --filter web publish",
+    "pnpm run deploy",
+    "gh release create v1.2.3",
+    "gh --repo owner/project pr merge 42 --merge",
+    "glab mr merge 42",
+    "hub merge feature/release-safety",
+    "git send-pack origin HEAD:refs/heads/main",
+    "vercel deploy --prod",
+    "bash -c 'git push origin main'",
+    "sh -c 'gh pr merge 42 --merge'",
+    "sh -c -- 'git push origin main'",
+    "command exec gh pr merge 42 --merge",
+    "command env git push origin main",
+    "env command env git push origin main",
+    "git pu\\\nsh origin main",
+    "gh p\\\nr merge 42 --merge",
+    "git push origin main",
+  ];
+  const invoked = [];
+  const questions = [];
+  const store = createCanonicalPermissionRuleStore([{ kind: "tool", key: "bash" }]);
+  const executor = createPolicyAwareToolExecutor({
+    definitions: DEFINITIONS,
+    handlers: {
+      ...createRecordingHandlers([]),
+      run_shell: async (input) => {
+        invoked.push(input.command);
+        return { content: "release-action-ran" };
+      },
+    },
+    policyProfile: resolveModeExecutionPolicyProfile({ mode: "yolo", envShellOptIn: false }),
+    runtimeMode: "yolo",
+    permissionRuleStore: store,
+    interactionBridge: {
+      async ask(request) {
+        questions.push(request);
+        return {
+          status: "answered",
+          answers: [{ id: "policy-confirmation", selectedOptions: ["Approve"] }],
+        };
+      },
+    },
+  });
+
+  for (const command of commands) {
+    const result = await executor.execute({
+      toolName: "run_shell",
+      input: { command },
+      cwd: "/tmp/policy-executor",
+    });
+    assert.equal(result.isError ?? false, false, command);
+  }
+
+  assert.deepEqual(invoked, commands);
+  assert.equal(questions.length, commands.length);
+  assert.ok(questions.every((request) =>
+    request.questions[0].options.every((option) => option.label !== "Always allow")
+  ));
+  questions.forEach((request, index) => {
+    assert.ok(request.questions[0].question.includes(JSON.stringify(commands[index])));
+  });
+  assert.deepEqual(store.list(), [{ kind: "tool", key: "bash" }]);
+});
+
+test("ambiguous shell wrappers fail closed before an autonomy or persisted bash grant", async () => {
+  const commands = [
+    'eval "$RELEASE_COMMAND"',
+    "npm exec -- git push origin main",
+    "npx vercel deploy --prod",
+    "git -c alias.ship='push origin main' ship",
+    "sh ./scripts/ship.sh",
+    "./scripts/ship.sh",
+    "npm run ship",
+    "make ship",
+    "yarn deploy",
+    "vercel --prod",
+    `node -e "require('node:child_process').execSync('git push origin main')"`,
+    `node --eval="require('node:child_process').execSync('git push origin main')"`,
+    `python -c "import os; os.system('gh pr merge 42 --merge')"`,
+    `python3.12 -c "import os; os.system('git push origin main')"`,
+    "node scripts/release.js",
+    "python scripts/deploy.py",
+    "git ship",
+    "gh api --method PUT repos/o/r/pulls/42/merge",
+    "glab api projects/1/releases --method POST",
+    "npm test",
+    "npm run build",
+    "pnpm run lint",
+    "cargo check --workspace",
+    "make test",
+    "GIT_EXTERNAL_DIFF=./scripts/ship git diff",
+    "git commit -m local",
+    "git fetch origin",
+    "docker run --rm alpine true",
+    "podman rm release-container",
+    "kubectl get secrets",
+    "helm list",
+    "gh issue create --title release",
+    "gh workflow run deploy.yml",
+    "glab issue create --title release",
+    "hub issue create -m release",
+    "vercel env rm API_KEY production",
+    "wrangler secret delete API_KEY",
+    "git status --short",
+    "git diff --stat",
+    "git config core.fsmonitor ./scripts/fsmonitor",
+    "git ls-files",
+    "git config --get core.fsmonitor",
+    "git rev-parse --show-toplevel",
+    "git ls-tree HEAD",
+    "git merge-base HEAD main",
+    "git name-rev HEAD",
+    "git log --ext-diff -p",
+    "git show --ext-diff HEAD",
+    "git grep --textconv needle",
+    "git archive --format=custom HEAD",
+    "git reset --hard HEAD",
+    "git --paginate ls-files",
+    "tar --checkpoint-action=exec=./scripts/publish -cf out.tar .",
+    "tar --checkpoint-act=exec=./scripts/publish -cf out.tar .",
+    "tar --to-command=./scripts/upload -xf artifact.tar",
+    "tar -I ./scripts/compress -cf artifact.tar src",
+    "tar cfI artifact.tar ./scripts/compress src",
+    "tar -cf out.tar -T options.txt",
+    "tar --files-from=options.txt -cf out.tar",
+    "tar -cfT out.tar options.txt",
+    "tar cfT out.tar options.txt",
+    "env TAR_OPTIONS=--files-from=options.txt tar -cf out.tar src",
+    "printf ok > output.txt",
+    "rg TODO src/*.ts",
+  ];
+  const invoked = [];
+  const executor = createPolicyAwareToolExecutor({
+    definitions: DEFINITIONS,
+    handlers: createRecordingHandlers(invoked),
+    policyProfile: resolveModeExecutionPolicyProfile({ mode: "ultrawork", envShellOptIn: false }),
+    runtimeMode: "ultrawork",
+    permissionRuleStore: createCanonicalPermissionRuleStore([{ kind: "tool", key: "bash" }]),
+  });
+
+  for (const command of commands) {
+    const result = await executor.execute({
+      toolName: "run_shell",
+      input: { command },
+      cwd: "/tmp/policy-executor",
+    });
+    assert.equal(result.isError, true, command);
+    assert.match(result.content, /not granted.*one-shot confirmation/i, command);
+  }
+
+  assert.deepEqual(invoked, []);
+});
+
+test("autonomy keeps only statically inspectable local shell commands prompt-free", async () => {
+  const commands = [
+    "git --version",
+    "git version",
+    "git -h",
+    "docker --version",
+    "kubectl version --client",
+    "gh --version",
+    "vercel --version",
+    "tsc --noEmit",
+    "rg -n TODO src",
+    'printf "%s\\n" "release notes"',
+  ];
+  const invoked = [];
+  let prompts = 0;
+  const executor = createPolicyAwareToolExecutor({
+    definitions: DEFINITIONS,
+    handlers: {
+      ...createRecordingHandlers([]),
+      run_shell: async (input) => {
+        invoked.push(input.command);
+        return { content: "local-command-ran" };
+      },
+    },
+    policyProfile: resolveModeExecutionPolicyProfile({ mode: "yolo", envShellOptIn: false }),
+    runtimeMode: "yolo",
+    interactionBridge: {
+      async ask() {
+        prompts += 1;
+        return { status: "cancelled" };
+      },
+    },
+  });
+
+  for (const command of commands) {
+    const result = await executor.execute({
+      toolName: "run_shell",
+      input: { command },
+      cwd: "/tmp/policy-executor",
+    });
+    assert.equal(result.isError ?? false, false, command);
+  }
+
+  assert.deepEqual(invoked, commands);
+  assert.equal(prompts, 0);
+});
+
 test("every declared tool resource must be authorized before dispatch", async () => {
   const invoked = [];
   const definition = {
@@ -231,4 +443,253 @@ test("one approval prompts once and invokes a risky handler once", async () => {
   assert.equal(result.isError ?? false, false);
   assert.deepEqual(invoked, ["write_file"]);
   assert.equal(questions.length, 1);
+});
+
+test("sequential same-scope approvals receive distinct per-call decision identities", async () => {
+  const decisionIds = [];
+  const executor = createPolicyAwareToolExecutor({
+    definitions: DEFINITIONS,
+    handlers: createRecordingHandlers([]),
+    policyProfile: { id: "test.default-allow", mode: "enforce", defaultEffect: "allow", rules: [] },
+    runtimeMode: "default",
+    interactionBridge: {
+      async ask(request) {
+        decisionIds.push(request.id);
+        return { status: "cancelled" };
+      },
+    },
+  });
+
+  await executor.execute({
+    toolName: "write_file",
+    input: { path: "a.txt", content: "a" },
+    cwd: "/tmp/policy-executor",
+  });
+  await executor.execute({
+    toolName: "write_file",
+    input: { path: "b.txt", content: "b" },
+    cwd: "/tmp/policy-executor",
+  });
+
+  assert.equal(decisionIds.length, 2);
+  assert.notEqual(decisionIds[0], decisionIds[1]);
+  assert.ok(decisionIds.every(decisionId => /^[A-Za-z0-9._:-]{1,160}$/.test(decisionId)));
+});
+
+test("concurrent always-allow prompts once, stores one canonical rule, and authorizes the next action", async () => {
+  const invoked = [];
+  const questions = [];
+  const store = createCanonicalPermissionRuleStore();
+  const executor = createPolicyAwareToolExecutor({
+    definitions: DEFINITIONS,
+    handlers: createRecordingHandlers(invoked),
+    policyProfile: { id: "test.default-allow", mode: "enforce", defaultEffect: "allow", rules: [] },
+    runtimeMode: "default",
+    permissionRuleStore: store,
+    interactionBridge: {
+      async ask(request) {
+        questions.push(request);
+        return {
+          status: "answered",
+          answers: [{ id: "policy-confirmation", selectedOptions: ["Always allow"] }],
+        };
+      },
+    },
+  });
+
+  const request = (command) => executor.execute({
+    toolName: "run_shell",
+    input: { command },
+    cwd: "/tmp/policy-executor",
+  });
+  await Promise.all([request("echo one"), request("echo two")]);
+  await request("echo three");
+
+  assert.equal(questions.length, 1);
+  assert.match(questions[0].title, /Security approval · bash/);
+  assert.deepEqual(store.list(), [{ kind: "tool", key: "bash" }]);
+  assert.deepEqual(invoked, ["run_shell", "run_shell", "run_shell"]);
+});
+
+test("concurrent approve-once authorizes only the prompt owner and re-prompts the waiter", async () => {
+  const invoked = [];
+  const prompts = [];
+  const answers = [];
+  const executor = createPolicyAwareToolExecutor({
+    definitions: DEFINITIONS,
+    handlers: {
+      ...createRecordingHandlers(invoked),
+      write_file: async (input) => {
+        invoked.push(input.path);
+        return { content: `${input.path}-ran` };
+      },
+    },
+    policyProfile: { id: "test.default-allow", mode: "enforce", defaultEffect: "allow", rules: [] },
+    runtimeMode: "default",
+    interactionBridge: {
+      ask(request) {
+        prompts.push(request);
+        return new Promise((resolve) => answers.push(resolve));
+      },
+    },
+  });
+
+  const first = executor.execute({
+    toolName: "write_file",
+    input: { path: "a.txt", content: "a" },
+    cwd: "/tmp/policy-executor",
+  });
+  const second = executor.execute({
+    toolName: "write_file",
+    input: { path: "b.txt", content: "b" },
+    cwd: "/tmp/policy-executor",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(prompts.length, 1);
+  answers.shift()({
+    status: "answered",
+    answers: [{ id: "policy-confirmation", selectedOptions: ["Approve"] }],
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(invoked, ["a.txt"]);
+  assert.equal(prompts.length, 2);
+  answers.shift()({
+    status: "answered",
+    answers: [{ id: "policy-confirmation", selectedOptions: ["Approve"] }],
+  });
+  await Promise.all([first, second]);
+  assert.deepEqual(invoked, ["a.txt", "b.txt"]);
+});
+
+test("aborting an approval owner releases a waiter to re-prompt without stale execution", async () => {
+  const invoked = [];
+  const prompts = [];
+  const answers = [];
+  const executor = createPolicyAwareToolExecutor({
+    definitions: DEFINITIONS,
+    handlers: {
+      ...createRecordingHandlers(invoked),
+      write_file: async (input) => {
+        invoked.push(input.path);
+        return { content: `${input.path}-ran` };
+      },
+    },
+    policyProfile: { id: "test.default-allow", mode: "enforce", defaultEffect: "allow", rules: [] },
+    runtimeMode: "default",
+    interactionBridge: {
+      ask(request, signal) {
+        prompts.push(request);
+        return new Promise((resolve) => {
+          answers.push(resolve);
+          signal?.addEventListener("abort", () => resolve({ status: "cancelled" }), { once: true });
+        });
+      },
+    },
+  });
+  const ownerController = new AbortController();
+  const owner = executor.execute({
+    toolName: "write_file",
+    input: { path: "owner.txt", content: "a" },
+    cwd: "/tmp/policy-executor",
+    signal: ownerController.signal,
+  });
+  const waiter = executor.execute({
+    toolName: "write_file",
+    input: { path: "waiter.txt", content: "b" },
+    cwd: "/tmp/policy-executor",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  ownerController.abort();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(prompts.length, 2);
+  answers.at(-1)({
+    status: "answered",
+    answers: [{ id: "policy-confirmation", selectedOptions: ["Approve"] }],
+  });
+  const [ownerResult, waiterResult] = await Promise.all([owner, waiter]);
+  assert.equal(ownerResult.isError, true);
+  assert.equal(waiterResult.isError ?? false, false);
+  assert.deepEqual(invoked, ["waiter.txt"]);
+});
+
+test("aborting an approval waiter does not cancel the owner or consume its once result", async () => {
+  const invoked = [];
+  const prompts = [];
+  let resolveOwner;
+  const executor = createPolicyAwareToolExecutor({
+    definitions: DEFINITIONS,
+    handlers: {
+      ...createRecordingHandlers(invoked),
+      write_file: async (input) => {
+        invoked.push(input.path);
+        return { content: `${input.path}-ran` };
+      },
+    },
+    policyProfile: { id: "test.default-allow", mode: "enforce", defaultEffect: "allow", rules: [] },
+    runtimeMode: "default",
+    interactionBridge: {
+      ask(request) {
+        prompts.push(request);
+        return new Promise((resolve) => { resolveOwner = resolve; });
+      },
+    },
+  });
+  const waiterController = new AbortController();
+  const owner = executor.execute({
+    toolName: "write_file",
+    input: { path: "owner.txt", content: "a" },
+    cwd: "/tmp/policy-executor",
+  });
+  const waiter = executor.execute({
+    toolName: "write_file",
+    input: { path: "waiter.txt", content: "b" },
+    cwd: "/tmp/policy-executor",
+    signal: waiterController.signal,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  waiterController.abort();
+  resolveOwner({
+    status: "answered",
+    answers: [{ id: "policy-confirmation", selectedOptions: ["Approve"] }],
+  });
+  const [ownerResult, waiterResult] = await Promise.all([owner, waiter]);
+
+  assert.equal(ownerResult.isError ?? false, false);
+  assert.equal(waiterResult.isError, true);
+  assert.equal(prompts.length, 1);
+  assert.deepEqual(invoked, ["owner.txt"]);
+});
+
+test("an approval resolved after abort is stale and never starts execution", async () => {
+  const invoked = [];
+  let resolveAnswer;
+  const executor = createPolicyAwareToolExecutor({
+    definitions: DEFINITIONS,
+    handlers: createRecordingHandlers(invoked),
+    policyProfile: { id: "test.default-allow", mode: "enforce", defaultEffect: "allow", rules: [] },
+    runtimeMode: "default",
+    interactionBridge: {
+      ask() {
+        return new Promise((resolve) => { resolveAnswer = resolve; });
+      },
+    },
+  });
+  const controller = new AbortController();
+  const pending = executor.execute({
+    toolName: "write_file",
+    input: { path: "late.txt", content: "late" },
+    cwd: "/tmp/policy-executor",
+    signal: controller.signal,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.abort();
+  resolveAnswer({
+    status: "answered",
+    answers: [{ id: "policy-confirmation", selectedOptions: ["Approve"] }],
+  });
+  const result = await pending;
+  assert.equal(result.isError, true);
+  assert.deepEqual(invoked, []);
 });

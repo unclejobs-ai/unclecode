@@ -182,6 +182,11 @@ test("empty conversation renders the starter prompts and the opener hint", async
       assert.match(frame, new RegExp(`${index + 1}  ${prompt}`));
     }
     assert.match(frame, /\/ commands · @ attach a file · ! shell · \? keys/);
+    assert.doesNotMatch(
+      frame,
+      /(?:Tweet|X\.com|embed (?:a )?(?:tweet|post)|Vite \+ React)/i,
+      "UncleCode starter chrome must not inherit social/embed template copy",
+    );
     // `? keys` is advertised with its binding in place; Ctrl+O never shows.
     assert.doesNotMatch(frame, /Ctrl\+O/);
   } finally {
@@ -305,7 +310,7 @@ test("WORK_SHELL_WORDMARK is a rectangular, ASCII-only block of 4-7 rows", () =>
   }
 });
 
-async function renderEmptyShellFrame(terminalColumns) {
+async function renderEmptyShellFrame(terminalColumns, terminalRows = 40) {
   const { instance, getOutput } = renderDebugFrame(
     React.createElement(WorkShellView, {
       provider: "openai",
@@ -321,8 +326,10 @@ async function renderEmptyShellFrame(terminalColumns) {
       inputValue: "",
       slashSuggestionCount: 0,
       terminalColumns,
+      terminalRows,
+      cwd: "/Users/parkeungje/project/unclecode",
     }),
-    { columns: terminalColumns, rows: 40 },
+    { columns: terminalColumns, rows: terminalRows },
   );
   const output = await waitForSettledFrame(getOutput);
   instance.unmount();
@@ -352,6 +359,7 @@ test("wide empty conversation renders the wordmark above the starter block", asy
     assert.ok(frame.includes(`${index + 1}  ${prompt}`));
   }
   assert.match(frame, /\/ commands · @ attach a file · ! shell · \? keys/);
+  assert.doesNotMatch(frame, /(?:Tweet|X\.com|embed (?:a )?(?:tweet|post)|Vite \+ React)/i);
 });
 
 test("narrow empty conversation skips the wordmark and keeps the text block", async () => {
@@ -375,4 +383,27 @@ test("narrow empty conversation skips the wordmark and keeps the text block", as
   assert.match(frame, /● Ready for the next move/);
   assert.match(frame, /1  Explain this/);
   assert.match(frame, /\/ commands/);
+});
+
+test("small empty frames never render a partial wordmark or overflow the dock", async () => {
+  for (const terminalRows of [8, 12, 18]) {
+    const frame = await renderEmptyShellFrame(100, terminalRows);
+    const renderedWordmarkRows = WORK_SHELL_WORDMARK.filter((row) =>
+      row.trim().length > 0 && frame.includes(row.trimEnd()));
+    assert.equal(
+      renderedWordmarkRows.length,
+      0,
+      `${terminalRows}-row empty frame must omit the wordmark as one unit`,
+    );
+    assert.match(frame, /● Ready for the next move/u);
+    const rows = frame.split("\n");
+    assert.ok(rows.length <= terminalRows, `${terminalRows}-row empty frame overflowed: ${JSON.stringify(rows)}`);
+    assert.ok(rows.some((line) => line.includes("›")), `${terminalRows}-row empty frame lost the prompt`);
+    assert.ok(rows.some((line) => /unclecode/u.test(line)), `${terminalRows}-row empty frame lost the footer`);
+  }
+
+  const roomyFrame = await renderEmptyShellFrame(100, 24);
+  for (const row of WORK_SHELL_WORDMARK) {
+    assert.ok(roomyFrame.includes(row.trimEnd()), "roomy empty frame should retain the complete wordmark");
+  }
 });

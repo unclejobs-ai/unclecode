@@ -188,3 +188,42 @@ test("createAgentOpsRecorder: finish with unknown status maps to 'completed' or 
     db.close();
   }
 });
+
+test("createAgentOpsRecorder: records bounded evolution metadata without candidate content", () => {
+  const home = makeTempHome();
+  const recorder = createAgentOpsRecorder({ workspaceRoot: "/tmp/test-evolution-event", home });
+  recorder.recordEvolutionProposal({
+    id: "evolution-1",
+    runId: "quality-run-1",
+    candidateId: "candidate-1",
+    state: "pr-ready",
+    creatorId: "creator-1",
+    evaluatorId: "evaluator-1",
+    attestorId: "attestor-1",
+    humanApproval: "pending",
+    stale: false,
+    hashes: { candidateArtifact: "sha256:candidate", suite: "sha256:suite" },
+    artifactRefs: [".unclecode/artifacts/quality-run-1/evolution-proposal.json"],
+    cleanupStatus: "retained",
+    summary: `Bearer sk-evolution-secret ${"x".repeat(1_000)}`,
+  });
+  recorder.finish("completed");
+
+  const db = new DatabaseSync(recorder.dbPath);
+  try {
+    const event = db.prepare(
+      "SELECT message, metadata_json FROM events WHERE event_type = 'evolution.proposed' LIMIT 1",
+    ).get();
+    assert.ok(event);
+    assert.ok(event.message.length <= 240);
+    assert.doesNotMatch(event.message, /sk-evolution-secret/);
+    const metadata = JSON.parse(event.metadata_json);
+    assert.equal(metadata.state, "pr-ready");
+    assert.equal(metadata.humanApproval, "pending");
+    assert.equal(metadata.cleanupStatus, "retained");
+    assert.equal(metadata.rawCandidateOutput, undefined);
+    assert.ok(JSON.stringify(metadata).length < 4_000);
+  } finally {
+    db.close();
+  }
+});

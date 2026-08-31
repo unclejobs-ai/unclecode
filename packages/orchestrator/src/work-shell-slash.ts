@@ -36,6 +36,19 @@ const WORK_SHELL_MODE_PROFILE_DESCRIPTIONS: Readonly<Record<(typeof WORK_SHELL_M
 };
 
 const workShellSuggestionEntriesCache = new Map<string, readonly WorkShellSlashSuggestion[]>();
+const WORK_SHELL_SUGGESTION_CACHE_MAX_ENTRIES = 32;
+
+function cacheSuggestions(
+  cache: Map<string, readonly WorkShellSlashSuggestion[]>,
+  key: string,
+  value: readonly WorkShellSlashSuggestion[],
+): void {
+  if (cache.has(key)) cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > WORK_SHELL_SUGGESTION_CACHE_MAX_ENTRIES) {
+    cache.delete(cache.keys().next().value as string);
+  }
+}
 
 function getWorkShellCommandRegistry(
   options?: WorkShellSlashOptions,
@@ -49,6 +62,8 @@ const WORK_SHELL_QUICK_PICK_COMMANDS = [
   "/agents",
   "/jobs",
   "/todo",
+  "/review",
+  "/policy",
   "/model",
   "/auth status",
   "/queue",
@@ -58,12 +73,28 @@ const WORK_SHELL_QUICK_PICK_COMMANDS = [
 
 const WORK_SHELL_EXTRA_SUGGESTION_ENTRIES = [
   {
+    command: "/policy",
+    description: "Show canonical session security approval rules and effective scopes.",
+  },
+  {
     command: "/auth key",
     description: "Open secure API key entry in this shell.",
   },
   {
     command: "/queue",
-    description: "Show the current shell queue and active work state.",
+    description: "Manage ordered user follow-ups after the active turn.",
+  },
+  {
+    command: "/queue remove",
+    description: "Remove one queued follow-up by stable id.",
+  },
+  {
+    command: "/queue move",
+    description: "Move one queued follow-up up or down.",
+  },
+  {
+    command: "/queue resume",
+    description: "Resume follow-up execution after an interrupt.",
   },
   {
     command: "/interrupt",
@@ -131,7 +162,7 @@ export function listWorkShellSlashSuggestionEntries(
     ]),
     ...WORK_SHELL_EXTRA_SUGGESTION_ENTRIES,
   ];
-  workShellSuggestionEntriesCache.set(cacheKey, entries);
+  cacheSuggestions(workShellSuggestionEntriesCache, cacheKey, entries);
   return entries;
 }
 
@@ -263,10 +294,10 @@ function getModelSuggestions(
   ) as unknown;
   if (!Array.isArray(parsed) || !parsed.every(isSlashSuggestion)) {
     const fallback = [{ command: `/model ${currentModel}`, description: "Current model" }];
-    workShellModelSuggestionCache.set(cacheKey, fallback);
+    cacheSuggestions(workShellModelSuggestionCache, cacheKey, fallback);
     return filterModelSuggestions(fallback, normalized);
   }
-  workShellModelSuggestionCache.set(cacheKey, parsed);
+  cacheSuggestions(workShellModelSuggestionCache, cacheKey, parsed);
   return filterModelSuggestions(parsed, normalized);
 }
 

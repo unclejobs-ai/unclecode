@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
 
 import type {
+  CacheTelemetrySnapshot,
   ClipboardImageAttachment,
   ExecutionTraceEvent,
   ModeReasoningEffort,
   ToolMetadata,
 } from "@unclecode/contracts";
+import { createInstrumentedLruCache } from "@unclecode/contracts";
 
 import { estimateCostUsd } from "./model-pricing.js";
 import { runRustCommand, runRustCommandSync } from "./rust-command.js";
@@ -45,9 +47,43 @@ export type ProviderToolTraceEvent = Extract<
 export type ProviderInputAttachment = ClipboardImageAttachment;
 
 let cachedProviderToolLoopMax: number | undefined;
-const runtimeReasoningEffortCache = new Map<string, string | undefined>();
-const providerSystemPromptCache = new Map<string, string>();
-const providerToolPolicyCache = new Map<string, ProviderToolPolicy>();
+const PROVIDER_DERIVATION_CACHE_MAX_ENTRIES = 64;
+const runtimeReasoningEffortCache = createInstrumentedLruCache<string, string | undefined>({
+  name: "provider-reasoning-effort",
+  maxEntries: PROVIDER_DERIVATION_CACHE_MAX_ENTRIES,
+  maxRetainedBytes: 64 * 1024,
+  estimateEntryBytes: (key, value) => 64 + (key.length + (value?.length ?? 0)) * 2,
+});
+const providerSystemPromptCache = createInstrumentedLruCache<string, string>({
+  name: "provider-system-prompt",
+  maxEntries: PROVIDER_DERIVATION_CACHE_MAX_ENTRIES,
+  maxRetainedBytes: 2 * 1024 * 1024,
+  estimateEntryBytes: (key, value) => 64 + (key.length + value.length) * 2,
+});
+const providerToolPolicyCache = createInstrumentedLruCache<string, ProviderToolPolicy>({
+  name: "provider-tool-policy",
+  maxEntries: PROVIDER_DERIVATION_CACHE_MAX_ENTRIES,
+  maxRetainedBytes: 256 * 1024,
+  estimateEntryBytes: (key) => 128 + key.length * 2,
+});
+
+export function getProviderCacheTelemetrySnapshot(): readonly CacheTelemetrySnapshot[] {
+  return [
+    runtimeReasoningEffortCache.snapshot(),
+    providerSystemPromptCache.snapshot(),
+    providerToolPolicyCache.snapshot(),
+  ];
+}
+
+export function invalidateProviderSystemPromptCache(appendix?: string): boolean {
+  return providerSystemPromptCache.invalidate(createProviderSystemPromptCacheKey(appendix));
+}
+
+export function invalidateProviderDerivationCaches(): number {
+  return runtimeReasoningEffortCache.invalidateAll()
+    + providerSystemPromptCache.invalidateAll()
+    + providerToolPolicyCache.invalidateAll();
+}
 
 export function applyProviderAttachmentCaps(
   attachments: readonly ProviderInputAttachment[],
@@ -71,8 +107,8 @@ export type ProviderTurnOptions = {
   readonly signal?: AbortSignal | undefined;
 };
 
-export type ProviderName = "anthropic" | "gemini" | "openai";
-type RuntimeProviderName = "anthropic" | "gemini" | "openai";
+export type ProviderName = "anthropic" | "gemini" | "openai" | "deepseek";
+type RuntimeProviderName = ProviderName;
 type RuntimeProviderKind = RuntimeProviderName | "unsupported";
 
 type RuntimeProviderDecision = {
@@ -90,8 +126,9 @@ export type RuntimeReasoningConfig = {
 
 function resolveRuntimeReasoningEffort(reasoning: RuntimeReasoningConfig): string | undefined {
   const cacheKey = JSON.stringify(reasoning);
-  if (runtimeReasoningEffortCache.has(cacheKey)) {
-    return runtimeReasoningEffortCache.get(cacheKey);
+  const cached = runtimeReasoningEffortCache.lookup(cacheKey);
+  if (cached.hit) {
+    return cached.value;
   }
   const raw = runRustCommandSync(
     ["rust", "provider", "reasoning-effort"],
@@ -110,17 +147,22 @@ function resolveRuntimeReasoningEffort(reasoning: RuntimeReasoningConfig): strin
   return effort;
 }
 
+function createProviderSystemPromptCacheKey(appendix?: string): string {
+  return createHash("sha256").update(appendix ?? "").digest("hex");
+}
+
 function resolveProviderSystemPrompt(appendix?: string): string {
-  const key = appendix ?? "";
-  const cached = providerSystemPromptCache.get(key);
-  if (cached !== undefined) {
-    return cached;
+  // Keep arbitrary workspace guidance out of a second long-lived string key.
+  const key = createProviderSystemPromptCacheKey(appendix);
+  const cached = providerSystemPromptCache.lookup(key);
+  if (cached.hit) {
+    return cached.value;
   }
   const prompt = runRustCommandSync(
     ["rust", "provider", "system-prompt"],
     process.cwd(),
     process.env,
-    key,
+    appendix ?? "",
   ).trimEnd();
   providerSystemPromptCache.set(key, prompt);
   return prompt;
@@ -142,16 +184,17 @@ function resolveProviderToolPolicy(
   surface: ProviderToolPolicySurface,
   tools: readonly ToolDefinition[],
 ): ProviderToolPolicy {
-  const cacheKey = `${surface}\0${JSON.stringify(tools)}`;
-  const cached = providerToolPolicyCache.get(cacheKey);
-  if (cached) {
-    return cached;
+  const serializedTools = JSON.stringify(tools);
+  const cacheKey = `${surface}\0${createHash("sha256").update(serializedTools).digest("hex")}`;
+  const cached = providerToolPolicyCache.lookup(cacheKey);
+  if (cached.hit) {
+    return cached.value;
   }
   const raw = runRustCommandSync(
     ["rust", "provider", "tool-policy", surface],
     process.cwd(),
     process.env,
-    JSON.stringify(tools),
+    serializedTools,
   ).trim();
   const parsed = JSON.parse(raw) as unknown;
   if (
@@ -396,6 +439,7 @@ export type CreateRuntimeProviderArgs = {
   providerOverride?: LlmProvider;
   openAIRuntime?: "api" | "codex";
   openAIAccountId?: string | null;
+  baseUrl?: string;
 };
 
 const EMPTY_TOOL_RUNTIME: ToolRuntime = {
@@ -483,7 +527,12 @@ type ProviderToolExecutionStart = {
 };
 
 type OpenAIMessage =
-  | { role: "system" | "assistant"; content: string; tool_calls?: unknown[] }
+  | {
+      role: "system" | "assistant";
+      content: string;
+      tool_calls?: unknown[];
+      reasoning_content?: string;
+    }
   | {
       role: "user";
       content:
@@ -511,6 +560,8 @@ export class OpenAIProvider implements LlmProvider {
   private readonly runtime: "api" | "codex";
   private readonly openAIAccountId: string | null;
   private readonly promptCacheKey: string;
+  private readonly providerName: Extract<ProviderName, "openai" | "deepseek">;
+  private readonly endpointUrl: string | undefined;
 
   constructor(args: {
     apiKey: string;
@@ -523,6 +574,8 @@ export class OpenAIProvider implements LlmProvider {
     systemPrompt?: string;
     runtime?: "api" | "codex";
     openAIAccountId?: string | null;
+    providerName?: Extract<ProviderName, "openai" | "deepseek">;
+    endpointUrl?: string;
   }) {
     this.apiKey = args.apiKey;
     this.model = args.model;
@@ -536,13 +589,15 @@ export class OpenAIProvider implements LlmProvider {
     this.runtime = args.runtime ?? "api";
     this.openAIAccountId = args.openAIAccountId ?? null;
     this.promptCacheKey = createOpenAIPromptCacheKey(this.cwd, this.systemPrompt);
+    this.providerName = args.providerName ?? "openai";
+    this.endpointUrl = args.endpointUrl?.trim() || undefined;
   }
 
   updateRuntimeSettings(settings: {
     reasoning?: RuntimeReasoningConfig | undefined;
     model?: string | undefined;
   }): void {
-    const resolved = resolveProviderRuntimeSettings("openai", this.model, this.reasoning, settings);
+    const resolved = resolveProviderRuntimeSettings(this.providerName, this.model, this.reasoning, settings);
     this.model = resolved.model;
     if (resolved.reasoning) {
       this.reasoning = resolved.reasoning;
@@ -550,7 +605,7 @@ export class OpenAIProvider implements LlmProvider {
   }
 
   clear(): void {
-    resetProviderTurnState("openai", this.messages, this.systemPrompt);
+    resetProviderTurnState(this.providerName, this.messages, this.systemPrompt);
   }
 
   setTraceListener(listener?: ProviderTraceListener): void {
@@ -567,6 +622,7 @@ export class OpenAIProvider implements LlmProvider {
     options: ProviderTurnOptions = {},
   ): Promise<{
     content?: string | null;
+    reasoning?: string;
     tool_calls?: Array<{
       id?: string;
       function?: { name?: string; arguments?: string };
@@ -581,28 +637,28 @@ export class OpenAIProvider implements LlmProvider {
     // always wins so fixtures stay deterministic.
     const fetchImpl = this.fetchImpl
       ?? (hasExplicitProxyConfig() ? undefined : resolveGlobalFetchImpl());
+    const requestSpec = this.buildChatRequestSpec();
+    const toolsJson = buildOpenAIChatTools(this.toolRuntime.definitions);
+    const toolPolicy = resolveProviderToolPolicy("openai-chat-live", this.toolRuntime.definitions);
+    const body = buildOpenAIChatBody({
+      model,
+      messagesJson: JSON.stringify(this.messages),
+      toolsJson,
+      includeTools: toolPolicy.includeTools,
+      reasoningEffort: resolveRuntimeReasoningEffort(reasoning),
+      ...(isOfficialOpenAIRequestUrl(requestSpec.url)
+        ? {
+            promptCacheKey: this.promptCacheKey,
+            promptCacheRetention: resolveOpenAIPromptCacheRetention(model),
+          }
+        : {}),
+    });
     let response: OpenAIResponsesHttpResponse | undefined;
     if (fetchImpl) {
-      const requestSpec = buildOpenAIRequestSpec("api", this.apiKey);
-      const toolsJson = buildOpenAIChatTools(this.toolRuntime.definitions);
-      const toolPolicy = resolveProviderToolPolicy("openai-chat-live", this.toolRuntime.definitions);
-      const body = buildOpenAIChatBody({
-        model,
-        messagesJson: JSON.stringify(this.messages),
-        toolsJson,
-        includeTools: toolPolicy.includeTools,
-        reasoningEffort: resolveRuntimeReasoningEffort(reasoning),
-        ...(isOfficialOpenAIRequestUrl(requestSpec.url)
-          ? {
-              promptCacheKey: this.promptCacheKey,
-              promptCacheRetention: resolveOpenAIPromptCacheRetention(model),
-            }
-          : {}),
-      });
       try {
         response = await postOpenAIChatWithLiveStream({
           fetchImpl,
-          url: resolveOpenAIChatUrl(requestSpec.url),
+          url: this.endpointUrl ?? resolveOpenAIChatUrl(requestSpec.url),
           headers: requestSpec.headers,
           body: enableOpenAIChatStreamBody(body),
           model,
@@ -624,37 +680,50 @@ export class OpenAIProvider implements LlmProvider {
     }
 
     if (!response) {
-      const parsed = await runOpenAIChatCompletionWithRustAsync({
-        apiKey: this.apiKey,
-        model,
-        messages: this.messages,
-        tools: this.toolRuntime.definitions,
-        reasoningEffort: resolveRuntimeReasoningEffort(reasoning),
-        signal: options.signal,
-      });
-      if (parsed.reasoning.length > 0) {
-        emitProviderTrace(
-          this.traceListener,
-          buildProviderReasoningDeltaTrace("openai", model, "text", parsed.reasoning),
-        );
+      if (this.endpointUrl) {
+        response = {
+          ...(await postWithRustHttpAsync(
+            this.endpointUrl,
+            requestSpec.headers,
+            body,
+            options.signal,
+          )),
+          streamed: false,
+        };
+      } else {
+        const parsed = await runOpenAIChatCompletionWithRustAsync({
+          apiKey: this.apiKey,
+          model,
+          messages: this.messages,
+          tools: this.toolRuntime.definitions,
+          reasoningEffort: resolveRuntimeReasoningEffort(reasoning),
+          signal: options.signal,
+        });
+        if (parsed.reasoning.length > 0) {
+          emitProviderTrace(
+            this.traceListener,
+            buildProviderReasoningDeltaTrace(this.providerName, model, "text", parsed.reasoning),
+          );
+        }
+        return {
+          content: parsed.content,
+          reasoning: parsed.reasoning,
+          tool_calls: parsed.toolCalls,
+          actions: parsed.actions,
+          usage: createProviderTokenUsage(
+            parsed.promptTokens,
+            parsed.completionTokens,
+            parsed.cacheReadTokens,
+            0,
+            true,
+          ),
+          costUsd: parsed.costUsd,
+        };
       }
-      return {
-        content: parsed.content,
-        tool_calls: parsed.toolCalls,
-        actions: parsed.actions,
-        usage: createProviderTokenUsage(
-          parsed.promptTokens,
-          parsed.completionTokens,
-          parsed.cacheReadTokens,
-          0,
-          true,
-        ),
-        costUsd: parsed.costUsd,
-      };
     }
 
     if (!response.ok) {
-      throw new Error(buildProviderRequestError("openai", response.status, response.text, response.attempts));
+      throw new Error(buildProviderRequestError(this.providerName, response.status, response.text, response.attempts));
     }
 
     const parsed = parseOpenAIChatResponse(response.text, model);
@@ -664,11 +733,12 @@ export class OpenAIProvider implements LlmProvider {
     if (!response.streamed && parsed.reasoning.length > 0) {
       emitProviderTrace(
         this.traceListener,
-        buildProviderReasoningDeltaTrace("openai", model, "text", parsed.reasoning),
+        buildProviderReasoningDeltaTrace(this.providerName, model, "text", parsed.reasoning),
       );
     }
     return {
       content: parsed.content,
+      reasoning: parsed.reasoning,
       tool_calls: parsed.toolCalls.map((toolCall) => ({
         id: toolCall.id,
         function: { name: toolCall.name, arguments: toolCall.argumentsJson },
@@ -691,6 +761,7 @@ export class OpenAIProvider implements LlmProvider {
     options: ProviderTurnOptions = {},
   ): Promise<{
     content?: string | null;
+    reasoning?: string;
     tool_calls?: Array<{
       id?: string;
       function?: { name?: string; arguments?: string };
@@ -779,7 +850,7 @@ export class OpenAIProvider implements LlmProvider {
     const model = this.model;
     const reasoning = this.reasoning;
     const rollbackLength = this.messages.length;
-    startProviderTurnState("openai", this.messages, prompt, attachments);
+    startProviderTurnState(this.providerName, this.messages, prompt, attachments);
 
     try {
       let assistantText = "";
@@ -794,6 +865,10 @@ export class OpenAIProvider implements LlmProvider {
           : await this.requestOpenApiMessage(model, reasoning, options);
         throwIfAborted(options.signal);
         assistantText = typeof message?.content === "string" ? message.content : "";
+        const reasoningContent = this.providerName === "deepseek"
+          && typeof message.reasoning === "string"
+          ? message.reasoning
+          : undefined;
         const toolCalls = message?.tool_calls ?? [];
         const actions = message.actions;
         steps += 1;
@@ -803,7 +878,7 @@ export class OpenAIProvider implements LlmProvider {
         const actionPlan = resolveProviderIterationActionPlan(i, actions.length, maxIterations, assistantText);
         const toolResultOutcomes = actionPlan.shouldDispatchTools
           ? await executeProviderToolDispatches(
-          "openai",
+          this.providerName,
           actions,
           this.toolRuntime.definitions,
           this.toolRuntime.executor,
@@ -815,14 +890,14 @@ export class OpenAIProvider implements LlmProvider {
         throwIfAborted(options.signal);
 
         const turnStep = completeProviderTurnStep(
-          "openai",
+          this.providerName,
           i,
           maxIterations,
           assistantText,
           assistantText,
           actions.length,
           this.messages,
-          [buildOpenAIAssistantMessage(assistantText, toolCalls)],
+          [buildOpenAIAssistantMessage(assistantText, toolCalls, reasoningContent)],
           toolResultOutcomes,
         );
         assistantText = turnStep.assistantText;
@@ -852,7 +927,7 @@ export class OpenAIProvider implements LlmProvider {
     const tools = options.tools ?? this.toolRuntime.definitions;
     const model = options.model?.trim() ? options.model.trim() : this.model;
     const reasoning = options.reasoning ?? this.reasoning;
-    if (!this.fetchImpl) {
+    if (!this.fetchImpl && !this.endpointUrl) {
       return runOpenAIChatQueryWithRust({
         apiKey: this.apiKey,
         model,
@@ -867,7 +942,7 @@ export class OpenAIProvider implements LlmProvider {
 
     const toolsJson = buildOpenAIChatTools(tools);
     const toolPolicy = resolveProviderToolPolicy("openai-chat-query", tools);
-    const requestSpec = buildOpenAIRequestSpec("api", this.apiKey);
+    const requestSpec = this.buildChatRequestSpec();
     const body = buildOpenAIChatBody({
       model,
       messagesJson,
@@ -882,10 +957,14 @@ export class OpenAIProvider implements LlmProvider {
         : {}),
     });
 
-    const response = await this.postText(requestSpec.url, requestSpec.headers, body);
+    const response = await this.postText(
+      this.endpointUrl ?? resolveOpenAIChatUrl(requestSpec.url),
+      requestSpec.headers,
+      body,
+    );
 
     if (!response.ok) {
-      throw new Error(buildProviderRequestError("openai", response.status, response.text, response.attempts));
+      throw new Error(buildProviderRequestError(this.providerName, response.status, response.text, response.attempts));
     }
 
     const parsed = parseOpenAIChatResponse(response.text, model);
@@ -902,6 +981,11 @@ export class OpenAIProvider implements LlmProvider {
         true,
       ),
     );
+  }
+
+  private buildChatRequestSpec(): RustRequestSpec {
+    const spec = buildOpenAIRequestSpec("api", this.apiKey);
+    return this.endpointUrl ? { ...spec, url: this.endpointUrl } : spec;
   }
 
   private async postText(
@@ -1384,6 +1468,19 @@ export function createRuntimeProvider(args: CreateRuntimeProviderArgs): LlmProvi
       ...(args.systemPrompt ? { systemPrompt: args.systemPrompt } : {}),
       ...(args.openAIRuntime ? { runtime: args.openAIRuntime } : {}),
       ...(args.openAIAccountId !== undefined ? { openAIAccountId: args.openAIAccountId } : {}),
+    });
+  }
+
+  if (decision.runtimeKind === "deepseek") {
+    return new OpenAIProvider({
+      providerName: "deepseek",
+      endpointUrl: args.baseUrl ?? "https://api.deepseek.com/chat/completions",
+      apiKey: args.apiKey,
+      model: args.model,
+      cwd: args.cwd,
+      reasoning: args.reasoning,
+      ...(args.toolRuntime ? { toolRuntime: args.toolRuntime } : {}),
+      ...(args.systemPrompt ? { systemPrompt: args.systemPrompt } : {}),
     });
   }
 
@@ -2311,7 +2408,7 @@ function parseRustHttpResponse(raw: string, transportName: string): RustHttpResp
 }
 
 function buildProviderRequestError(
-  provider: "openai" | "anthropic" | "gemini",
+  provider: RuntimeProviderName,
   status: number,
   responseText: string,
   attempts?: number | undefined,
@@ -2549,12 +2646,13 @@ function buildOpenAIChatTools(tools: readonly ToolDefinition[]): string {
 function buildOpenAIAssistantMessage(
   content: string,
   toolCalls: readonly unknown[],
+  reasoningContent?: string | undefined,
 ): OpenAIMessage {
   const raw = runRustCommandSync(
     ["rust", "provider", "openai-assistant-message"],
     process.cwd(),
     process.env,
-    `${content}\0${JSON.stringify(toolCalls)}`,
+    `${content}\0${JSON.stringify(toolCalls)}\0${reasoningContent ?? ""}`,
   ).trim();
   const parsed = JSON.parse(raw) as unknown;
   if (!isRecord(parsed) || parsed.role !== "assistant" || typeof parsed.content !== "string") {
@@ -2953,7 +3051,7 @@ function resolveProviderIterationActionPlan(
 }
 
 function completeProviderTurnStep<T>(
-  provider: "openai" | "anthropic" | "gemini",
+  provider: RuntimeProviderName,
   iteration: number,
   maxIterations: number,
   previousAssistantText: string,
@@ -3275,7 +3373,7 @@ function attachDisplayToolInput(
 }
 
 function parseProviderToolExecutionResultPayload(
-  provider: "openai" | "anthropic" | "gemini",
+  provider: RuntimeProviderName,
   raw: string,
 ): ProviderToolExecutionResult {
   const parsed = JSON.parse(raw) as unknown;
@@ -3297,7 +3395,7 @@ function parseProviderToolExecutionResultPayload(
 }
 
 function buildProviderToolDispatchPlan(
-  provider: "openai" | "anthropic" | "gemini",
+  provider: RuntimeProviderName,
   actions: readonly RustProviderAction[],
   definitions: readonly ToolDefinition[],
 ): ProviderToolDispatchPlan {
@@ -3330,7 +3428,7 @@ function buildProviderToolDispatchPlan(
 }
 
 function startProviderTurnState<T>(
-  provider: "openai" | "anthropic" | "gemini",
+  provider: RuntimeProviderName,
   state: T[],
   prompt: string,
   attachments: readonly ProviderInputAttachment[],
@@ -3355,7 +3453,7 @@ function startProviderTurnState<T>(
 }
 
 function resetProviderTurnState<T>(
-  provider: "openai" | "anthropic" | "gemini",
+  provider: RuntimeProviderName,
   state: T[],
   systemPrompt: string,
 ): void {
@@ -3378,7 +3476,7 @@ function resetProviderTurnState<T>(
 }
 
 function resolveProviderRuntimeSettings(
-  provider: "openai" | "anthropic" | "gemini",
+  provider: RuntimeProviderName,
   currentModel: string,
   currentReasoning: RuntimeReasoningConfig | undefined,
   settings: {
@@ -3453,7 +3551,11 @@ function isRuntimeReasoningConfig(value: unknown): value is RuntimeReasoningConf
 }
 
 function isRuntimeProviderKind(value: string): value is RuntimeProviderKind {
-  return value === "anthropic" || value === "gemini" || value === "openai" || value === "unsupported";
+  return value === "anthropic"
+    || value === "gemini"
+    || value === "openai"
+    || value === "deepseek"
+    || value === "unsupported";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

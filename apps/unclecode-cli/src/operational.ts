@@ -32,7 +32,6 @@ import {
   verifyTeamRunChain,
 } from "@unclecode/session-store";
 import { listTeamRuns } from "@unclecode/orchestrator";
-import { spawn } from "node:child_process";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
@@ -515,22 +514,6 @@ function getOpenAICredentialsPath(env: NodeJS.ProcessEnv): string {
   return env.UNCLECODE_OPENAI_CREDENTIALS_PATH?.trim() || path.join(homedir(), ".unclecode", "credentials", "openai.json");
 }
 
-async function openExternalUrl(url: string): Promise<void> {
-  const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
-  const args = process.platform === "darwin"
-    ? [url]
-    : process.platform === "win32"
-      ? ["/c", "start", "", url]
-      : [url];
-
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(command, args, { stdio: "ignore", detached: true });
-    child.on("error", reject);
-    child.unref();
-    resolve();
-  });
-}
-
 async function waitForBrowserOAuthCallback(input: { readonly redirectUri: string }): Promise<string> {
   const redirect = new URL(input.redirectUri);
   const hostname = redirect.hostname;
@@ -568,7 +551,6 @@ export async function runWorkShellInlineAction(input: {
   readonly userHomeDir?: string;
   readonly fetch?: typeof fetch;
   readonly waitForBrowserCallback?: ((input: { redirectUri: string; url: string }) => Promise<string>) | undefined;
-  readonly openExternalUrl?: ((url: string) => Promise<void> | void) | undefined;
   readonly onProgress?: ((line: string) => void) | undefined;
 }): Promise<readonly string[]> {
   const action = resolveWorkShellInlineAction(input.args);
@@ -587,7 +569,6 @@ export async function runWorkShellInlineAction(input: {
     ...(prompt ? { prompt } : {}),
     ...(input.fetch ? { fetch: input.fetch } : {}),
     ...(input.waitForBrowserCallback ? { waitForBrowserCallback: input.waitForBrowserCallback } : {}),
-    ...(input.openExternalUrl ? { openExternalUrl: input.openExternalUrl } : {}),
     ...(input.onProgress ? { onProgress: input.onProgress } : {}),
   });
 }
@@ -620,7 +601,6 @@ export async function runTuiSessionCenterAction(input: {
   readonly prompt?: string;
   readonly fetch?: typeof fetch;
   readonly waitForBrowserCallback?: ((input: { redirectUri: string; url: string }) => Promise<string>) | undefined;
-  readonly openExternalUrl?: ((url: string) => Promise<void> | void) | undefined;
   readonly onProgress?: ((line: string) => void) | undefined;
 }): Promise<readonly string[]> {
   switch (input.actionId) {
@@ -697,8 +677,8 @@ export async function runTuiSessionCenterAction(input: {
         ...(baseUrl ? { baseUrl } : {}),
       });
 
-      input.onProgress?.("Opening browser…");
-      await Promise.resolve((input.openExternalUrl ?? openExternalUrl)(url.toString())).catch(() => undefined);
+      input.onProgress?.("Open this URL in your browser:");
+      input.onProgress?.(url.toString());
       input.onProgress?.("Waiting for callback…");
       const callbackUrl = await (input.waitForBrowserCallback ?? ((next) => waitForBrowserOAuthCallback({ redirectUri: next.redirectUri })))({
         redirectUri,

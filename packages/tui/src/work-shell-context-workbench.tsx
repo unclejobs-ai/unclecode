@@ -73,6 +73,7 @@ function resolveRowColor(tone: WorkbenchRowTone, palette: ContextInspectorPalett
 function renderWorkbenchRows(input: {
   readonly rows: readonly WorkbenchRow[];
   readonly palette: ContextInspectorPalette;
+  readonly uiLocale?: "en" | "ko";
 }): React.ReactNode {
   if (input.rows.length === 0) {
     return null;
@@ -82,13 +83,49 @@ function renderWorkbenchRows(input: {
       {input.rows.map((row) => (
         <Text key={row.key}>
           {row.label === undefined ? null : (
-            <Text color={input.palette.assistant} bold>{row.label}</Text>
+            <Text color={input.palette.assistant} bold>{localizeWorkbenchLabel(row.label, input.uiLocale)}</Text>
           )}
           <Text color={resolveRowColor(row.tone, input.palette)}>{row.text}</Text>
         </Text>
       ))}
     </Box>
   );
+}
+
+function localizeWorkbenchLabel(label: string, uiLocale: "en" | "ko" = "en"): string {
+  if (uiLocale !== "ko") return label;
+  return ({
+    "Since last send": "최근 전송 이후",
+    Runbook: "실행 지침",
+    "Must hold": "유지 조건",
+    "Accepted when": "승인 조건",
+    "Project instructions": "프로젝트 지침",
+    "Current conversation": "현재 대화",
+    "Saved memory": "저장된 메모리",
+    "Files & attachments": "파일 및 첨부 파일",
+    "Tool activity": "도구 활동",
+    "Other context": "기타 컨텍스트",
+  } as Readonly<Record<string, string>>)[label] ?? label;
+}
+
+const KO_CONTEXT_COLLECTION_LABELS: Readonly<Record<ContextDeskCollection, string>> = {
+  all: "모든 소스",
+  guidance: "지침",
+  conversation: "대화",
+  memory: "메모리",
+  tools: "도구",
+  attachments: "첨부 파일",
+  other: "기타",
+  sent: "전송됨",
+  held: "보류됨",
+};
+
+function localizeContextCollectionLabel(
+  collection: ContextDeskCollection,
+  fallback: string,
+  uiLocale: "en" | "ko" = "en",
+): string {
+  return uiLocale === "ko" ? KO_CONTEXT_COLLECTION_LABELS[collection] : fallback;
 }
 
 
@@ -99,13 +136,16 @@ function renderPreflightOverview(input: {
   readonly unavailable?: string | undefined;
   readonly width: number;
   readonly palette: ContextInspectorPalette;
+  readonly uiLocale?: "en" | "ko";
 }): React.ReactNode {
   const issue = input.packet.warnings[0]?.message ?? input.unavailable;
   const meaningChanged = input.packetChange?.kind === "meaning-change";
   const review = meaningChanged || issue !== undefined || input.suggestion.tone !== "success";
   const message = issue
-    ?? (meaningChanged ? "Context changed; review before sending." : input.suggestion.message);
-  const prefix = review ? "Review" : "Ready";
+    ?? (meaningChanged
+      ? (input.uiLocale === "ko" ? "컨텍스트가 변경되었습니다. 전송 전에 검토하세요." : "Context changed; review before sending.")
+      : input.suggestion.message);
+  const prefix = input.uiLocale === "ko" ? (review ? "검토" : "준비") : (review ? "Review" : "Ready");
   return (
     <Text color={review ? input.palette.warning : input.palette.success} bold>
       {truncateForDisplayWidth(`${prefix} · ${sanitizeContextPreview(message)}`, input.width)}
@@ -117,6 +157,7 @@ function resolveSourceLabel(
   packet: ContextPacketView,
   sourceId: string,
   receipt?: ContextPacketReceipt,
+  uiLocale: "en" | "ko" = "en",
 ): string {
   const item = packet.included.find((candidate) => candidate.id === sourceId)
     ?? packet.excluded.find((candidate) => candidate.id === sourceId);
@@ -124,12 +165,17 @@ function resolveSourceLabel(
     return sanitizeContextPreview(item.label);
   }
   const sourceRef = receipt?.sourceRefs.find((candidate) => candidate.sourceId === sourceId);
-  return sourceRef ? resolveContextSourceGroup(sourceRef.category) : "Changed source";
+  if (!sourceRef) {
+    return uiLocale === "ko" ? "변경된 소스" : "Changed source";
+  }
+  const group = resolveContextSourceGroup(sourceRef.category);
+  return localizeWorkbenchLabel(group, uiLocale);
 }
 
 function formatCompareTokenDelta(
   next: ContextPacketReceipt,
   last: ContextPacketReceipt,
+  uiLocale: "en" | "ko" = "en",
 ): string | undefined {
   if (
     next.tokenEstimate === undefined
@@ -147,7 +193,9 @@ function formatCompareTokenDelta(
     tokenEstimate: Math.abs(delta),
     tokenEstimateState: "estimated",
   });
-  return `${magnitude} ${delta > 0 ? "larger" : "smaller"}`;
+  return uiLocale === "ko"
+    ? `${magnitude} ${delta > 0 ? "증가" : "감소"}`
+    : `${magnitude} ${delta > 0 ? "larger" : "smaller"}`;
 }
 
 /**
@@ -161,6 +209,7 @@ function buildContextCompareRows(input: {
   readonly submittedReceipt?: ContextPacketReceipt | undefined;
   readonly packetChange?: ContextPacketChangeClassification | undefined;
   readonly width: number;
+  readonly uiLocale?: "en" | "ko";
 }): readonly WorkbenchRow[] {
   const { previewReceipt, submittedReceipt } = input;
   if (!previewReceipt || !submittedReceipt) {
@@ -168,7 +217,8 @@ function buildContextCompareRows(input: {
   }
   const added = input.packetChange?.addedSourceIds ?? [];
   const removed = input.packetChange?.removedSourceIds ?? [];
-  const delta = formatCompareTokenDelta(previewReceipt, submittedReceipt);
+  const uiLocale = input.uiLocale ?? "en";
+  const delta = formatCompareTokenDelta(previewReceipt, submittedReceipt, uiLocale);
   if (added.length === 0 && removed.length === 0 && delta === undefined) {
     return [];
   }
@@ -176,9 +226,9 @@ function buildContextCompareRows(input: {
   const visibleRemoved = removed.slice(0, 2);
   const hiddenCount = added.length + removed.length - visibleAdded.length - visibleRemoved.length;
   const changes = [
-    ...visibleAdded.map((sourceId) => `+ ${resolveSourceLabel(input.packet, sourceId, previewReceipt)}`),
-    ...visibleRemoved.map((sourceId) => `− ${resolveSourceLabel(input.packet, sourceId, submittedReceipt)}`),
-    ...(hiddenCount > 0 ? [`${hiddenCount} more`] : []),
+    ...visibleAdded.map((sourceId) => `+ ${resolveSourceLabel(input.packet, sourceId, previewReceipt, uiLocale)}`),
+    ...visibleRemoved.map((sourceId) => `− ${resolveSourceLabel(input.packet, sourceId, submittedReceipt, uiLocale)}`),
+    ...(hiddenCount > 0 ? [uiLocale === "ko" ? `${hiddenCount}개 더 있음` : `${hiddenCount} more`] : []),
     ...(delta ? [delta] : []),
   ];
   const tone = removed.length > 0 ? "warning" : "success";
@@ -187,7 +237,7 @@ function buildContextCompareRows(input: {
       key: "compare-head",
       label: "Since last send",
       text: truncateForDisplayWidth(
-        ` · ${changes[0] ?? "context changed"}`,
+        ` · ${changes[0] ?? (uiLocale === "ko" ? "컨텍스트 변경됨" : "context changed")}`,
         Math.max(4, input.width - 16),
       ),
       tone,
@@ -218,6 +268,18 @@ const WORK_NODE_STATUS_LINES: Readonly<Record<WorkNodeStatus, readonly [string, 
   cancelled: ["Status", "Cancelled"],
 };
 
+const KO_WORK_NODE_STATUS_LINES: Readonly<Record<WorkNodeStatus, readonly [string, string]>> = {
+  proposed: ["다음", "시작하려면 이 계획을 승인하세요"],
+  approved: ["다음", "시작 대기 중"],
+  ready: ["다음", "시작 준비됨"],
+  running: ["상태", "실행 중"],
+  blocked: ["다음", "다른 작업 항목을 기다리는 중"],
+  requires_action: ["다음", "입력이 필요함"],
+  completed: ["상태", "완료됨"],
+  failed: ["다음", "실패 · 재시도 필요"],
+  cancelled: ["상태", "취소됨"],
+};
+
 function findContextWorkNodes(
   packet: ContextPacketView,
 ): readonly ContextPacketViewWorkNodeMetadata[] {
@@ -238,6 +300,7 @@ function buildRunbookListRows(input: {
   readonly noun: string;
   readonly tone: WorkbenchRowTone;
   readonly width: number;
+  readonly uiLocale?: "en" | "ko";
 }): readonly WorkbenchRow[] {
   if (input.items.length === 0) {
     return [];
@@ -258,7 +321,9 @@ function buildRunbookListRows(input: {
       ? [{
           key: `${input.key}-more`,
           text: truncateForDisplayWidth(
-            `    · … ${hidden} more ${input.noun}${hidden === 1 ? "" : "s"}`,
+            input.uiLocale === "ko"
+              ? `    · … ${input.noun} ${hidden}개 더 있음`
+              : `    · … ${hidden} more ${input.noun}${hidden === 1 ? "" : "s"}`,
             input.width,
           ),
           tone: "dim",
@@ -271,20 +336,22 @@ function buildContextRunbookRows(input: {
   readonly nodes: readonly ContextPacketViewWorkNodeMetadata[];
   readonly compact: boolean;
   readonly width: number;
+  readonly uiLocale?: "en" | "ko";
 }): readonly WorkbenchRow[] {
   const node = input.nodes[0];
   if (!node) {
     return [];
   }
   const goal = node.goal?.trim();
-  const [statusPrefix, statusText] = WORK_NODE_STATUS_LINES[node.status];
+  const uiLocale = input.uiLocale ?? "en";
+  const [statusPrefix, statusText] = (uiLocale === "ko" ? KO_WORK_NODE_STATUS_LINES : WORK_NODE_STATUS_LINES)[node.status];
   const collected = node.evidenceRefs.length;
   const required = node.acceptanceCriteria.length;
   const evidence = required > 0
-    ? `${collected} of ${required} collected`
+    ? (uiLocale === "ko" ? `${required}개 중 ${collected}개 수집됨` : `${collected} of ${required} collected`)
     : collected > 0
-      ? `${collected} collected`
-      : "none collected yet";
+      ? (uiLocale === "ko" ? `${collected}개 수집됨` : `${collected} collected`)
+      : (uiLocale === "ko" ? "아직 수집된 항목 없음" : "none collected yet");
   const listMax = input.compact ? 1 : 2;
   return [
     {
@@ -299,7 +366,7 @@ function buildContextRunbookRows(input: {
     ...(goal
       ? [{
           key: "runbook-task",
-          text: `  Doing · ${truncateForDisplayWidth(sanitizeContextPreview(node.title), Math.max(4, input.width - 12))}`,
+          text: `  ${uiLocale === "ko" ? "진행 중" : "Doing"} · ${truncateForDisplayWidth(sanitizeContextPreview(node.title), Math.max(4, input.width - 12))}`,
           tone: "text",
         } as const]
       : []),
@@ -310,36 +377,40 @@ function buildContextRunbookRows(input: {
     },
     ...buildRunbookListRows({
       key: "runbook-constraint",
-      heading: "Must hold",
+      heading: uiLocale === "ko" ? "유지 조건" : "Must hold",
       items: input.compact && node.constraints.length > 1
-        ? [`${node.constraints[0]} (+${node.constraints.length - 1} more)`]
+        ? [`${node.constraints[0]} (+${node.constraints.length - 1}${uiLocale === "ko" ? "개 더 있음" : " more"})`]
         : node.constraints,
       max: listMax,
-      noun: "constraint",
+      noun: uiLocale === "ko" ? "조건" : "constraint",
       tone: "muted",
       width: input.width,
+      uiLocale,
     }),
     ...buildRunbookListRows({
       key: "runbook-criterion",
-      heading: "Accepted when",
+      heading: uiLocale === "ko" ? "승인 조건" : "Accepted when",
       items: input.compact && node.acceptanceCriteria.length > 1
-        ? [`${node.acceptanceCriteria[0]} (+${node.acceptanceCriteria.length - 1} more)`]
+        ? [`${node.acceptanceCriteria[0]} (+${node.acceptanceCriteria.length - 1}${uiLocale === "ko" ? "개 더 있음" : " more"})`]
         : node.acceptanceCriteria,
       max: listMax,
-      noun: "check",
+      noun: uiLocale === "ko" ? "확인 항목" : "check",
       tone: "text",
       width: input.width,
+      uiLocale,
     }),
     {
       key: "runbook-evidence",
-      text: truncateForDisplayWidth(`  Evidence · ${evidence}`, input.width),
+      text: truncateForDisplayWidth(`  ${uiLocale === "ko" ? "증거" : "Evidence"} · ${evidence}`, input.width),
       tone: "muted",
     },
     ...(input.nodes.length > 1
       ? [{
           key: "runbook-more",
           text: truncateForDisplayWidth(
-            `  … ${input.nodes.length - 1} more work items`,
+            uiLocale === "ko"
+              ? `  … 작업 항목 ${input.nodes.length - 1}개 더 있음`
+              : `  … ${input.nodes.length - 1} more work items`,
             input.width,
           ),
           tone: "dim",
@@ -358,13 +429,14 @@ function renderSelectedPreview(input: {
   readonly scrollOffset?: number | undefined;
   /** Preview-pane focus: the body scrolls and proves overflow with markers. */
   readonly scrollable?: boolean | undefined;
+  readonly uiLocale?: "en" | "ko";
 }): React.ReactNode {
   const marginTop = input.compact ? 0 : 1;
   if (!input.row) {
     return (
       <Box marginTop={marginTop} flexDirection="column">
         <Text color={input.palette.textMuted}>
-          {truncateForDisplayWidth("Selected · choose a source", input.width)}
+          {truncateForDisplayWidth(input.uiLocale === "ko" ? "선택됨 · 소스를 선택하세요" : "Selected · choose a source", input.width)}
         </Text>
       </Box>
     );
@@ -380,7 +452,7 @@ function renderSelectedPreview(input: {
   return (
     <Box marginTop={marginTop} flexDirection="column">
       <Text>
-        <Text color={input.palette.user} bold>{"Selected"}</Text>
+        <Text color={input.palette.user} bold>{input.uiLocale === "ko" ? "선택됨" : "Selected"}</Text>
         <Text color={input.palette.textMuted}>
           {truncateForDisplayWidth(
             ` · ${sanitizeContextPreview(input.row.item.label)}`,
@@ -389,7 +461,7 @@ function renderSelectedPreview(input: {
         </Text>
       </Text>
       {scrollable && offset > 0 ? (
-        <Text color={input.palette.textDim}>{`  … ${offset} more above`}</Text>
+        <Text color={input.palette.textDim}>{input.uiLocale === "ko" ? `  … 위에 ${offset}개 더 있음` : `  … ${offset} more above`}</Text>
       ) : null}
       {lines.map((line, index) => (
         <Text key={`context-preview-${input.row?.item.id}-${offset + index}`} color={input.palette.text}>
@@ -397,7 +469,7 @@ function renderSelectedPreview(input: {
         </Text>
       ))}
       {scrollable && hiddenAfter > 0 ? (
-        <Text color={input.palette.textDim}>{`  … ${hiddenAfter} more below`}</Text>
+        <Text color={input.palette.textDim}>{input.uiLocale === "ko" ? `  … 아래에 ${hiddenAfter}개 더 있음` : `  … ${hiddenAfter} more below`}</Text>
       ) : null}
     </Box>
   );
@@ -462,6 +534,7 @@ function renderDeskCollectionRow(input: {
   readonly focused: boolean;
   readonly width: number;
   readonly palette: ContextInspectorPalette;
+  readonly uiLocale?: "en" | "ko";
 }): React.ReactNode {
   const { row, palette } = input;
   // Yazi-style right-aligned count: the label yields cells to the count, never
@@ -477,7 +550,8 @@ function renderDeskCollectionRow(input: {
       : "  ";
   // The label owns whatever the actual prefix and right-aligned count leave.
   const labelWidth = Math.max(1, input.width - getDisplayWidth(prefix) - 1 - countLabel.length);
-  const label = truncateForDisplayWidth(row.label, labelWidth).padEnd(labelWidth);
+  const localizedLabel = localizeContextCollectionLabel(row.id, row.label, input.uiLocale ?? "en");
+  const label = truncateForDisplayWidth(localizedLabel, labelWidth).padEnd(labelWidth);
   const prefixColor = input.active
     ? palette.user
     : row.lane === "delivery" && row.id === "sent"
@@ -510,6 +584,7 @@ function renderDeskGroupsPane(input: {
   readonly maxRows: number;
   readonly width: number;
   readonly palette: ContextInspectorPalette;
+  readonly uiLocale?: "en" | "ko";
 }): React.ReactNode {
   const { palette } = input;
   const allRows = input.collections;
@@ -585,7 +660,7 @@ function renderDeskGroupsPane(input: {
   const showDeliveryHeading = fitsFull && deliveryIndex >= 0;
   return (
     <Box flexDirection="column">
-      {renderDeskPaneHeading({ label: "GROUPS", width: input.width, palette })}
+      {renderDeskPaneHeading({ label: input.uiLocale === "ko" ? "그룹" : "GROUPS", width: input.width, palette })}
       {constrainedGroupRows !== undefined ? (
         <>
           {constrainedGroupRows.map((row) => (
@@ -596,13 +671,14 @@ function renderDeskGroupsPane(input: {
                 focused: input.focused,
                 width: input.width,
                 palette,
+                uiLocale: input.uiLocale ?? "en",
               })}
             </React.Fragment>
           ))}
           {constrainedHiddenCount > 0 ? (
             <Text color={palette.textDim}>
               {truncateForDisplayWidth(
-                `  … ${constrainedHiddenCount} more collections`,
+                input.uiLocale === "ko" ? `  … 컬렉션 ${constrainedHiddenCount}개 더 있음` : `  … ${constrainedHiddenCount} more collections`,
                 input.width,
               )}
             </Text>
@@ -615,6 +691,7 @@ function renderDeskGroupsPane(input: {
                 focused: input.focused,
                 width: input.width,
                 palette,
+                uiLocale: input.uiLocale ?? "en",
               })}
             </React.Fragment>
           ))}
@@ -622,12 +699,12 @@ function renderDeskGroupsPane(input: {
       ) : (
         <>
           {showHiddenBefore ? (
-            <Text color={palette.textDim}>{`  … ${hiddenBefore} more above`}</Text>
+            <Text color={palette.textDim}>{input.uiLocale === "ko" ? `  … 위에 ${hiddenBefore}개 더 있음` : `  … ${hiddenBefore} more above`}</Text>
           ) : null}
           {visible.map((row, index) => (
             <React.Fragment key={`context-collection-${row.id}`}>
               {showDeliveryHeading && hiddenBefore + index === deliveryIndex
-                ? renderDeskPaneHeading({ label: "DELIVERY", dim: true, width: input.width, palette })
+                ? renderDeskPaneHeading({ label: input.uiLocale === "ko" ? "전달" : "DELIVERY", dim: true, width: input.width, palette })
                 : null}
               {renderDeskCollectionRow({
                 row,
@@ -635,11 +712,12 @@ function renderDeskGroupsPane(input: {
                 focused: input.focused,
                 width: input.width,
                 palette,
+                uiLocale: input.uiLocale ?? "en",
               })}
             </React.Fragment>
           ))}
           {showHiddenAfter ? (
-            <Text color={palette.textDim}>{`  … ${hiddenAfter} more below`}</Text>
+            <Text color={palette.textDim}>{input.uiLocale === "ko" ? `  … 아래에 ${hiddenAfter}개 더 있음` : `  … ${hiddenAfter} more below`}</Text>
           ) : null}
         </>
       )}
@@ -673,12 +751,18 @@ export function renderContextInspectorWorkbench(input: {
   readonly policySuggestions: readonly ContextPolicySuggestion[];
   readonly adviceUnavailable?: string | undefined;
   readonly adviceActionsEnabled: boolean;
+  readonly uiLocale?: "en" | "ko";
 }): React.ReactNode {
   const { activePane, activeCollection } = input;
+  const uiLocale = input.uiLocale ?? "en";
   const filteredRows = filterContextDeskRows(input.rows, activeCollection);
   const selectedRow = resolveContextDeskSelectedRow(filteredRows, input.cursorIndex);
   const collectionRows = buildContextDeskCollectionRows(input.rows);
-  const collectionLabel = resolveContextDeskCollectionLabel(activeCollection);
+  const collectionLabel = localizeContextCollectionLabel(
+    activeCollection,
+    resolveContextDeskCollectionLabel(activeCollection),
+    uiLocale,
+  );
   const expanded = Boolean(input.expandedId);
 
   const isThreePane = !expanded && input.width >= DESK_THREE_PANE_MIN_WIDTH;
@@ -744,6 +828,7 @@ export function renderContextInspectorWorkbench(input: {
     nodes: findContextWorkNodes(input.packet),
     compact: isStacked,
     width: asideWidth,
+    uiLocale,
   });
   let compare = buildContextCompareRows({
     packet: input.packet,
@@ -751,6 +836,7 @@ export function renderContextInspectorWorkbench(input: {
     ...(input.submittedReceipt ? { submittedReceipt: input.submittedReceipt } : {}),
     ...(input.packetChange ? { packetChange: input.packetChange } : {}),
     width: asideWidth,
+    uiLocale,
   });
   let previewLines = isThreePane
     ? (scrollablePreview ? 6 : 4)
@@ -925,8 +1011,9 @@ export function renderContextInspectorWorkbench(input: {
     width: sourcesInnerWidth,
     palette: input.palette,
     actionsEnabled: input.actionsEnabled,
+    uiLocale,
     ...(isThreePane ? { marginTop: 0 } : {}),
-    ...(activeCollection !== "all" ? { emptyMessage: "No sources in this collection." } : {}),
+    ...(activeCollection !== "all" ? { emptyMessage: input.uiLocale === "ko" ? "이 컬렉션에 소스가 없습니다." : "No sources in this collection." } : {}),
   });
   const advice = renderWorkShellContextAdvice({
     packet: input.packet,
@@ -938,6 +1025,7 @@ export function renderContextInspectorWorkbench(input: {
     width: asideWidth,
     compact: isStacked,
     dense: denseAdvice,
+    uiLocale,
   });
   const overview = renderPreflightOverview({
     packet: input.packet,
@@ -946,9 +1034,10 @@ export function renderContextInspectorWorkbench(input: {
     ...(input.adviceUnavailable ? { unavailable: input.adviceUnavailable } : {}),
     width: contentWidth,
     palette: input.palette,
+    uiLocale,
   });
-  const runbookBlock = renderWorkbenchRows({ rows: runbook, palette: input.palette });
-  const compareBlock = renderWorkbenchRows({ rows: compare, palette: input.palette });
+  const runbookBlock = renderWorkbenchRows({ rows: runbook, palette: input.palette, uiLocale });
+  const compareBlock = renderWorkbenchRows({ rows: compare, palette: input.palette, uiLocale });
   const preview = renderSelectedPreview({
     ...(selectedRow ? { row: selectedRow } : {}),
     maxLines: previewLines,
@@ -956,6 +1045,7 @@ export function renderContextInspectorWorkbench(input: {
     width: asideWidth,
     palette: input.palette,
     ...(scrollablePreview ? { scrollOffset: previewScrollOffset, scrollable: true } : {}),
+    uiLocale,
   });
   const groupsPane = renderDeskGroupsPane({
     collections: collectionRows,
@@ -966,6 +1056,7 @@ export function renderContextInspectorWorkbench(input: {
     // the real inner width; a padded row that wraps would paint two lines.
     width: isThreePane ? groupsWidth : isMedium ? sourceWidth : contentWidth,
     palette: input.palette,
+    uiLocale,
   });
   // Compact frames hide the Groups pane, so this line carries the only count
   // on screen; it reduces with the desk's one source-count rule so the same
@@ -974,7 +1065,9 @@ export function renderContextInspectorWorkbench(input: {
   const collectionContextLine = collectionLineRows > 0 ? (
     <Text color={input.palette.textDim}>
       {truncateForDisplayWidth(
-        `Collection · ${collectionLabel} · ${collectionSourceCount} ${collectionSourceCount === 1 ? "source" : "sources"}`,
+        input.uiLocale === "ko"
+          ? `컬렉션 · ${collectionLabel} · 소스 ${collectionSourceCount}개`
+          : `Collection · ${collectionLabel} · ${collectionSourceCount} ${collectionSourceCount === 1 ? "source" : "sources"}`,
         isMedium ? sourceWidth : contentWidth,
       )}
     </Text>
@@ -991,7 +1084,7 @@ export function renderContextInspectorWorkbench(input: {
               </Box>
               <Box width={sourcesPaneWidth} paddingLeft={2} flexDirection="column">
                 {renderDeskPaneHeading({
-                  label: "SOURCES",
+                  label: input.uiLocale === "ko" ? "소스" : "SOURCES",
                   ...(activeCollection !== "all" ? { suffix: collectionLabel } : {}),
                   width: sourcesInnerWidth,
                   palette: input.palette,
@@ -1000,7 +1093,7 @@ export function renderContextInspectorWorkbench(input: {
               </Box>
               <Box width={previewPaneWidth} paddingLeft={2} flexDirection="column">
                 {renderDeskPaneHeading({
-                  label: "PREVIEW",
+                  label: input.uiLocale === "ko" ? "미리보기" : "PREVIEW",
                   width: asideWidth,
                   palette: input.palette,
                 })}
@@ -1049,6 +1142,7 @@ export function renderContextInspectorWorkbench(input: {
         ...(input.actionReceipt ? { receipt: input.actionReceipt } : {}),
         width: contentWidth,
         palette: input.palette,
+        uiLocale,
       })}
     </Box>
   );

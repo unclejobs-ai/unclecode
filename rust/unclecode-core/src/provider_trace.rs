@@ -104,10 +104,10 @@ pub fn provider_reasoning_delta_trace_json(
     delta: &str,
 ) -> Result<String, String> {
     match provider {
-        "openai" | "anthropic" | "gemini" => {}
+        "openai" | "deepseek" | "anthropic" | "gemini" => {}
         _ => {
             return Err(
-                "Usage: unclecode rust provider reasoning-delta <openai|anthropic|gemini> <model> <summary|text>"
+                "Usage: unclecode rust provider reasoning-delta <openai|deepseek|anthropic|gemini> <model> <summary|text>"
                     .to_string(),
             )
         }
@@ -116,7 +116,7 @@ pub fn provider_reasoning_delta_trace_json(
         "summary" | "text" => {}
         _ => {
             return Err(
-                "Usage: unclecode rust provider reasoning-delta <openai|anthropic|gemini> <model> <summary|text>"
+                "Usage: unclecode rust provider reasoning-delta <openai|deepseek|anthropic|gemini> <model> <summary|text>"
                     .to_string(),
             )
         }
@@ -144,7 +144,7 @@ pub fn provider_reasoning_delta_trace_with_item_id_json(
     validate_reasoning_delta_args(provider, kind)?;
     if item_id.trim().is_empty() {
         return Err(
-            "Usage: unclecode rust provider reasoning-delta-record <openai|anthropic|gemini> <model> <summary|text> <item-id>"
+            "Usage: unclecode rust provider reasoning-delta-record <openai|deepseek|anthropic|gemini> <model> <summary|text> <item-id>"
                 .to_string(),
         );
     }
@@ -186,10 +186,10 @@ pub fn provider_tool_started_trace_json(
 
 fn validate_reasoning_delta_args(provider: &str, kind: &str) -> Result<(), String> {
     match provider {
-        "openai" | "anthropic" | "gemini" => {}
+        "openai" | "deepseek" | "anthropic" | "gemini" => {}
         _ => {
             return Err(
-                "Usage: unclecode rust provider reasoning-delta <openai|anthropic|gemini> <model> <summary|text>"
+                "Usage: unclecode rust provider reasoning-delta <openai|deepseek|anthropic|gemini> <model> <summary|text>"
                     .to_string(),
             )
         }
@@ -197,7 +197,7 @@ fn validate_reasoning_delta_args(provider: &str, kind: &str) -> Result<(), Strin
     match kind {
         "summary" | "text" => Ok(()),
         _ => Err(
-            "Usage: unclecode rust provider reasoning-delta <openai|anthropic|gemini> <model> <summary|text>"
+            "Usage: unclecode rust provider reasoning-delta <openai|deepseek|anthropic|gemini> <model> <summary|text>"
                 .to_string(),
         ),
     }
@@ -309,11 +309,11 @@ pub fn provider_tool_result_turn_entries_json(
 
     let entries =
         match provider {
-            "openai" => payloads,
+            "openai" | "deepseek" => payloads,
             "anthropic" => vec![provider_tool_result_container_value(provider, payloads)?],
             "gemini" => vec![provider_tool_result_container_value(provider, payloads)?],
             _ => return Err(
-                "Usage: unclecode rust provider tool-result-turn-entries <openai|anthropic|gemini>"
+                "Usage: unclecode rust provider tool-result-turn-entries <openai|deepseek|anthropic|gemini>"
                     .to_string(),
             ),
         };
@@ -335,10 +335,10 @@ pub fn provider_tool_execution_result_json(
     content: &str,
 ) -> Result<String, String> {
     match provider {
-        "openai" | "anthropic" | "gemini" => {}
+        "openai" | "deepseek" | "anthropic" | "gemini" => {}
         _ => {
             return Err(
-                "Usage: unclecode rust provider tool-execution-result <openai|anthropic|gemini> <tool-name> <tool-call-id> <started-at> <completed-at> <is-error yes|no>"
+                "Usage: unclecode rust provider tool-execution-result <openai|deepseek|anthropic|gemini> <tool-name> <tool-call-id> <started-at> <completed-at> <is-error yes|no>"
                     .to_string(),
             )
         }
@@ -433,7 +433,7 @@ fn provider_tool_result_payload(
     content: &str,
 ) -> Result<Value, String> {
     Ok(match provider {
-        "openai" => json!({
+        "openai" | "deepseek" => json!({
             "role": "tool",
             "tool_call_id": tool_call_id,
             "content": content
@@ -460,7 +460,7 @@ fn provider_tool_result_payload(
         }
         _ => {
             return Err(
-                "Usage: unclecode rust provider tool-result <openai|anthropic|gemini> <tool-name> <tool-call-id> <success|error> <is-error yes|no>".to_string(),
+                "Usage: unclecode rust provider tool-result <openai|deepseek|anthropic|gemini> <tool-name> <tool-call-id> <success|error> <is-error yes|no>".to_string(),
             )
         }
     })

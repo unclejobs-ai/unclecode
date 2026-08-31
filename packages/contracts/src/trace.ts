@@ -1,8 +1,13 @@
 import type {
   AskUserQuestionResult,
+  EvolutionProposalProjection,
+  PluginDiagnosticProjection,
   TerminalAgentRunStatus,
   TerminalAsyncJobStatus,
   WorkGraph,
+  QualityGateStatus,
+  QualityHarnessStage,
+  QualityProfile,
   WorkNodeStatus,
 } from "./agent-console.js";
 import type {
@@ -37,6 +42,13 @@ export const EXECUTION_TRACE_EVENT_TYPES = [
   "agent.run.started",
   "agent.run.settled",
   "usage.recorded",
+  "quality.stage_started",
+  "quality.gate_evaluated",
+  "quality.refine_requested",
+  "quality.pivot_requested",
+  "quality.completed",
+  "evolution.proposed",
+  "plugin.diagnostic",
 ] as const;
 
 export type ExecutionTraceEventType = (typeof EXECUTION_TRACE_EVENT_TYPES)[number];
@@ -147,6 +159,8 @@ export type WorkProposedTraceEvent = {
   readonly level: "high-signal";
   readonly graphId: string;
   readonly nodeCount: number;
+  /** Source-owner ordering key; replay must retain the same value. */
+  readonly sequence: number;
   readonly startedAt: number;
   readonly graph?: WorkGraph;
 };
@@ -378,6 +392,114 @@ export type UsageRecordedTraceEvent = {
   readonly cacheSavingsUsd?: number;
   readonly costUsd?: number;
   readonly startedAt: number;
+  /** First non-empty assistant delta observed by the runtime, when streamed. */
+  readonly firstTokenAt?: number;
+  /** Provider turn completion boundary; distinct from task/orchestrator time. */
+  readonly completedAt?: number;
+};
+
+export type QualityRouteKind = "direct" | "frontier" | "commodity" | "fallback";
+
+type QualityTraceRoute = {
+  /** Present only after a real model dispatch selected this route. */
+  readonly provider?: ProviderId | "unknown";
+  /** Present only after a real model dispatch selected this model. */
+  readonly model?: string;
+  /** Present only after a real model dispatch used this routing lane. */
+  readonly route?: QualityRouteKind;
+  readonly agentRunId?: string;
+};
+
+type QualityTraceBase = QualityTraceRoute & {
+  readonly level: "high-signal";
+  readonly runId: string;
+  readonly graphId: string;
+  readonly profile: QualityProfile;
+  readonly stage: QualityHarnessStage;
+  readonly iteration: number;
+  /** Present when the transition belongs to one WorkGraph node. */
+  readonly nodeId?: string;
+  readonly nodeAttempt?: number;
+  readonly artifactRefs?: readonly string[];
+  readonly startedAt: number;
+};
+
+export type QualityStageStartedTraceEvent = QualityTraceBase & {
+  readonly type: "quality.stage_started";
+};
+
+export type QualityGateEvaluatedTraceEvent = QualityTraceBase & {
+  readonly type: "quality.gate_evaluated";
+  readonly decision: QualityGateStatus;
+  readonly refineCount: number;
+  readonly pivotCount: number;
+  readonly evidenceRefs: readonly string[];
+  readonly failures: readonly string[];
+  readonly reason: string;
+  readonly artifactHash?: string;
+  readonly reviewedArtifactHash?: string;
+  readonly currentArtifactHash?: string;
+  readonly reviewerRunId?: string;
+  /** Explicit invalidation result; consumers must never infer this from prose. */
+  readonly stale?: boolean;
+  readonly independentVerification: boolean;
+};
+
+export type QualityRefineRequestedTraceEvent = QualityTraceBase & {
+  readonly type: "quality.refine_requested";
+  readonly decision: "refine";
+  readonly count: number;
+  readonly limit: number;
+  readonly reason: string;
+  readonly evidenceRefs: readonly string[];
+  readonly failures: readonly string[];
+  readonly nodeId?: string;
+};
+
+export type QualityPivotRequestedTraceEvent = QualityTraceBase & {
+  readonly type: "quality.pivot_requested";
+  readonly decision: "pivot";
+  readonly count: number;
+  readonly limit: number;
+  readonly reason: string;
+  readonly evidenceRefs: readonly string[];
+  readonly failures: readonly string[];
+};
+
+export type QualityCompletedTraceEvent = QualityTraceBase & {
+  readonly type: "quality.completed";
+  readonly decision: QualityGateStatus;
+  readonly completedStages: readonly QualityHarnessStage[];
+  readonly evidenceRefs: readonly string[];
+  readonly failures: readonly string[];
+  /** Hash bound by the quality gate; not a digest for every artifactRefs item. */
+  readonly artifactHash?: string;
+  readonly reviewedArtifactHash?: string;
+  readonly currentArtifactHash?: string;
+  readonly reviewerRunId?: string;
+  /** Freshness of the terminal review/artifact binding. */
+  readonly stale?: boolean;
+  readonly independentVerification: boolean;
+  readonly completedAt: number;
+};
+
+export type EvolutionProposedTraceEvent = {
+  readonly type: "evolution.proposed";
+  readonly level: "high-signal";
+  readonly runId: string;
+  /** Only durable proposals may enter the session/control-room projection. */
+  readonly recorded: true;
+  readonly proposal: EvolutionProposalProjection;
+  readonly startedAt: number;
+};
+
+/**
+ * Bounded, redacted projection of one external plugin invocation failure.
+ * The in-process Quality Engine is builtin and never emits this event.
+ */
+export type PluginDiagnosticTraceEvent = PluginDiagnosticProjection & {
+  readonly type: "plugin.diagnostic";
+  readonly level: "high-signal";
 };
 
 export type ExecutionTraceEvent =
@@ -404,4 +526,11 @@ export type ExecutionTraceEvent =
   | JobSettledTraceEvent
   | AgentRunStartedTraceEvent
   | AgentRunSettledTraceEvent
-  | UsageRecordedTraceEvent;
+  | UsageRecordedTraceEvent
+  | QualityStageStartedTraceEvent
+  | QualityGateEvaluatedTraceEvent
+  | QualityRefineRequestedTraceEvent
+  | QualityPivotRequestedTraceEvent
+  | QualityCompletedTraceEvent
+  | EvolutionProposedTraceEvent
+  | PluginDiagnosticTraceEvent;

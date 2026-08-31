@@ -72,6 +72,20 @@ test("estimateCostUsd handles fractional usage counts cleanly", () => {
   assert.ok(Math.abs(cost - 0.0044) < 1e-9);
 });
 
+test("estimateCostUsd applies Anthropic cache rates by bucket", () => {
+  const cost = estimateCostUsd({
+    modelId: "claude-sonnet-4-6",
+    promptTokens: 100_000,
+    completionTokens: 200_000,
+    cacheReadTokens: 300_000,
+    cacheWrite5mTokens: 200_000,
+    cacheWrite1hTokens: 300_000,
+  });
+  // $0.30 ordinary + $0.09 read + $0.75 5m write + $1.80 1h write
+  // + $3.00 output = $5.94.
+  assert.ok(Math.abs(cost - 5.94) < 1e-12);
+});
+
 test("estimateCacheSavingsUsd uses provider cache read and write rates", () => {
   assert.ok(Math.abs(estimateCacheSavingsUsd({
     provider: "openai",
@@ -89,6 +103,18 @@ test("estimateCacheSavingsUsd uses provider cache read and write rates", () => {
     modelId: "gemini-2.5-pro",
     cacheReadTokens: 1_000,
   }) - 0.0009375) < 1e-12);
+});
+
+test("estimateCacheSavingsUsd prices Anthropic 5m and 1h writes separately", () => {
+  const savings = estimateCacheSavingsUsd({
+    provider: "anthropic",
+    modelId: "claude-sonnet-4-6",
+    cacheReadTokens: 1_000,
+    cacheWrite5mTokens: 300,
+    cacheWrite1hTokens: 200,
+  });
+  // 900 avoided read tokens - 75 5m premium - 200 1h premium, at $3/M.
+  assert.ok(Math.abs(savings - 0.001875) < 1e-12);
 });
 
 test("cache-savings telemetry stays optional when the pricing helper is unavailable", () => {

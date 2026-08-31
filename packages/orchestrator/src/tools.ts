@@ -46,12 +46,126 @@ async function runRustAci(args: readonly string[], cwd: string, stdin?: string, 
   return await runRustCommand(["rust", "aci", ...args], cwd, stdin ?? (options.signal ? "" : undefined), process.env, options);
 }
 
+const MODEL_SHELL_PRIVATE_ENV_PATTERN = /(?:^|_)(?:API_?KEY|ACCESS_?KEY|AUTH(?:ORIZATION)?|AUTH_?TOKEN|CLIENT_?SECRET|COOKIE|CREDENTIALS?|JWT|PASSWORD|PASSWD|PRIVATE_?KEY|SECRET|SESSION|SIGNING_?KEY|TOKEN)(?:_|$)/i;
+const MODEL_SHELL_PRIVATE_ENV_VALUE_PATTERN = /(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/\s:@]+:[^/\s@]+@|\b(?:sk|ghp|github_pat|xox[baprs])-[A-Za-z0-9_-]{8,}\b)/i;
+const MODEL_SHELL_CONTROL_ENV = new Set([
+  "CODEX_HOME",
+  "UNCLECODE_DATA_ROOT",
+  "UNCLECODE_OWNER_ATTACH_TIMEOUT_MS",
+  "UNCLECODE_RPC_PROTOCOL",
+  "UNCLECODE_RPC_TRANSPORT",
+  "UNCLECODE_SERVER_URL",
+  "UNCLECODE_SESSION_STORE_ROOT",
+]);
+const MODEL_SHELL_EXECUTION_CONTROL_ENV = new Set([
+  "_JAVA_OPTIONS",
+  "BASHOPTS",
+  "BASH_ENV",
+  "BUN_OPTIONS",
+  "CLASSPATH",
+  "DOTNET_STARTUP_HOOKS",
+  "EDITOR",
+  "ENV",
+  "GIT_ASKPASS",
+  "GIT_DIFF_OPTS",
+  "GIT_EDITOR",
+  "GIT_EXEC_PATH",
+  "GIT_EXTERNAL_DIFF",
+  "GIT_PAGER",
+  "GIT_PROXY_COMMAND",
+  "GIT_SEQUENCE_EDITOR",
+  "GIT_SSH",
+  "GIT_SSH_COMMAND",
+  "GNUMAKEFLAGS",
+  "GRADLE_OPTS",
+  "JAVA_TOOL_OPTIONS",
+  "JDK_JAVA_OPTIONS",
+  "LESS",
+  "LESSCLOSE",
+  "LESSOPEN",
+  "LUA_CPATH",
+  "LUA_INIT",
+  "LUA_PATH",
+  "MAKEFILES",
+  "MAKEFLAGS",
+  "MANPAGER",
+  "MAVEN_OPTS",
+  "MFLAGS",
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "PAGER",
+  "PERL5LIB",
+  "PERL5OPT",
+  "PHPRC",
+  "PHP_INI_SCAN_DIR",
+  "PROMPT_COMMAND",
+  "PSMODULEPATH",
+  "PYTHONHOME",
+  "PYTHONINSPECT",
+  "PYTHONPATH",
+  "PYTHONSTARTUP",
+  "PYTHONWARNINGS",
+  "R_ENVIRON",
+  "R_PROFILE",
+  "R_PROFILE_USER",
+  "RIPGREP_CONFIG_PATH",
+  "RUBYLIB",
+  "RUBYOPT",
+  "RUSTC_WORKSPACE_WRAPPER",
+  "RUSTC_WRAPPER",
+  "SHELLOPTS",
+  "SSH_ASKPASS",
+  "TAR_OPTIONS",
+  "VISUAL",
+  "ZDOTDIR",
+]);
+
+function isModelShellExecutionControlEnvironment(name: string): boolean {
+  if (MODEL_SHELL_EXECUTION_CONTROL_ENV.has(name)) return true;
+  if (name.startsWith("BASH_FUNC_") || name.endsWith("%%")) return true;
+  if (name.startsWith("DYLD_")) return true;
+  if (["LD_AUDIT", "LD_LIBRARY_PATH", "LD_PRELOAD"].includes(name)) return true;
+  if (name.startsWith("GIT_CONFIG")) return true;
+  if (["CORECLR_ENABLE_PROFILING", "CORECLR_PROFILER", "CORECLR_PROFILER_PATH"].includes(name)) return true;
+  return /^NPM_CONFIG_(?:GLOBALCONFIG|NODE_OPTIONS|ONLOAD_SCRIPT|SCRIPT_SHELL|USERCONFIG)$/.test(name);
+}
+
+/**
+ * Shell children inherit ordinary build configuration but never the runtime
+ * owner's credentials, discovery endpoints, or ambient authentication agents.
+ */
+export function createModelShellEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(source)) {
+    if (value === undefined) continue;
+    const normalizedName = name.toUpperCase();
+    if (MODEL_SHELL_PRIVATE_ENV_PATTERN.test(name)) continue;
+    if (MODEL_SHELL_PRIVATE_ENV_VALUE_PATTERN.test(value)) continue;
+    if (/^\s*\(\)\s*\{/.test(value)) continue;
+    if (MODEL_SHELL_CONTROL_ENV.has(normalizedName)) continue;
+    // Authorization binds the displayed command, not ambient process state.
+    // Drop variables that can source code, install callbacks, inject tool
+    // options, or replace a pager/filter after policy evaluation.
+    if (isModelShellExecutionControlEnvironment(normalizedName)) continue;
+    if (normalizedName.startsWith("UNCLECODE_CONFIG__") || normalizedName.startsWith("UNCLECODE_SUBMIT__")) continue;
+    environment[name] = value;
+  }
+  environment.UNCLECODE_ALLOW_RUN_SHELL = "1";
+  return environment;
+}
+
 async function runRustShell(command: string, cwd: string, options: ToolHandlerOptions = {}): Promise<string> {
   // Reaching this handler means the executor already authorized shell.run, so
-  // the Rust child gets a request-scoped grant. The parent process env is
-  // never mutated.
-  const env = { ...process.env, UNCLECODE_ALLOW_RUN_SHELL: "1" };
-  return await runRustCommand(["rust", "shell", "--", command], cwd, options.signal ? "" : undefined, env, options);
+  // the Rust child gets a request-scoped grant. Owner/control credentials are
+  // removed and replaceEnv prevents runRustCommand from adding them back.
+  const env = createModelShellEnvironment(process.env);
+  return await runRustCommand(
+    ["rust", "shell", "--", command],
+    cwd,
+    options.signal ? "" : undefined,
+    env,
+    { ...options, replaceEnv: true },
+  );
 }
 
 function normalizeRustPathError(error: unknown, requestedPath: string): never {
@@ -63,7 +177,7 @@ function normalizeRustPathError(error: unknown, requestedPath: string): never {
 }
 
 async function listFiles(input: Record<string, unknown>, cwd: string, options: ToolHandlerOptions = {}): Promise<ToolResult> {
-  const target = typeof input.path === "string" ? input.path : ".";
+  const target = typeof input.path === "string" && input.path.trim().length > 0 ? input.path : ".";
   try {
     const stdout = await runRustAci(["list", target], cwd, undefined, options);
     return { content: stdout.trim() || "(empty directory)" };
@@ -389,6 +503,7 @@ export function parseAskUserQuestionRequest(input: Record<string, unknown>): Ask
 
   const questionIds = new Set<string>();
   return {
+    kind: "user-decision",
     id: input.id.trim(),
     ...(typeof input.title === "string" && input.title.trim().length > 0 ? { title: input.title.trim() } : {}),
     questions: input.questions.map((question) => parseAskUserQuestion(question, questionIds)),
@@ -550,6 +665,7 @@ export function createToolRuntime(input: {
   readonly allowedTools?: readonly string[] | undefined;
   readonly policyProfile?: ExecutionPolicyProfile | (() => ExecutionPolicyProfile) | undefined;
   readonly runtimeMode?: string | (() => string) | undefined;
+  readonly permissionRuleStore?: import("./permission-scope.js").CanonicalPermissionRuleStore | undefined;
 }): ToolRuntime {
   const registry = createToolRegistry(input);
   return {
@@ -562,6 +678,7 @@ export function createToolRuntime(input: {
         envShellOptIn: process.env.UNCLECODE_ALLOW_RUN_SHELL === "1",
       }),
       runtimeMode: input.runtimeMode ?? "local",
+      ...(input.permissionRuleStore ? { permissionRuleStore: input.permissionRuleStore } : {}),
       ...(input.interactionBridge ? { interactionBridge: input.interactionBridge } : {}),
     }),
   };

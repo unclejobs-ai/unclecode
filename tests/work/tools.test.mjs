@@ -6,13 +6,14 @@ import test from "node:test";
 
 import { createToolRuntime, resolveModeExecutionPolicyProfile } from "@unclecode/orchestrator";
 
-function runtime({ shell = false } = {}) {
+function runtime({ shell = false, interactionBridge } = {}) {
   return createToolRuntime({
     policyProfile: resolveModeExecutionPolicyProfile({
       mode: "default",
       envShellOptIn: shell,
     }),
     runtimeMode: "local",
+    ...(interactionBridge ? { interactionBridge } : {}),
   });
 }
 
@@ -32,7 +33,17 @@ test("run_shell aborts long-running Rust shell tools promptly", async () => {
   const command = process.platform === "win32" ? "Start-Sleep -Seconds 10" : "sleep 10";
   const startedAt = Date.now();
 
-  const pending = runtime({ shell: true }).executor.execute({
+  const pending = runtime({
+    shell: true,
+    interactionBridge: {
+      async ask() {
+        return {
+          status: "answered",
+          answers: [{ id: "policy-confirmation", selectedOptions: ["Approve"] }],
+        };
+      },
+    },
+  }).executor.execute({
     toolName: "run_shell",
     input: { command },
     cwd: process.cwd(),

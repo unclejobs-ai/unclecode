@@ -64,6 +64,7 @@ export class CodingAgent<
   private readonly providerName: TraceProviderName;
   private model: string;
   private traceListener: ((event: CodingAgentTraceEvent<ToolTraceEvent>) => void) | undefined;
+  private activeTurnFirstTokenAt: number | undefined = undefined;
 
   constructor(args: {
     providerName: TraceProviderName;
@@ -94,6 +95,7 @@ export class CodingAgent<
   async runTurn(prompt: string, attachments: readonly Attachment[] = [], options: AgentTurnOptions = {}): Promise<AgentTurnResult> {
     const turnStartedAt = Date.now();
     const model = this.model;
+    this.activeTurnFirstTokenAt = undefined;
     this.emitTrace(this.buildTurnStartedTrace(prompt, turnStartedAt, model));
     this.emitTrace(this.buildProviderRouteTrace(turnStartedAt, model));
     this.emitTrace(this.buildProviderCallingTrace(turnStartedAt, model));
@@ -101,7 +103,7 @@ export class CodingAgent<
     const result = await this.provider.runTurn(prompt, attachments, options);
     const completedAt = Date.now();
     this.emitTrace(this.buildTurnCompletedTrace(result.text, turnStartedAt, completedAt, model));
-    const usageTrace = this.buildUsageRecordedTrace(result, turnStartedAt, model);
+    const usageTrace = this.buildUsageRecordedTrace(result, turnStartedAt, completedAt, model);
     if (usageTrace) {
       this.emitTrace(usageTrace);
     }
@@ -111,6 +113,7 @@ export class CodingAgent<
   private buildUsageRecordedTrace(
     result: AgentTurnResult,
     startedAt: number,
+    completedAt: number,
     model: string,
   ): UsageRecordedTraceEvent | undefined {
     const usage = result.usage;
@@ -138,6 +141,8 @@ export class CodingAgent<
       ...(cacheSavingsUsd > 0 ? { cacheSavingsUsd } : {}),
       ...(result.costUsd === undefined ? {} : { costUsd: result.costUsd }),
       startedAt,
+      ...(this.activeTurnFirstTokenAt === undefined ? {} : { firstTokenAt: this.activeTurnFirstTokenAt }),
+      completedAt,
     };
   }
 
@@ -234,6 +239,16 @@ export class CodingAgent<
   private emitTrace(event: CodingAgentTraceEvent<ToolTraceEvent>): void {
     if (!this.traceListener) {
       return;
+    }
+
+    const delta = (event as { readonly delta?: unknown }).delta;
+    if (
+      event.type === "assistant.delta"
+      && typeof delta === "string"
+      && delta.length > 0
+      && this.activeTurnFirstTokenAt === undefined
+    ) {
+      this.activeTurnFirstTokenAt = Date.now();
     }
 
     try {

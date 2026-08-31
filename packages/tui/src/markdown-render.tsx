@@ -1,3 +1,4 @@
+import { createInstrumentedLruCache } from "@unclecode/contracts";
 import { Box, Text } from "ink";
 import React from "react";
 
@@ -368,7 +369,51 @@ function renderDiagramLine(line: string, theme: MarkdownTheme, key: string): Rea
 const STREAMING_CURSOR_GLYPH = "▌";
 
 const MARKDOWN_RENDER_CACHE_MAX_ENTRIES = 64;
-const markdownRenderCache = new Map<string, React.ReactNode>();
+const MARKDOWN_RENDER_CACHE_MAX_RETAINED_BYTES = 8 * 1024 * 1024;
+const MARKDOWN_RENDER_CACHE_MAX_SOURCE_BYTES = 16 * 1024;
+const MARKDOWN_RENDER_CACHE_MAX_REACT_ELEMENTS = 128;
+const MARKDOWN_RENDER_CACHE_BYTES_PER_REACT_ELEMENT = 4 * 1024;
+const COMPACT_PLAIN_MARKDOWN_MIN_LINES = 129;
+const markdownCacheTextEncoder = new TextEncoder();
+
+function countMarkdownReactElements(node: React.ReactNode): number {
+  const pending: React.ReactNode[] = [node];
+  let count = 0;
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (Array.isArray(current)) {
+      for (const child of current) pending.push(child);
+      continue;
+    }
+    if (!React.isValidElement(current)) continue;
+    count += 1;
+    if (count > MARKDOWN_RENDER_CACHE_MAX_REACT_ELEMENTS) return count;
+    const children = (current.props as { readonly children?: React.ReactNode }).children;
+    if (children !== undefined) pending.push(children);
+  }
+  return count;
+}
+
+function estimateMarkdownRenderCacheEntryBytes(key: string, rendered: React.ReactNode): number {
+  const elementCount = countMarkdownReactElements(rendered);
+  if (elementCount > MARKDOWN_RENDER_CACHE_MAX_REACT_ELEMENTS) {
+    return MARKDOWN_RENDER_CACHE_MAX_RETAINED_BYTES + 1;
+  }
+  return (markdownCacheTextEncoder.encode(key).byteLength * 4)
+    + (elementCount * MARKDOWN_RENDER_CACHE_BYTES_PER_REACT_ELEMENT)
+    + 4_096;
+}
+
+const markdownRenderCache = createInstrumentedLruCache<string, React.ReactNode>({
+  name: "tui-markdown-render",
+  maxEntries: MARKDOWN_RENDER_CACHE_MAX_ENTRIES,
+  maxRetainedBytes: MARKDOWN_RENDER_CACHE_MAX_RETAINED_BYTES,
+  // A hard element cap prevents line-rich or delimiter-dense documents from
+  // retaining an arbitrarily large React graph behind a small source string.
+  // Cacheable trees are charged conservatively for both their strings/key and
+  // every React element, so the aggregate byte budget remains meaningful.
+  estimateEntryBytes: estimateMarkdownRenderCacheEntryBytes,
+});
 let markdownRenderParseCount = 0;
 
 function buildMarkdownRenderCacheKey(
@@ -381,15 +426,70 @@ function buildMarkdownRenderCacheKey(
 
 /**
  * Cache exclusion rule (mirrors the view's shouldSkipRustTextCacheStore):
- * never cache text that is still streaming. `isStreamingText` is supplied by
- * the view, which knows the entry's streaming state; the raw-glyph check
- * keeps the rule true for callers that pass untrimmed streaming text.
+ * never cache text that is still streaming or too large to retain safely.
+ * `isStreamingText` is supplied by the view, which knows the entry's streaming
+ * state; the raw-glyph check keeps the rule true for callers that pass
+ * untrimmed streaming text. Rendered trees also face a structural cap in the
+ * cache estimator because small, line-rich inputs can expand dramatically.
  */
 function shouldSkipMarkdownRenderCache(input: {
   readonly text: string;
   readonly isStreamingText?: boolean;
 }): boolean {
-  return input.isStreamingText === true || input.text.endsWith(STREAMING_CURSOR_GLYPH);
+  return input.isStreamingText === true
+    || input.text.endsWith(STREAMING_CURSOR_GLYPH)
+    || markdownCacheTextEncoder.encode(input.text).byteLength > MARKDOWN_RENDER_CACHE_MAX_SOURCE_BYTES;
+}
+
+function resolveCompactPlainMarkdownText(text: string, width: number): string | undefined {
+  let lineCount = 1;
+  for (let index = 0; index < text.length && lineCount < COMPACT_PLAIN_MARKDOWN_MIN_LINES; index += 1) {
+    if (text.charCodeAt(index) === 10) lineCount += 1;
+  }
+  if (lineCount < COMPACT_PLAIN_MARKDOWN_MIN_LINES) return undefined;
+
+  // Treat any Markdown punctuation as structural. This deliberately gives up
+  // the compact path for ambiguous prose rather than silently flattening a
+  // link, HTML/autolink, escape, heading, list, fence, or future construct.
+  for (let index = 0; index < text.length; index += 1) {
+    const codePoint = text.charCodeAt(index);
+    const isAsciiPunctuation = (codePoint >= 33 && codePoint <= 47)
+      || (codePoint >= 58 && codePoint <= 64)
+      || (codePoint >= 91 && codePoint <= 96)
+      || (codePoint >= 123 && codePoint <= 126);
+    if (isAsciiPunctuation) return undefined;
+  }
+  return renderPlainMarkdownVerbatimText(text, width);
+}
+
+function renderPlainMarkdownVerbatimText(text: string, width: number): string | undefined {
+  const maxWidth = Math.max(20, width);
+  let lineLength = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const codePoint = text.charCodeAt(index);
+    if (codePoint === 10) {
+      const isTrailingBlankLine = index === text.length - 1;
+      if (lineLength === 0 && !isTrailingBlankLine) return undefined;
+      lineLength = 0;
+      continue;
+    }
+    // Printable ASCII has one terminal cell per code unit. Anything else uses
+    // the grapheme-aware wrapping fallback below.
+    if (codePoint < 32 || codePoint > 126) return undefined;
+    if ((lineLength === 0 && codePoint === 32) || lineLength >= maxWidth) return undefined;
+    lineLength += 1;
+    const next = text.charCodeAt(index + 1);
+    if ((next === 10 || index === text.length - 1) && codePoint === 32) return undefined;
+  }
+  return text.endsWith("\n") ? `${text} ` : text;
+}
+
+function renderCompactPlainMarkdown(text: string, theme: MarkdownTheme): React.ReactNode {
+  return (
+    <Box flexDirection="column">
+      <Text color={theme.text}>{text}</Text>
+    </Box>
+  );
 }
 
 /** @internal test seam — parse counter for cache-hit assertions. */
@@ -399,7 +499,7 @@ export function getMarkdownRenderParseCountForTest(): number {
 
 /** @internal test seam — isolates cache state between tests. */
 export function resetMarkdownRenderCacheForTest(): void {
-  markdownRenderCache.clear();
+  markdownRenderCache.invalidateAll();
   markdownRenderParseCount = 0;
 }
 
@@ -413,20 +513,22 @@ export function renderMarkdown(
   },
 ): React.ReactNode {
   const { text, width, theme } = input;
-  const skipCache = shouldSkipMarkdownRenderCache(input);
+  const compactPlainText = resolveCompactPlainMarkdownText(text, width);
+  const useCompactPlainRenderer = compactPlainText !== undefined;
+  const skipCache = useCompactPlainRenderer || shouldSkipMarkdownRenderCache(input);
   const cacheKey = skipCache
     ? undefined
     : buildMarkdownRenderCacheKey(text, width, theme);
   if (cacheKey !== undefined) {
-    const cached = markdownRenderCache.get(cacheKey);
-    if (cached !== undefined) {
-      // LRU touch: re-insert so the newest reads survive eviction.
-      markdownRenderCache.delete(cacheKey);
-      markdownRenderCache.set(cacheKey, cached);
-      return cached;
+    const cached = markdownRenderCache.lookup(cacheKey);
+    if (cached.hit) {
+      return cached.value;
     }
   }
   markdownRenderParseCount += 1;
+  if (compactPlainText !== undefined) {
+    return renderCompactPlainMarkdown(compactPlainText, theme);
+  }
   const lines = text.split("\n");
   const nodes: React.ReactNode[] = [];
   let inFence = false;
@@ -621,12 +723,6 @@ export function renderMarkdown(
 
   const rendered = <Box flexDirection="column">{nodes}</Box>;
   if (cacheKey !== undefined) {
-    if (markdownRenderCache.size >= MARKDOWN_RENDER_CACHE_MAX_ENTRIES) {
-      const oldestKey = markdownRenderCache.keys().next().value;
-      if (oldestKey !== undefined) {
-        markdownRenderCache.delete(oldestKey);
-      }
-    }
     markdownRenderCache.set(cacheKey, rendered);
   }
   return rendered;

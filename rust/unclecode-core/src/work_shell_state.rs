@@ -1,5 +1,7 @@
 use serde_json::{json, Value};
 
+const MAX_LIVE_TRANSCRIPT_ENTRIES: usize = 256;
+
 pub fn resolve_work_shell_trace_line_patch_json(input_json: &str) -> Result<String, String> {
     let input = parse_input(input_json)?;
     serde_json::to_string(&resolve_work_shell_trace_line_patch(&input))
@@ -196,11 +198,14 @@ fn resolve_work_shell_append_entries_patch(input: &Value) -> Value {
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or(&[]);
-    let entries = existing_entries
+    let mut entries = existing_entries
         .iter()
         .chain(next_entries.iter())
         .cloned()
         .collect::<Vec<_>>();
+    if entries.len() > MAX_LIVE_TRANSCRIPT_ENTRIES {
+        entries.drain(0..entries.len() - MAX_LIVE_TRANSCRIPT_ENTRIES);
+    }
 
     json!({ "entries": entries })
 }

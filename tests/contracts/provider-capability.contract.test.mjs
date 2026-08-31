@@ -8,6 +8,7 @@ test("provider-capability fixtures expose canonical provider metadata", () => {
     "anthropic",
     "gemini",
     "openai",
+    "deepseek",
     "groq",
     "ollama",
     "copilot",
@@ -32,6 +33,17 @@ test("provider-capability fixtures expose canonical provider metadata", () => {
     transport: "native",
     defaultModel: "gemini-2.5-flash",
     envKeys: ["GEMINI_API_KEY", "GEMINI_MODEL"],
+    supportsToolCalls: true,
+    supportsSessionMemory: true,
+    supportsPromptCaching: false,
+  });
+
+  assert.deepEqual(PROVIDER_CAPABILITIES.deepseek, {
+    id: "deepseek",
+    label: "DeepSeek",
+    transport: "compat",
+    defaultModel: "deepseek-chat",
+    envKeys: ["DEEPSEEK_API_KEY", "DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL"],
     supportsToolCalls: true,
     supportsSessionMemory: true,
     supportsPromptCaching: false,

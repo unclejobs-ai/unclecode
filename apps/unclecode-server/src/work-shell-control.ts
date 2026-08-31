@@ -1,0 +1,273 @@
+import type { RuntimeSessionSource } from "./control-room.js";
+import { LiveRuntimeControlRegistry } from "./persistent-runtime.js";
+import type { RuntimeControlRequest, RuntimeControlResult } from "./runtime-adapter.js";
+import type { RuntimeSessionRevisionClock } from "./runtime-engine-rpc.js";
+import { boundedRuntimeRpcError } from "./runtime-error-redaction.js";
+import { RuntimeSessionMutationArbiter } from "./runtime-mutation-arbiter.js";
+import type {
+  AskUserQuestionAnswer,
+  AskUserQuestionRequest,
+  ControlRoomApprovalPayload,
+  ControlRoomDecisionPayload,
+} from "@unclecode/contracts";
+
+type AgentRun = { readonly id: string; readonly status?: string | undefined };
+
+export type WorkShellControlEngine = {
+  getState(): {
+    readonly isBusy: boolean;
+    readonly queuePaused: boolean;
+    readonly model: string;
+    readonly mode: string;
+    readonly uiLocale: "en" | "ko";
+    readonly agentConsole: Readonly<Record<string, unknown>> & {
+      readonly pendingDecision?: AskUserQuestionRequest | undefined;
+      readonly agents?: readonly AgentRun[] | undefined;
+    };
+  };
+  subscribe(listener: () => void): () => void;
+  interruptTurn(): boolean | void;
+  admitRuntimeTurn?(): void;
+  getTurnLifecycle(): {
+    readonly state: "idle" | "running" | "pause_pending" | "paused" | "cancelled" | "completed";
+    readonly turnId?: string | undefined;
+    readonly boundary?: string | undefined;
+  };
+  requestTurnPause(): Promise<{ readonly turnId: string; readonly boundary: string }>;
+  resumeTurn(): boolean;
+  resumeQueueItems(): Promise<void>;
+  handleSubmit(message: string): Promise<void>;
+  answerPendingDecisionByIndex(index: number, decisionId: string): boolean;
+  answerPendingUserDecision(decisionId: string, answers: readonly AskUserQuestionAnswer[]): boolean;
+  getAgentControlPort(): {
+    steer(agentRunId: string, message: string): Promise<{ readonly status: string; readonly message?: string }>;
+  };
+};
+
+export type WorkShellRuntimeChange = {
+  readonly sessionId: string;
+  readonly revision: number;
+  readonly state: RuntimeSessionSource["state"];
+};
+
+function messageFrom(request: RuntimeControlRequest): string | undefined {
+  if (request.action !== "steer" && request.action !== "follow-up") return undefined;
+  const value = request.payload?.message;
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function validDecisionAnswers(
+  pending: AskUserQuestionRequest | undefined,
+  payload: ControlRoomDecisionPayload,
+): boolean {
+  if (pending?.kind !== "user-decision" || pending.id !== payload.decisionId) return false;
+  if (!Array.isArray(payload.answers) || payload.answers.length !== pending.questions.length) return false;
+  const byId = new Map<string, AskUserQuestionAnswer>();
+  for (const answer of payload.answers) {
+    if (!answer || typeof answer !== "object" || typeof answer.id !== "string" || byId.has(answer.id)) return false;
+    byId.set(answer.id, answer);
+  }
+  return pending.questions.every(question => {
+    const answer = byId.get(question.id);
+    if (!answer || !Array.isArray(answer.selectedOptions)) return false;
+    if (answer.selectedOptions.length === 0 || (question.multi !== true && answer.selectedOptions.length !== 1)) return false;
+    if (new Set(answer.selectedOptions).size !== answer.selectedOptions.length) return false;
+    if (answer.selectedOptions.some(label => typeof label !== "string" || !question.options.some(option => option.label === label))) return false;
+    return answer.customInput === undefined
+      || (typeof answer.customInput === "string" && answer.customInput.trim().length > 0 && answer.customInput.length <= 800);
+  });
+}
+
+function validSecurityApproval(
+  pending: AskUserQuestionRequest | undefined,
+  payload: ControlRoomApprovalPayload | undefined,
+): boolean {
+  return payload?.decision === "approve_once"
+    && pending?.kind === "security-approval"
+    && pending.id === payload.decisionId
+    && pending.questions.length === 1
+    && (pending.questions[0]?.options.findIndex(option => option.label === "Approve") ?? -1) >= 0;
+}
+
+function stateOf(engine: WorkShellControlEngine): RuntimeSessionSource["state"] {
+  const state = engine.getState();
+  const lifecycle = engine.getTurnLifecycle();
+  if (lifecycle.state === "pause_pending" || lifecycle.state === "paused" || lifecycle.state === "cancelled") {
+    return lifecycle.state;
+  }
+  if (state.agentConsole.pendingDecision) return "requires_action";
+  if (lifecycle.state === "running" || state.isBusy) return "running";
+  return "idle";
+}
+
+export function attachWorkShellRuntime(
+  registry: LiveRuntimeControlRegistry,
+  input: {
+    readonly sessionId: string;
+    readonly projectPath: string;
+    readonly engine: WorkShellControlEngine;
+    readonly provider?: string;
+    readonly initialRevision?: number;
+    readonly revisionClock?: RuntimeSessionRevisionClock | undefined;
+    readonly mutationArbiter?: RuntimeSessionMutationArbiter | undefined;
+    readonly onChanged?: ((event: WorkShellRuntimeChange) => void) | undefined;
+  },
+): () => void {
+  const revisionClock = input.revisionClock ?? { value: Math.max(0, input.initialRevision ?? 0) };
+  const mutationArbiter = input.mutationArbiter ?? new RuntimeSessionMutationArbiter(revisionClock);
+
+  const emit = () => input.onChanged?.({
+    sessionId: input.sessionId,
+    revision: revisionClock.value,
+    state: stateOf(input.engine),
+  });
+  const unsubscribe = input.engine.subscribe(() => {
+    if (!input.mutationArbiter) mutationArbiter.publishAutonomous();
+    if (!mutationArbiter.isMutationActive() || stateOf(input.engine) === "pause_pending") emit();
+  });
+
+  const snapshot = (): RuntimeSessionSource => {
+    const state = input.engine.getState();
+    return {
+      sessionId: input.sessionId,
+      projectPath: input.projectPath,
+      locale: state.uiLocale,
+      state: stateOf(input.engine),
+      revision: revisionClock.value,
+      updatedAt: new Date().toISOString(),
+      metadata: {
+        model: state.model,
+        mode: state.mode,
+        ...(input.provider ? { provider: input.provider } : {}),
+      },
+      agentConsole: state.agentConsole,
+      context: { included: [], excluded: [], compacted: false },
+    };
+  };
+
+  const deny = (code: "denied" | "invalid_action", message: string): RuntimeControlResult => ({
+    ok: false,
+    code,
+    message,
+    revision: revisionClock.value,
+  });
+
+  const detachRegistry = registry.attach(input.sessionId, {
+    revision: () => revisionClock.value,
+    mutationArbiter,
+    snapshot,
+    onAdmitted(request) {
+      if (request.action === "follow-up") input.engine.admitRuntimeTurn?.();
+    },
+    onCommitted(result) {
+      if (result.ok) emit();
+    },
+    precondition(request) {
+      if (request.action === "pause" && !input.engine.getState().isBusy) {
+        return deny("invalid_action", "Only a running turn can be paused.");
+      }
+      if (request.action === "resume" && input.engine.getTurnLifecycle().state !== "paused") {
+        return deny("invalid_action", "Only a cooperatively paused turn can be resumed.");
+      }
+      if (request.action === "follow-up" && !messageFrom(request)) {
+        return deny("invalid_action", "A follow-up message is required.");
+      }
+      if (request.action === "cancel") {
+        const lifecycle = input.engine.getTurnLifecycle();
+        const activeLifecycle = lifecycle.state === "running"
+          || lifecycle.state === "pause_pending"
+          || lifecycle.state === "paused";
+        if (!activeLifecycle && !input.engine.getState().isBusy && !mutationArbiter.hasCancellableMutation()) {
+          return deny("invalid_action", "No admitted or active turn could be cancelled.");
+        }
+      }
+      if (request.action === "steer") {
+        const agentRunId = request.payload?.agentRunId;
+        if (!messageFrom(request) || typeof agentRunId !== "string" || agentRunId.trim().length === 0) {
+          return deny("invalid_action", "Steer requires an explicit agentRunId and message.");
+        }
+        const agents = input.engine.getState().agentConsole.agents;
+        const target = agents?.find(agent => agent.id === agentRunId.trim());
+        const settled = target?.status === "completed"
+          || target?.status === "failed"
+          || target?.status === "cancelled"
+          || target?.status === "interrupted";
+        if (agents && (!target || settled)) {
+          return deny("denied", "The selected agent run is no longer available for steering.");
+        }
+      }
+      if (request.action === "approve") {
+        const pending = input.engine.getState().agentConsole.pendingDecision;
+        if (!validSecurityApproval(pending, request.payload)) {
+          return deny("denied", "The security approval changed or is no longer pending.");
+        }
+      }
+      if (request.action === "decision" && !validDecisionAnswers(
+        input.engine.getState().agentConsole.pendingDecision,
+        request.payload,
+      )) {
+        return deny("denied", "The user decision changed or the submitted answers are invalid.");
+      }
+      return undefined;
+    },
+    async control(request) {
+      let result: RuntimeControlResult | undefined;
+      try {
+        if (request.action === "pause") {
+          if (!input.engine.getState().isBusy) return deny("invalid_action", "Only a running turn can be paused.");
+          await input.engine.requestTurnPause();
+        } else if (request.action === "resume") {
+          if (!input.engine.resumeTurn()) return deny("invalid_action", "Only a cooperatively paused turn can be resumed.");
+        } else if (request.action === "cancel") {
+          if (input.engine.interruptTurn() === false) {
+            return deny("invalid_action", "No admitted or active turn could be cancelled.");
+          }
+        } else if (request.action === "follow-up") {
+          const message = messageFrom(request);
+          if (!message) return deny("invalid_action", "A follow-up message is required.");
+          await input.engine.handleSubmit(message);
+        } else if (request.action === "steer") {
+          const message = messageFrom(request);
+          const agentRunId = request.payload?.agentRunId;
+          if (!message || typeof agentRunId !== "string" || agentRunId.trim().length === 0) {
+            return deny("invalid_action", "Steer requires an explicit agentRunId and message.");
+          }
+          const receipt = await input.engine.getAgentControlPort().steer(agentRunId.trim(), message);
+          if (receipt.status !== "delivered") {
+            return deny("denied", receipt.message
+              ? boundedRuntimeRpcError(receipt.message)
+              : "The steer was not delivered.");
+          }
+        } else if (request.action === "approve") {
+          const pending = input.engine.getState().agentConsole.pendingDecision;
+          if (!validSecurityApproval(pending, request.payload)) {
+            return deny("denied", "The security approval changed or is no longer pending.");
+          }
+          const question = pending?.questions.length === 1 ? pending.questions[0] : undefined;
+          const index = question?.options.findIndex(option => option.label === "Approve") ?? -1;
+          if (index < 0 || !input.engine.answerPendingDecisionByIndex(index + 1, request.payload.decisionId)) {
+            return deny("denied", "The security approval is no longer pending.");
+          }
+        } else if (request.action === "decision") {
+          if (!validDecisionAnswers(input.engine.getState().agentConsole.pendingDecision, request.payload)) {
+            return deny("denied", "The user decision changed or the submitted answers are invalid.");
+          }
+          if (!input.engine.answerPendingUserDecision(request.payload.decisionId, request.payload.answers)) {
+            return deny("denied", "The user decision is no longer pending.");
+          }
+        } else {
+          return deny("invalid_action", "Unknown runtime action.");
+        }
+        result = { ok: true, revision: revisionClock.value, state: stateOf(input.engine) };
+      } catch (error) {
+        return deny("invalid_action", boundedRuntimeRpcError(error));
+      }
+      return result ?? deny("invalid_action", "The runtime action did not complete.");
+    },
+  });
+
+  return () => {
+    unsubscribe();
+    detachRegistry();
+  };
+}

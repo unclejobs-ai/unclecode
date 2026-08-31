@@ -552,6 +552,7 @@ pub fn build_openai_user_message_json(
 pub fn build_openai_assistant_message_json(
     content: &str,
     tool_calls_json: &str,
+    reasoning_content: Option<&str>,
 ) -> Result<String, String> {
     let tool_calls: Value = serde_json::from_str(tool_calls_json)
         .map_err(|error| format!("Invalid OpenAI tool calls JSON: {error}"))?;
@@ -561,6 +562,9 @@ pub fn build_openai_assistant_message_json(
     });
     if let Some(calls) = tool_calls.as_array().filter(|calls| !calls.is_empty()) {
         message["tool_calls"] = Value::Array(calls.clone());
+    }
+    if let Some(reasoning) = reasoning_content.filter(|reasoning| !reasoning.is_empty()) {
+        message["reasoning_content"] = Value::String(reasoning.to_string());
     }
     serde_json::to_string(&message).map_err(|error| error.to_string())
 }
@@ -894,13 +898,14 @@ mod tests {
         let assistant = build_openai_assistant_message_json(
             "working",
             r#"[{"id":"call_1","function":{"name":"run_shell","arguments":"{}"}}]"#,
+            Some("retain for continuation"),
         )
         .unwrap();
         let tool = build_openai_tool_message_json("call_1", "ok").unwrap();
 
         assert_eq!(
             assistant,
-            r#"{"content":"working","role":"assistant","tool_calls":[{"function":{"arguments":"{}","name":"run_shell"},"id":"call_1"}]}"#
+            r#"{"content":"working","reasoning_content":"retain for continuation","role":"assistant","tool_calls":[{"function":{"arguments":"{}","name":"run_shell"},"id":"call_1"}]}"#
         );
         assert_eq!(
             tool,

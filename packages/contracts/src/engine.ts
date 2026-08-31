@@ -1,6 +1,6 @@
 import type { JsonObject } from "./json.js";
 
-export const SESSION_STATES = ["idle", "running", "requires_action"] as const;
+export const SESSION_STATES = ["idle", "running", "pause_pending", "paused", "requires_action"] as const;
 
 export type SessionState = (typeof SESSION_STATES)[number];
 

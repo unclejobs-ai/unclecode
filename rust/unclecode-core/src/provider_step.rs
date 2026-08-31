@@ -13,10 +13,10 @@ pub fn provider_turn_step_json(
     response_entries_json: &str,
 ) -> Result<String, String> {
     match provider {
-        "openai" | "anthropic" | "gemini" => {}
+        "openai" | "deepseek" | "anthropic" | "gemini" => {}
         _ => {
             return Err(
-                "Usage: unclecode rust provider turn-step <openai|anthropic|gemini> <iteration> <action-count> <max-iterations>"
+                "Usage: unclecode rust provider turn-step <openai|deepseek|anthropic|gemini> <iteration> <action-count> <max-iterations>"
                     .to_string(),
             )
         }
@@ -55,10 +55,10 @@ pub fn provider_complete_turn_step_json(
     tool_outcomes_json: &str,
 ) -> Result<String, String> {
     match provider {
-        "openai" | "anthropic" | "gemini" => {}
+        "openai" | "deepseek" | "anthropic" | "gemini" => {}
         _ => {
             return Err(
-                "Usage: unclecode rust provider complete-turn-step <openai|anthropic|gemini> <iteration> <action-count> <max-iterations>"
+                "Usage: unclecode rust provider complete-turn-step <openai|deepseek|anthropic|gemini> <iteration> <action-count> <max-iterations>"
                     .to_string(),
             )
         }

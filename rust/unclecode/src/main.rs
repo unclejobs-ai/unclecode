@@ -1,5 +1,6 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -11,7 +12,9 @@ use unclecode_core::aci::{
 use unclecode_core::aci_edit::{line_edit_json, lint_failure_message, restore_file};
 use unclecode_core::aci_patch::{apply_unified_patch_json, parse_unified_diff_json};
 use unclecode_core::aci_safe::{
-    read_text_file_no_symlinks, write_text_file_atomically_no_symlinks,
+    delete_text_file_no_symlinks, delete_text_file_no_symlinks_if_exists,
+    read_text_file_bounded_no_symlinks, read_text_file_no_symlinks,
+    write_text_file_atomically_no_symlinks,
 };
 use unclecode_core::aci_search::{find_files_json, glob_files, search_text, search_text_json};
 use unclecode_core::anthropic_request::{
@@ -144,7 +147,10 @@ use unclecode_core::provider_transport::{
     post_openai_codex_json, provider_request_spec_json,
 };
 use unclecode_core::queue::{
-    queue_item_json, queue_items_json, queue_length_json, PersistentWorkQueue, WorkQueue,
+    queue_cleanup_artifacts_json, queue_cleanup_completion_json, queue_item_json, queue_items_json,
+    queue_length_json, queue_limit_acceptance_json, queue_limit_rejection_json,
+    PersistentWorkQueue, QueueAttachmentArtifact, QueueMoveDirection, QueuePushError, WorkQueue,
+    QUEUE_CLEANUP_SWEEP_LIMIT, QUEUE_MAX_ITEM_BYTES,
 };
 use unclecode_core::queue_command::resolve_queue_command_json;
 use unclecode_core::reasoning_builtin_command::resolve_reasoning_builtin_command_json;
@@ -161,8 +167,9 @@ use unclecode_core::responses_input::{
 use unclecode_core::runtime::{run_command, run_shell_command, RuntimeCommand};
 use unclecode_core::sensitive_input_command::resolve_sensitive_input_cancel_result_json;
 use unclecode_core::session::{
-    persist_work_shell_session_snapshot_json, resume_work_shell_session_json, session_paths,
-    SessionLog, WorkShellSessionSnapshot, WorkShellSessionStore,
+    persist_work_shell_session_snapshot_json, resume_work_shell_session_json,
+    scan_session_persistence_notices_json, session_paths, SessionLog, WorkShellSessionSnapshot,
+    WorkShellSessionStore,
 };
 use unclecode_core::sessions_command::resolve_sessions_command_json;
 use unclecode_core::sha256::{sha256_base64url_bytes, sha256_hex_bytes};
@@ -243,7 +250,10 @@ mod cli_team_background;
 mod cli_work;
 
 const TS_ENTRYPOINT: &str = "apps/unclecode-cli/dist/index.js";
+const TS_WORK_ENTRYPOINT: &str = "apps/unclecode-cli/dist/work-entry.js";
 const NODE_NO_EXPERIMENTAL_WARNING: &str = "--no-warnings=ExperimentalWarning";
+const RUST_COMMAND_INPUT_FILE_ENV: &str = "UNCLECODE_RUST_INPUT_FILE";
+const MAX_RUST_COMMAND_INPUT_BYTES: usize = 8 * 1024 * 1024;
 
 fn main() -> ExitCode {
     let started_at = Instant::now();
@@ -361,17 +371,15 @@ fn run_with_start(args: Vec<OsString>, started_at: Instant) -> Result<u8, String
         return cli_team::run_top_level_team_command(&team_args);
     }
     if let Some(work_args) = cli_work::top_level_work_args(&args) {
-        // Interactive `unclecode work` launches the TS TUI runtime so CRP
-        // (Context Runbook Protocol) is active. Non-interactive (piped stdin,
-        // one-shot prompt) falls through to the Rust-native mini-loop.
-        if should_launch_work_tui(
+        return match select_public_work_route(
             &work_args,
             io::stdin().is_terminal(),
             io::stdout().is_terminal(),
         ) {
-            return launch_typescript_tui_bridge(&work_args);
-        }
-        return cli_work::run_top_level_work_command(&work_args);
+            PublicWorkRoute::TypescriptTui => launch_typescript_tui_bridge(&work_args),
+            PublicWorkRoute::TypescriptOwner => launch_typescript_work_owner_bridge(&work_args),
+            PublicWorkRoute::RustNative => cli_work::run_top_level_work_command(&work_args),
+        };
     }
 
     let command = args
@@ -496,6 +504,31 @@ fn should_launch_work_tui(work_args: &[OsString], stdin_is_tty: bool, stdout_is_
     stdin_is_tty && stdout_is_tty && cli_work::work_args_are_interactive_promptless(work_args)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublicWorkRoute {
+    TypescriptTui,
+    TypescriptOwner,
+    RustNative,
+}
+
+fn select_public_work_route(
+    work_args: &[OsString],
+    stdin_is_tty: bool,
+    stdout_is_tty: bool,
+) -> PublicWorkRoute {
+    if cli_work::work_args_request_metadata(work_args) {
+        PublicWorkRoute::RustNative
+    } else if cli_work::work_args_request_native_engine(work_args) {
+        PublicWorkRoute::RustNative
+    } else if cli_work::work_args_have_prompt(work_args) || !stdin_is_tty {
+        PublicWorkRoute::TypescriptOwner
+    } else if should_launch_work_tui(work_args, stdin_is_tty, stdout_is_tty) {
+        PublicWorkRoute::TypescriptTui
+    } else {
+        PublicWorkRoute::RustNative
+    }
+}
+
 fn should_launch_full_center(args: &[OsString], stdin_is_tty: bool, stdout_is_tty: bool) -> bool {
     if !stdin_is_tty || !stdout_is_tty {
         return false;
@@ -512,21 +545,36 @@ fn launch_typescript_tui_bridge(tui_args: &[OsString]) -> Result<u8, String> {
     launch_typescript_command_bridge("tui", tui_args)
 }
 
+fn launch_typescript_work_owner_bridge(work_args: &[OsString]) -> Result<u8, String> {
+    launch_typescript_entrypoint_bridge(TS_WORK_ENTRYPOINT, None, work_args)
+}
+
 fn launch_typescript_command_bridge(
     command: &str,
     command_args: &[OsString],
 ) -> Result<u8, String> {
+    launch_typescript_entrypoint_bridge(TS_ENTRYPOINT, Some(command), command_args)
+}
+
+fn launch_typescript_entrypoint_bridge(
+    entrypoint_path: &str,
+    command: Option<&str>,
+    command_args: &[OsString],
+) -> Result<u8, String> {
     let repo_root = find_repo_root()?;
-    let entrypoint = repo_root.join(TS_ENTRYPOINT);
+    let entrypoint = repo_root.join(entrypoint_path);
     if !entrypoint.exists() {
-        return Err("Full-screen TUI bridge is not built yet. Run `npm run build`.".to_string());
+        return Err("TypeScript runtime bridge is not built yet. Run `npm run build`.".to_string());
     }
 
     repair_typescript_native_modules_if_needed(&repo_root)?;
 
-    let status = Command::new(node_binary())
-        .arg(entrypoint)
-        .arg(command)
+    let mut child = Command::new(node_binary());
+    child.arg(entrypoint);
+    if let Some(command) = command {
+        child.arg(command);
+    }
+    let status = child
         .args(command_args)
         .current_dir(work_cwd()?)
         .envs(env::vars_os())
@@ -536,7 +584,7 @@ fn launch_typescript_command_bridge(
         )
         .env("UNCLECODE_FORCE_TS_TUI", "1")
         .status()
-        .map_err(|error| format!("Failed to launch UncleCode full-screen TUI: {error}"))?;
+        .map_err(|error| format!("Failed to launch UncleCode TypeScript runtime: {error}"))?;
 
     Ok(status.code().unwrap_or(1).clamp(0, 255) as u8)
 }
@@ -736,6 +784,138 @@ fn npm_executable_name() -> &'static str {
     }
 }
 
+fn open_rust_command_input_file(path: &Path) -> Result<File, String> {
+    if !path.is_absolute() {
+        return Err(format!(
+            "{RUST_COMMAND_INPUT_FILE_ENV} must contain an absolute path"
+        ));
+    }
+
+    let before = fs::symlink_metadata(path)
+        .map_err(|error| format!("Failed to inspect Rust command input file: {error}"))?;
+    if before.file_type().is_symlink() || !before.file_type().is_file() {
+        return Err("Rust command input must be a regular, non-symlink file".to_string());
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+        if before.permissions().mode() & 0o777 != 0o600 {
+            return Err("Rust command input file permissions must be 0600".to_string());
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        const O_NOFOLLOW: i32 = 0x20000;
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        ))]
+        const O_NOFOLLOW: i32 = 0x100;
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        )))]
+        const O_NOFOLLOW: i32 = 0;
+
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW)
+            .open(path)
+            .map_err(|error| format!("Failed to open Rust command input file: {error}"))?;
+        let after = file.metadata().map_err(|error| {
+            format!("Failed to inspect opened Rust command input file: {error}")
+        })?;
+        if !after.file_type().is_file()
+            || before.dev() != after.dev()
+            || before.ino() != after.ino()
+            || after.nlink() != 1
+        {
+            return Err("Rust command input file changed while it was being opened".to_string());
+        }
+        if after.len() > MAX_RUST_COMMAND_INPUT_BYTES as u64 {
+            return Err(format!(
+                "Rust command input exceeds the {MAX_RUST_COMMAND_INPUT_BYTES}-byte limit"
+            ));
+        }
+        return Ok(file);
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .map_err(|error| format!("Failed to open Rust command input file: {error}"))?;
+        let metadata = file.metadata().map_err(|error| {
+            format!("Failed to inspect opened Rust command input file: {error}")
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err("Rust command input must be a regular, non-symlink file".to_string());
+        }
+        if metadata.len() > MAX_RUST_COMMAND_INPUT_BYTES as u64 {
+            return Err(format!(
+                "Rust command input exceeds the {MAX_RUST_COMMAND_INPUT_BYTES}-byte limit"
+            ));
+        }
+        return Ok(file);
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(|error| format!("Failed to open Rust command input file: {error}"))
+}
+
+fn read_rust_command_input_bytes_from<R: Read>(
+    input_path: Option<&OsStr>,
+    stdin: R,
+) -> Result<Vec<u8>, String> {
+    let mut reader: Box<dyn Read> = match input_path {
+        Some(path) => Box::new(open_rust_command_input_file(Path::new(path))?),
+        None => Box::new(stdin),
+    };
+    let mut input = Vec::new();
+    reader
+        .by_ref()
+        .take((MAX_RUST_COMMAND_INPUT_BYTES + 1) as u64)
+        .read_to_end(&mut input)
+        .map_err(|error| format!("Failed to read Rust command input: {error}"))?;
+    if input.len() > MAX_RUST_COMMAND_INPUT_BYTES {
+        return Err(format!(
+            "Rust command input exceeds the {MAX_RUST_COMMAND_INPUT_BYTES}-byte limit"
+        ));
+    }
+    Ok(input)
+}
+
+fn read_rust_command_input_bytes() -> Result<Vec<u8>, String> {
+    read_rust_command_input_bytes_from(
+        env::var_os(RUST_COMMAND_INPUT_FILE_ENV).as_deref(),
+        io::stdin(),
+    )
+}
+
+fn read_rust_command_input_string() -> Result<String, String> {
+    String::from_utf8(read_rust_command_input_bytes()?)
+        .map_err(|error| format!("Rust command input must be valid UTF-8: {error}"))
+}
+
 fn run_native_rust_command(args: &[OsString], started_at: Instant) -> Result<u8, String> {
     match args.first().and_then(|arg| arg.to_str()) {
         Some("queue-smoke") => {
@@ -776,10 +956,7 @@ fn run_native_rust_command(args: &[OsString], started_at: Instant) -> Result<u8,
             Ok(0)
         }
         Some("sha256") => {
-            let mut input = Vec::new();
-            io::stdin()
-                .read_to_end(&mut input)
-                .map_err(|error| format!("Failed to read stdin: {error}"))?;
+            let input = read_rust_command_input_bytes()?;
             println!("{}", sha256_hex_bytes(&input));
             Ok(0)
         }
@@ -2040,10 +2217,7 @@ fn run_native_context_command(args: &[OsString]) -> Result<u8, String> {
                 .get(2)
                 .and_then(|arg| arg.to_str())
                 .ok_or("Usage: unclecode rust context guidance <cwd> <home-dir|->")?;
-            let mut skills_json = String::new();
-            io::stdin()
-                .read_to_string(&mut skills_json)
-                .map_err(|error| format!("Failed to read stdin: {error}"))?;
+            let skills_json = read_rust_command_input_string()?;
             println!(
                 "{}",
                 build_workspace_guidance_json(
@@ -2075,10 +2249,7 @@ fn run_native_context_command(args: &[OsString]) -> Result<u8, String> {
         }
         Some("freshness") => {
             let root_dir = context_root_arg(args, "freshness")?;
-            let mut packet_json = String::new();
-            io::stdin()
-                .read_to_string(&mut packet_json)
-                .map_err(|error| format!("Failed to read stdin: {error}"))?;
+            let packet_json = read_rust_command_input_string()?;
             println!("{}", check_freshness_json(Path::new(root_dir), &packet_json)?);
             Ok(0)
         }
@@ -2091,10 +2262,7 @@ fn run_native_context_command(args: &[OsString]) -> Result<u8, String> {
             Ok(0)
         }
         Some("estimate-tokens") => {
-            let mut input = String::new();
-            io::stdin()
-                .read_to_string(&mut input)
-                .map_err(|error| format!("Failed to read stdin: {error}"))?;
+            let input = read_rust_command_input_string()?;
             println!("{}", estimate_context_tokens(&input));
             Ok(0)
         }
@@ -2105,10 +2273,7 @@ fn run_native_context_command(args: &[OsString]) -> Result<u8, String> {
                 .unwrap_or("10")
                 .parse::<usize>()
                 .map_err(|error| format!("Invalid hotspot count: {error}"))?;
-            let mut repo_map_json = String::new();
-            io::stdin()
-                .read_to_string(&mut repo_map_json)
-                .map_err(|error| format!("Failed to read stdin: {error}"))?;
+            let repo_map_json = read_rust_command_input_string()?;
             println!("{}", detect_hotspots_json(&repo_map_json, top_n)?);
             Ok(0)
         }
@@ -2131,10 +2296,7 @@ fn run_native_context_command(args: &[OsString]) -> Result<u8, String> {
                 .get(3)
                 .and_then(|arg| arg.to_str())
                 .filter(|value| *value != "-");
-            let mut repo_map_json = String::new();
-            io::stdin()
-                .read_to_string(&mut repo_map_json)
-                .map_err(|error| format!("Failed to read stdin: {error}"))?;
+            let repo_map_json = read_rust_command_input_string()?;
             println!(
                 "{}",
                 build_context_selection_json(Path::new(root_dir), mode, since_sha, &repo_map_json)?
@@ -3248,9 +3410,10 @@ fn run_native_provider_command(args: &[OsString]) -> Result<u8, String> {
             let parts = split_nul_parts(&raw);
             let content = parts.first().copied().unwrap_or("");
             let tool_calls_json = parts.get(1).copied().unwrap_or("[]");
+            let reasoning_content = parts.get(2).copied().filter(|value| !value.is_empty());
             println!(
                 "{}",
-                build_openai_assistant_message_json(content, tool_calls_json)?
+                build_openai_assistant_message_json(content, tool_calls_json, reasoning_content)?
             );
             Ok(0)
         }
@@ -4377,6 +4540,13 @@ fn run_native_auth_command(args: &[OsString]) -> Result<u8, String> {
 
 fn run_native_session_command(args: &[OsString]) -> Result<u8, String> {
     match args.first().and_then(|arg| arg.to_str()) {
+        Some("scan-notices") => {
+            let root_dir = args.get(1).map(PathBuf::from).ok_or(
+                "Usage: unclecode rust session scan-notices <root-dir>",
+            )?;
+            println!("{}", scan_session_persistence_notices_json(&root_dir)?);
+            Ok(0)
+        }
         Some("paths") => {
             let root_dir = args
                 .get(1)
@@ -4446,9 +4616,12 @@ fn run_native_session_command(args: &[OsString]) -> Result<u8, String> {
                     summary,
                     trace_mode,
                     reasoning_effort,
+                    ui_locale: None,
                     last_submitted_context_receipt_id: None,
+                    owner_mutation_revision: None,
                     entries: vec![],
                     agent_console: None,
+                    pause_checkpoint: None,
                 })
                 .map_err(|error| format!("Failed to persist session snapshot: {error}"))?;
             println!("Persisted {session_id}");
@@ -4524,8 +4697,57 @@ fn run_native_session_command(args: &[OsString]) -> Result<u8, String> {
             println!("{json}");
             Ok(0)
         }
-        _ => Err("Usage: unclecode rust session <persist <session-id> <model> <mode> <state> <trace-mode|-> <reasoning-effort|->|persist-json|list|resume <session-id>|resume-json <session-id>|paths <root-dir> <project-path> <session-id>>".to_string()),
+        _ => Err("Usage: unclecode rust session <scan-notices <root-dir>|persist <session-id> <model> <mode> <state> <trace-mode|-> <reasoning-effort|->|persist-json|list|resume <session-id>|resume-json <session-id>|paths <root-dir> <project-path> <session-id>>".to_string()),
     }
+}
+
+fn parse_native_queue_envelope(
+    input: &str,
+) -> Result<(String, u64, Vec<QueueAttachmentArtifact>), String> {
+    let value: serde_json::Value =
+        serde_json::from_str(input).map_err(|error| format!("Invalid queue envelope: {error}"))?;
+    let line = value
+        .get("line")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("Queue envelope line must be a string.")?;
+    let created_at = value
+        .get("createdAt")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("Queue envelope createdAt must be an unsigned integer.")?;
+    let attachments = value
+        .get("attachments")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("Queue envelope attachments must be an array.")?
+        .iter()
+        .map(|artifact| {
+            let reference = artifact
+                .get("ref")
+                .and_then(serde_json::Value::as_str)
+                .filter(|candidate| !candidate.trim().is_empty())
+                .ok_or("Queue attachment ref must be a non-empty string.")?;
+            let schema = artifact
+                .get("schema")
+                .and_then(serde_json::Value::as_str)
+                .filter(|candidate| !candidate.trim().is_empty())
+                .ok_or("Queue attachment schema must be a non-empty string.")?;
+            let sha256 = artifact
+                .get("sha256")
+                .and_then(serde_json::Value::as_str)
+                .filter(|candidate| candidate.len() == 64)
+                .ok_or("Queue attachment sha256 must be a 64-character string.")?;
+            let size = artifact
+                .get("size")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or("Queue attachment size must be an unsigned integer.")?;
+            Ok::<QueueAttachmentArtifact, &'static str>(QueueAttachmentArtifact {
+                reference: reference.to_string(),
+                schema: schema.to_string(),
+                sha256: sha256.to_string(),
+                size,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((line.to_string(), created_at, attachments))
 }
 
 fn run_native_queue_command(args: &[OsString]) -> Result<u8, String> {
@@ -4536,22 +4758,54 @@ fn run_native_queue_command(args: &[OsString]) -> Result<u8, String> {
         .ok_or("Usage: unclecode rust queue <push|pop|list|len|clear> <session-id> [line]")?;
     let queue = PersistentWorkQueue::new(queue_path(&cwd, session_id));
     match args.first().and_then(|arg| arg.to_str()) {
+        Some("validate-envelope-json") | Some("push-envelope-json") => {
+            let mut input = String::new();
+            io::stdin()
+                .read_to_string(&mut input)
+                .map_err(|error| format!("Failed to read queue envelope: {error}"))?;
+            let (line, created_at, attachments) = parse_native_queue_envelope(&input)?;
+            let result = if args.first().and_then(|arg| arg.to_str())
+                == Some("validate-envelope-json")
+            {
+                queue
+                    .preflight_push_with_artifacts(line, created_at, attachments)
+                    .map(|()| None)
+            } else {
+                queue.push_with_artifacts(line, created_at, attachments)
+            };
+            match result {
+                Ok(Some(item)) => println!("{}", queue_item_json(Some(&item))),
+                Ok(None) => println!("{}", queue_limit_acceptance_json()),
+                Err(QueuePushError::Rejected(error)) => {
+                    println!("{}", queue_limit_rejection_json(&error));
+                }
+                Err(QueuePushError::Io(error)) => {
+                    return Err(format!("Failed to access queue: {error}"));
+                }
+            }
+            Ok(0)
+        }
         Some("push") | Some("push-json") => {
             let line = args[2..]
                 .iter()
                 .map(|arg| arg.to_string_lossy())
                 .collect::<Vec<_>>()
                 .join(" ");
-            let Some(item) = queue
-                .push(line)
-                .map_err(|error| format!("Failed to push queue item: {error}"))?
-            else {
-                return Err("Queue line must not be empty.".to_string());
-            };
-            if args.first().and_then(|arg| arg.to_str()) == Some("push-json") {
-                println!("{}", queue_item_json(Some(&item)));
-            } else {
-                println!("{} {}", item.id, item.line);
+            match queue.push(line) {
+                Ok(Some(item)) => {
+                    if args.first().and_then(|arg| arg.to_str()) == Some("push-json") {
+                        println!("{}", queue_item_json(Some(&item)));
+                    } else {
+                        println!("{} {}", item.id, item.line);
+                    }
+                }
+                Ok(None) => return Err("Queue line must not be empty.".to_string()),
+                Err(QueuePushError::Rejected(error))
+                    if args.first().and_then(|arg| arg.to_str()) == Some("push-json") =>
+                {
+                    println!("{}", queue_limit_rejection_json(&error));
+                }
+                Err(error) => return Err(format!("Failed to push queue item: {error}")),
             }
             Ok(0)
         }
@@ -4564,6 +4818,123 @@ fn run_native_queue_command(args: &[OsString]) -> Result<u8, String> {
             } else if let Some(item) = item {
                 println!("{} {}", item.id, item.line);
             }
+            Ok(0)
+        }
+        Some("claim-json") => {
+            let item = queue
+                .claim()
+                .map_err(|error| format!("Failed to claim queue item: {error}"))?;
+            println!("{}", queue_item_json(item.as_ref()));
+            Ok(0)
+        }
+        Some("ack-json") | Some("nack-json") => {
+            let id = args
+                .get(2)
+                .and_then(|arg| arg.to_str())
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or("Usage: unclecode rust queue <ack-json|nack-json> <session-id> <id>")?;
+            let item = if args.first().and_then(|arg| arg.to_str()) == Some("ack-json") {
+                queue.ack(id)
+            } else {
+                queue.nack(id)
+            }
+            .map_err(|error| format!("Failed to settle queue item: {error}"))?;
+            println!("{}", queue_item_json(item.as_ref()));
+            Ok(0)
+        }
+        Some("quarantine-json") => {
+            let id = args
+                .get(2)
+                .and_then(|arg| arg.to_str())
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or("Usage: unclecode rust queue quarantine-json <session-id> <id>")?;
+            let mut reason = String::new();
+            io::stdin()
+                .read_to_string(&mut reason)
+                .map_err(|error| format!("Failed to read quarantine reason: {error}"))?;
+            let item = queue
+                .quarantine(id, reason)
+                .map_err(|error| format!("Failed to quarantine queue item: {error}"))?;
+            println!("{}", queue_item_json(item.as_ref()));
+            Ok(0)
+        }
+        Some("recover-json") => {
+            let items = queue
+                .recover_stale_in_flight()
+                .map_err(|error| format!("Failed to recover stale queue claims: {error}"))?;
+            println!("{}", queue_items_json(&items));
+            Ok(0)
+        }
+        Some("cleanup-list-json") => {
+            let requested = args
+                .get(2)
+                .and_then(|arg| arg.to_str())
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(QUEUE_CLEANUP_SWEEP_LIMIT)
+                .min(QUEUE_CLEANUP_SWEEP_LIMIT);
+            let artifacts = queue
+                .cleanup_snapshot(requested)
+                .map_err(|error| format!("Failed to list queue attachment cleanup: {error}"))?;
+            println!("{}", queue_cleanup_artifacts_json(&artifacts));
+            Ok(0)
+        }
+        Some("cleanup-complete-json") => {
+            let mut input = String::new();
+            io::stdin()
+                .take(QUEUE_MAX_ITEM_BYTES.saturating_add(1) as u64)
+                .read_to_string(&mut input)
+                .map_err(|error| format!("Failed to read queue cleanup completion: {error}"))?;
+            if input.len() > QUEUE_MAX_ITEM_BYTES {
+                return Err("Queue cleanup completion exceeds its bounded input size.".to_string());
+            }
+            let references = serde_json::from_str::<Vec<String>>(&input)
+                .map_err(|_| "Queue cleanup completion must be a JSON string array.".to_string())?;
+            if references.len() > QUEUE_CLEANUP_SWEEP_LIMIT
+                || references.iter().any(|reference| reference.trim().is_empty())
+            {
+                return Err("Queue cleanup completion contains invalid references.".to_string());
+            }
+            let completed = queue
+                .complete_cleanup(&references)
+                .map_err(|error| format!("Failed to complete queue attachment cleanup: {error}"))?;
+            let remaining = queue
+                .cleanup_len()
+                .map_err(|error| format!("Failed to count queue attachment cleanup: {error}"))?;
+            println!("{}", queue_cleanup_completion_json(completed, remaining));
+            Ok(0)
+        }
+        Some("retry-json") | Some("discard-json") => {
+            let id = args
+                .get(2)
+                .and_then(|arg| arg.to_str())
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or("Usage: unclecode rust queue <retry-json|discard-json> <session-id> <id>")?;
+            let item = if args.first().and_then(|arg| arg.to_str()) == Some("retry-json") {
+                queue.retry(id)
+            } else {
+                queue.discard(id)
+            }
+            .map_err(|error| format!("Failed to recover queue item: {error}"))?;
+            println!("{}", queue_item_json(item.as_ref()));
+            Ok(0)
+        }
+        Some("remove-json") => {
+            let id = args.get(2).and_then(|arg| arg.to_str()).and_then(|value| value.parse::<u64>().ok())
+                .ok_or("Usage: unclecode rust queue remove-json <session-id> <id>")?;
+            let item = queue.remove(id).map_err(|error| format!("Failed to remove queue item: {error}"))?;
+            println!("{}", queue_item_json(item.as_ref()));
+            Ok(0)
+        }
+        Some("move-json") => {
+            let id = args.get(2).and_then(|arg| arg.to_str()).and_then(|value| value.parse::<u64>().ok())
+                .ok_or("Usage: unclecode rust queue move-json <session-id> <id> <up|down>")?;
+            let direction = match args.get(3).and_then(|arg| arg.to_str()) {
+                Some("up") => QueueMoveDirection::Up,
+                Some("down") => QueueMoveDirection::Down,
+                _ => return Err("Usage: unclecode rust queue move-json <session-id> <id> <up|down>".to_string()),
+            };
+            let item = queue.move_item(id, direction).map_err(|error| format!("Failed to move queue item: {error}"))?;
+            println!("{}", queue_item_json(item.as_ref()));
             Ok(0)
         }
         Some("list") => {
@@ -4591,7 +4962,7 @@ fn run_native_queue_command(args: &[OsString]) -> Result<u8, String> {
             Ok(0)
         }
         _ => Err(
-            "Usage: unclecode rust queue <push|push-json|pop|pop-json|list|len|len-json|clear> <session-id> [line]".to_string(),
+            "Usage: unclecode rust queue <validate-envelope-json|push|push-json|push-envelope-json|pop|pop-json|claim-json|ack-json|nack-json|quarantine-json|recover-json|cleanup-list-json|cleanup-complete-json|retry-json|discard-json|remove-json|move-json|list|len|len-json|clear> <session-id> [args]".to_string(),
         ),
     }
 }
@@ -4625,6 +4996,31 @@ fn run_native_aci_command(args: &[OsString]) -> Result<u8, String> {
                 .ok_or("Usage: unclecode rust aci read-no-symlinks <path>")?;
             let content = read_text_file_no_symlinks(&cwd, PathBuf::from(path))
                 .map_err(|error| error.to_string())?;
+            print!("{content}");
+            Ok(0)
+        }
+        Some("read-bounded-no-symlinks") => {
+            let path = args
+                .get(1)
+                .ok_or("Usage: unclecode rust aci read-bounded-no-symlinks <path> <expected-bytes> <max-bytes>")?;
+            let expected_bytes = args
+                .get(2)
+                .and_then(|arg| arg.to_str())
+                .and_then(|value| value.parse::<usize>().ok())
+                .ok_or("Expected bytes must be a non-negative integer.")?;
+            let max_bytes = args
+                .get(3)
+                .and_then(|arg| arg.to_str())
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value <= QUEUE_MAX_ITEM_BYTES)
+                .ok_or("Bounded read limit must not exceed the queue item hard cap.")?;
+            let content = read_text_file_bounded_no_symlinks(
+                &cwd,
+                PathBuf::from(path),
+                expected_bytes,
+                max_bytes,
+            )
+            .map_err(|error| error.to_string())?;
             print!("{content}");
             Ok(0)
         }
@@ -4675,10 +5071,7 @@ fn run_native_aci_command(args: &[OsString]) -> Result<u8, String> {
             let path = args
                 .get(1)
                 .ok_or("Usage: unclecode rust aci write-atomic-no-symlinks <path>")?;
-            let mut content = String::new();
-            io::stdin()
-                .read_to_string(&mut content)
-                .map_err(|error| format!("Failed to read stdin: {error}"))?;
+            let content = read_rust_command_input_string()?;
             write_text_file_atomically_no_symlinks(&cwd, PathBuf::from(path), &content)
                 .map_err(|error| error.to_string())?;
             println!("Wrote {}", path.to_string_lossy());
@@ -4687,6 +5080,24 @@ fn run_native_aci_command(args: &[OsString]) -> Result<u8, String> {
         Some("delete") => {
             let path = args.get(1).ok_or("Usage: unclecode rust aci delete <path>")?;
             delete_text_file(&cwd, PathBuf::from(path)).map_err(|error| error.to_string())?;
+            println!("Deleted {}", path.to_string_lossy());
+            Ok(0)
+        }
+        Some("delete-no-symlinks") => {
+            let path = args
+                .get(1)
+                .ok_or("Usage: unclecode rust aci delete-no-symlinks <path>")?;
+            delete_text_file_no_symlinks(&cwd, PathBuf::from(path))
+                .map_err(|error| error.to_string())?;
+            println!("Deleted {}", path.to_string_lossy());
+            Ok(0)
+        }
+        Some("delete-no-symlinks-if-exists") => {
+            let path = args
+                .get(1)
+                .ok_or("Usage: unclecode rust aci delete-no-symlinks-if-exists <path>")?;
+            delete_text_file_no_symlinks_if_exists(&cwd, PathBuf::from(path))
+                .map_err(|error| error.to_string())?;
             println!("Deleted {}", path.to_string_lossy());
             Ok(0)
         }
@@ -4876,7 +5287,7 @@ fn run_native_aci_command(args: &[OsString]) -> Result<u8, String> {
             Ok(0)
         }
         _ => Err(
-            "Usage: unclecode rust aci <list [path]|read <path>|read-no-symlinks <path>|view <path> [window]|view-json <path> [window] [start]|write <path>|write-atomic-no-symlinks <path>|edit-json <path> <start-line> <end-line>|restore <path>|lint-failure-message <start-line> <snippet-context>|search <query> [path]|search-json <query> [path] [cap] [max-count-per-file] [glob...]|find-json <pattern> [cap] [glob...]|glob <pattern>|apply-patch|parse-patch>".to_string(),
+            "Usage: unclecode rust aci <list [path]|read <path>|read-no-symlinks <path>|read-bounded-no-symlinks <path> <expected-bytes> <max-bytes>|view <path> [window]|view-json <path> [window] [start]|write <path>|write-atomic-no-symlinks <path>|delete-no-symlinks-if-exists <path>|edit-json <path> <start-line> <end-line>|restore <path>|lint-failure-message <start-line> <snippet-context>|search <query> [path]|search-json <query> [path] [cap] [max-count-per-file] [glob...]|find-json <pattern> [cap] [glob...]|glob <pattern>|apply-patch|parse-patch>".to_string(),
         ),
     }
 }
@@ -4997,6 +5408,58 @@ fn is_repo_root(path: &Path) -> bool {
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use std::ffi::OsString;
+    use std::io::Cursor;
+    use std::sync::{Mutex, MutexGuard};
+
+    static QUEUE_TEST_WORK_CWD_LOCK: Mutex<()> = Mutex::new(());
+
+    struct QueueTestWorkCwd {
+        root: PathBuf,
+        previous: Option<OsString>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl QueueTestWorkCwd {
+        fn new(session_id: &str) -> Self {
+            let lock = QUEUE_TEST_WORK_CWD_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let root = env::temp_dir().join(format!(
+                "unclecode-queue-cli-test-{}-{session_id}",
+                std::process::id()
+            ));
+            assert!(!root.exists(), "queue test root must be unique");
+            std::fs::create_dir(&root).expect("create queue test work cwd");
+            let previous = env::var_os("UNCLECODE_WORK_CWD");
+            // SAFETY: queue CLI tests serialize mutations of this process-global
+            // variable with QUEUE_TEST_WORK_CWD_LOCK and restore it in Drop.
+            unsafe { env::set_var("UNCLECODE_WORK_CWD", &root) };
+            Self {
+                root,
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for QueueTestWorkCwd {
+        fn drop(&mut self) {
+            // SAFETY: the matching process-global mutation is serialized by the
+            // guard held until this Drop implementation completes.
+            unsafe {
+                match self.previous.take() {
+                    Some(previous) => env::set_var("UNCLECODE_WORK_CWD", previous),
+                    None => env::remove_var("UNCLECODE_WORK_CWD"),
+                }
+            }
+            if let Err(error) = std::fs::remove_dir_all(&self.root) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    panic!("failed to clean queue test work cwd: {error}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn detects_workspace_root_shape() {
@@ -5011,6 +5474,110 @@ mod tests {
             find_repo_root_from(&root.join("rust/unclecode/src")),
             Some(root.to_path_buf())
         );
+    }
+
+    #[test]
+    fn rust_command_input_uses_the_private_file_instead_of_stdin() {
+        let root = env::temp_dir().join(format!(
+            "unclecode-command-input-{}-regular",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("create command input test directory");
+        let input_path = root.join("input");
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&input_path)
+            .expect("create private input file");
+        file.write_all(b"file payload")
+            .expect("write private input");
+        drop(file);
+
+        let input = read_rust_command_input_bytes_from(
+            Some(input_path.as_os_str()),
+            Cursor::new(b"stdin payload"),
+        )
+        .expect("read private command input");
+
+        assert_eq!(input, b"file payload");
+        fs::remove_dir_all(root).expect("clean command input test directory");
+    }
+
+    #[test]
+    fn rust_command_input_keeps_bounded_stdin_compatibility() {
+        let input = read_rust_command_input_bytes_from(None, Cursor::new(b"stdin payload"))
+            .expect("read stdin fallback");
+
+        assert_eq!(input, b"stdin payload");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rust_command_input_rejects_symlink_files() {
+        use std::os::unix::fs::{symlink, OpenOptionsExt};
+
+        let root = env::temp_dir().join(format!(
+            "unclecode-command-input-{}-symlink",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("create symlink input test directory");
+        let target_path = root.join("target");
+        let mut target = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&target_path)
+            .expect("create symlink target");
+        target.write_all(b"secret").expect("write symlink target");
+        drop(target);
+        let input_path = root.join("input");
+        symlink(&target_path, &input_path).expect("create input symlink");
+
+        let error = read_rust_command_input_bytes_from(
+            Some(input_path.as_os_str()),
+            Cursor::new(Vec::<u8>::new()),
+        )
+        .expect_err("symlink input must fail closed");
+
+        assert!(error.contains("regular, non-symlink file"), "{error}");
+        fs::remove_dir_all(root).expect("clean symlink input test directory");
+    }
+
+    #[test]
+    fn rust_command_input_rejects_oversized_files() {
+        let root = env::temp_dir().join(format!(
+            "unclecode-command-input-{}-oversized",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("create oversized input test directory");
+        let input_path = root.join("input");
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(&input_path)
+            .expect("create oversized input file");
+        file.set_len((MAX_RUST_COMMAND_INPUT_BYTES + 1) as u64)
+            .expect("size oversized input");
+        drop(file);
+
+        let error = read_rust_command_input_bytes_from(
+            Some(input_path.as_os_str()),
+            Cursor::new(Vec::<u8>::new()),
+        )
+        .expect_err("oversized input must fail closed");
+
+        assert!(error.contains("exceeds the 8388608-byte limit"), "{error}");
+        fs::remove_dir_all(root).expect("clean oversized input test directory");
     }
 
     #[test]
@@ -5051,35 +5618,65 @@ mod tests {
     }
 
     #[test]
-    fn interactive_work_routes_full_screen_tui_only_without_a_one_shot_prompt() {
-        // `unclecode work` with no prompt on a real terminal stays a TUI session.
-        assert!(should_launch_work_tui(&[], true, true));
-        assert!(should_launch_work_tui(
-            &[OsString::from("--engine"), OsString::from("pi")],
-            true,
-            true
-        ));
+    fn public_work_routes_prompts_to_the_typescript_owner_and_keeps_tty_ink() {
+        assert_eq!(
+            select_public_work_route(&[], true, true),
+            PublicWorkRoute::TypescriptTui
+        );
+        assert_eq!(
+            select_public_work_route(
+                &[OsString::from("--engine"), OsString::from("pi")],
+                true,
+                true
+            ),
+            PublicWorkRoute::TypescriptTui
+        );
+        assert_eq!(
+            select_public_work_route(
+                &[
+                    OsString::from("--engine"),
+                    OsString::from("native"),
+                    OsString::from("summarize the repo"),
+                ],
+                false,
+                false,
+            ),
+            PublicWorkRoute::RustNative,
+            "an explicit native engine must bypass the persistent TypeScript owner"
+        );
 
-        // A typed one-shot prompt must fall through to the Rust-native turn even
-        // on a TTY, otherwise the prompt is silently dropped by the TS bridge.
-        assert!(!should_launch_work_tui(
-            &[OsString::from("summarize the repo")],
-            true,
-            true
-        ));
-        assert!(!should_launch_work_tui(
-            &[
-                OsString::from("--engine"),
-                OsString::from("pi"),
-                OsString::from("summarize the repo"),
-            ],
-            true,
-            true
-        ));
+        for (stdin_is_tty, stdout_is_tty) in
+            [(true, true), (false, true), (true, false), (false, false)]
+        {
+            assert_eq!(
+                select_public_work_route(
+                    &[OsString::from("summarize the repo")],
+                    stdin_is_tty,
+                    stdout_is_tty,
+                ),
+                PublicWorkRoute::TypescriptOwner,
+                "positional prompts must never enter the Rust mini-loop"
+            );
+        }
 
-        // Non-interactive stdio never opens the full-screen TUI.
-        assert!(!should_launch_work_tui(&[], false, true));
-        assert!(!should_launch_work_tui(&[], true, false));
+        assert_eq!(
+            select_public_work_route(&[], false, true),
+            PublicWorkRoute::TypescriptOwner,
+            "piped stdin is a non-interactive owner prompt"
+        );
+        assert_eq!(
+            select_public_work_route(&[], true, false),
+            PublicWorkRoute::RustNative,
+            "a promptless TTY with redirected output preserves the native fallback"
+        );
+        assert_eq!(
+            select_public_work_route(&[OsString::from("--help")], false, false),
+            PublicWorkRoute::RustNative
+        );
+        assert_eq!(
+            select_public_work_route(&[OsString::from("--tools")], true, true),
+            PublicWorkRoute::RustNative
+        );
     }
 
     #[test]
@@ -6793,6 +7390,8 @@ mod tests {
     #[test]
     fn native_queue_commands_do_not_need_node_bridge() {
         let session_id = format!("test-queue-{}", std::process::id());
+        let work_cwd = QueueTestWorkCwd::new(&session_id);
+        let test_root = work_cwd.root.clone();
         assert_eq!(
             run(vec![
                 OsString::from("rust"),
@@ -6866,8 +7465,11 @@ mod tests {
             ]),
             Ok(0)
         );
-        let root = find_repo_root().expect("repo root");
-        let _ = std::fs::remove_file(queue_path(&root, &session_id));
+        drop(work_cwd);
+        assert!(
+            !test_root.exists(),
+            "queue CLI test must remove its temp work cwd"
+        );
     }
 
     #[test]

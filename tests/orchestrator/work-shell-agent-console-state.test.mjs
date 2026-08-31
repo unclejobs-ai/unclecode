@@ -7,6 +7,7 @@ import {
   countAgentConsoleRows,
   createAgentConsoleViewState,
   isSettledAgentRun,
+  mergeAgentConsoleLifecycle,
   moveAgentConsoleCursor,
   openAgentConsoleView,
   requestAgentConsoleCancel,
@@ -53,6 +54,25 @@ const twoAgents = consoleSnapshot({
       { id: "node-3", summary: "Verify", status: "pending" },
     ],
   },
+  qualityReview: {
+    runId: "quality-run-1",
+    graphId: "graph-1",
+    refineCount: 1,
+    pivotCount: 0,
+    latestDecision: "refine",
+    history: [{
+      event: "gate",
+      stage: "critic",
+      decision: "refine",
+      iteration: 1,
+      failures: ["Missing regression proof"],
+      evidenceRefs: ["evidence/review.json"],
+      artifactRefs: ["artifact/patch.diff"],
+      independentVerification: true,
+      stale: false,
+      startedAt: 30,
+    }],
+  },
 });
 
 test("agent console view opens on a requested tab and closes back to a browsing state", () => {
@@ -95,6 +115,7 @@ test("agent console cursor moves within the snapshot and clamps at both ends", (
   const emptyPlan = consoleSnapshot();
   assert.equal(countAgentConsoleRows(emptyPlan, "plan"), 0);
   assert.equal(moveAgentConsoleCursor(opened, emptyPlan, 1).cursor, 0);
+  assert.equal(countAgentConsoleRows(twoAgents, "quality"), 1);
 });
 
 test("agent console view re-clamps the cursor and drops a confirmation once a record settles", () => {
@@ -149,6 +170,32 @@ test("agent console inspector toggles independently of tab and cursor", () => {
   assert.equal(toggleAgentConsoleInspector(hidden).inspectorVisible, moved.inspectorVisible);
 });
 
+test("quality opens as a quiet summary and lifecycle merge preserves performance evidence", () => {
+  const quality = openAgentConsoleView(createAgentConsoleViewState(), twoAgents, "quality");
+  assert.equal(quality.inspectorVisible, false);
+
+  const performance = {
+    provider: "openai",
+    model: "gpt-5.6-sol",
+    startedAt: 1_000,
+    firstTokenAt: 1_200,
+    completedAt: 2_000,
+    outputTokens: 10,
+    cacheReadTokens: 4,
+  };
+  const pending = consoleSnapshot({
+    lastTurnPerformance: performance,
+    totalUsage: { outputTokens: 10 },
+  });
+  const current = consoleSnapshot({
+    manifest: { id: "new-context", packetId: "packet", profileId: "build", createdAt: "now", includedSourceCount: 0, excludedSourceCount: 0, tokenEstimate: 0, policy: [] },
+  });
+  const merged = mergeAgentConsoleLifecycle(pending, current);
+  assert.strictEqual(merged.lastTurnPerformance, performance);
+  assert.deepEqual(merged.totalUsage, { outputTokens: 10 });
+  assert.equal(merged.manifest?.id, "new-context");
+});
+
 test("agent console cancel confirmation only targets a live selected run", () => {
   const opened = openAgentConsoleView(createAgentConsoleViewState(), twoAgents, "agents");
 
@@ -176,7 +223,7 @@ test("agent console cancel confirmation only targets a live selected run", () =>
   assert.equal(settleAgentConsoleControl(settled).receipt, undefined);
 });
 
-test("agent console selection resolves the addressed agents, jobs, and plan record", () => {
+test("agent console selection resolves agents, jobs, plan, and projected quality history", () => {
   const view = openAgentConsoleView(createAgentConsoleViewState(), twoAgents, "agents");
 
   assert.deepEqual(resolveAgentConsoleSelection(view, twoAgents), {
@@ -200,8 +247,15 @@ test("agent console selection resolves the addressed agents, jobs, and plan reco
     node: twoAgents.workGraph.nodes[2],
   });
 
+  const quality = selectAgentConsoleTab(view, twoAgents, "quality");
+  assert.deepEqual(resolveAgentConsoleSelection(quality, twoAgents), {
+    tab: "quality",
+    review: twoAgents.qualityReview.history[0],
+  });
+
   assert.equal(resolveAgentConsoleSelection(view, consoleSnapshot()), undefined);
   assert.equal(resolveAgentConsoleSelection(plan, consoleSnapshot()), undefined);
+  assert.equal(resolveAgentConsoleSelection(quality, consoleSnapshot()), undefined);
 });
 
 test("agent console settlement classification matches the terminal run statuses", () => {

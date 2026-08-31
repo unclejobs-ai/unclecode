@@ -4,6 +4,7 @@ import type {
   AgentControlReceipt,
   AgentRun,
   AsyncJob,
+  QualityReviewHistoryEntry,
   WorkNode,
 } from "@unclecode/contracts";
 
@@ -35,7 +36,8 @@ export type AgentConsoleViewState = {
 export type AgentConsoleSelection =
   | { readonly tab: "agents"; readonly run: AgentRun }
   | { readonly tab: "jobs"; readonly job: AsyncJob }
-  | { readonly tab: "plan"; readonly node: WorkNode };
+  | { readonly tab: "plan"; readonly node: WorkNode }
+  | { readonly tab: "quality"; readonly review: QualityReviewHistoryEntry };
 
 const BROWSE: AgentConsoleControlState = { kind: "browse" };
 
@@ -68,6 +70,8 @@ export function countAgentConsoleRows(
       return snapshot.jobs.length;
     case "plan":
       return snapshot.workGraph?.nodes.length ?? 0;
+    case "quality":
+      return snapshot.qualityReview?.history.length ?? 0;
   }
 }
 
@@ -126,6 +130,7 @@ export function openAgentConsoleView(
     open: true,
     tab: nextTab,
     cursor: clampCursor(cursor, countAgentConsoleRows(snapshot, nextTab)),
+    ...(tab === "quality" ? { inspectorVisible: false } : {}),
     control: BROWSE,
   });
 }
@@ -143,6 +148,7 @@ export function selectAgentConsoleTab(
   return reviseAgentConsoleView(view, {
     tab,
     cursor: clampCursor(cursor, countAgentConsoleRows(snapshot, tab)),
+    ...(tab === "quality" ? { inspectorVisible: false } : {}),
     control: BROWSE,
   });
 }
@@ -222,8 +228,9 @@ export function clampAgentConsoleView(
 /**
  * The one merge invariant between the two writers of an `AgentConsoleSnapshot`.
  *
- * Lifecycle-owned fields (`workGraph`, `activity`, `agents`, `jobs`,
- * `mainUsage`) come from the pending reduction, so a burst stays in arrival
+ * Lifecycle-owned fields (`workGraph`, `workProposalOrder`, `activity`, `agents`, `jobs`,
+ * `mainUsage`, `totalUsage`, `lastTurnPerformance`) come from the pending
+ * reduction, so a burst stays in arrival
  * order. Shell-owned fields (`profileId`, `manifest`, `pendingDecision`) are
  * re-read from the live snapshot, so a decision or manifest that changed inside
  * the coalescing window is neither overwritten by the next reduction nor
@@ -246,10 +253,20 @@ export function mergeAgentConsoleLifecycle(
     ...(current.manifest === undefined ? {} : { manifest: current.manifest }),
     ...(current.pendingDecision === undefined ? {} : { pendingDecision: current.pendingDecision }),
     ...(pending.workGraph === undefined ? {} : { workGraph: pending.workGraph }),
+    ...(pending.workProposalOrder === undefined
+      ? {}
+      : { workProposalOrder: pending.workProposalOrder }),
+    ...(pending.qualityReview === undefined ? {} : { qualityReview: pending.qualityReview }),
+    ...(pending.evolutionProposals === undefined ? {} : { evolutionProposals: pending.evolutionProposals }),
+    ...(pending.pluginDiagnostics === undefined ? {} : { pluginDiagnostics: pending.pluginDiagnostics }),
     activity: pending.activity,
     agents: pending.agents,
     jobs: pending.jobs,
     ...(pending.mainUsage === undefined ? {} : { mainUsage: pending.mainUsage }),
+    ...(pending.totalUsage === undefined ? {} : { totalUsage: pending.totalUsage }),
+    ...(pending.lastTurnPerformance === undefined
+      ? {}
+      : { lastTurnPerformance: pending.lastTurnPerformance }),
   };
 }
 
@@ -269,6 +286,14 @@ export function resolveAgentConsoleSelection(
     case "plan": {
       const node = snapshot.workGraph?.nodes[view.cursor];
       return node ? { tab: "plan", node } : undefined;
+    }
+    case "quality": {
+      // Quality history is append-only. Keeping the newest event at cursor 0
+      // means opening `/scc` immediately shows the current gate and keeps that
+      // selection stable as later events are appended to the projection.
+      const history = snapshot.qualityReview?.history ?? [];
+      const review = history[history.length - 1 - view.cursor];
+      return review ? { tab: "quality", review } : undefined;
     }
   }
 }

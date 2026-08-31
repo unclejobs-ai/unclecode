@@ -177,13 +177,6 @@ fn resolve_work_shell_input_action(input: &Value) -> Value {
         return json!({ "type": "move-slash-selection", "direction": "next" });
     }
 
-    if bool_field(key, "ctrl")
-        && bool_field(input, "hasRequestSessionsView")
-        && (str_field(input, "value") == Some("o") || str_field(input, "value") == Some("\u{000f}"))
-    {
-        return json!({ "type": "open-sessions-view" });
-    }
-
     if bool_field(key, "escape") {
         if bool_field(input, "hasSensitiveInput") {
             return json!({ "type": "cancel-sensitive-input" });
@@ -459,7 +452,14 @@ mod tests {
                 r#"{"value":"o","key":{"ctrl":true},"input":"plain","slashSuggestionCount":0,"isBusy":false,"hasRequestSessionsView":true}"#
             )
             .unwrap(),
-            r#"{"type":"open-sessions-view"}"#
+            r#"{"type":"none"}"#
+        );
+        assert_eq!(
+            resolve_work_shell_input_action_json(
+                r#"{"value":"\u000f","key":{"ctrl":true},"input":"IME 초안","slashSuggestionCount":0,"isBusy":false,"hasRequestSessionsView":true}"#
+            )
+            .unwrap(),
+            r#"{"type":"none"}"#
         );
         assert_eq!(
             resolve_work_shell_input_action_json(

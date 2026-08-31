@@ -20,6 +20,7 @@ test("loadResumedWorkSession restores persisted trace mode and reasoning overrid
     state: "idle",
     summary: "Chat: inspect repo",
     traceMode: "verbose",
+    uiLocale: "ko",
     reasoningEffort: "low",
     entries: [
       { role: "user", text: "inspect repo" },
@@ -58,6 +59,7 @@ test("loadResumedWorkSession restores persisted trace mode and reasoning overrid
 
   assert.equal(resumed.sessionId, "work-session-42");
   assert.equal(resumed.initialTraceMode, "verbose");
+  assert.equal(resumed.initialUiLocale, "ko");
   assert.equal(resumed.reasoningEffort, "low");
   assert.match(resumed.contextLine, /Resumed session: work-session-42/);
   assert.equal(resumed.initialSessionSummary, "Chat: inspect repo");
@@ -89,6 +91,161 @@ test("loadResumedWorkSession restores persisted trace mode and reasoning overrid
     agents: [],
     jobs: [],
   });
+});
+
+test("loadResumedWorkSession rehydrates only a replay-safe approval pause with matching decision identity", async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-work-resume-paused-"));
+  const sessionStoreRoot = path.join(cwd, ".state");
+  const env = { ...process.env, UNCLECODE_SESSION_STORE_ROOT: sessionStoreRoot };
+  await persistWorkShellSessionSnapshot({
+    cwd,
+    env,
+    sessionId: "work-session-paused",
+    model: "gpt-5.4",
+    mode: "ultrawork",
+    state: "paused",
+    summary: "Turn paused at before_approval.",
+    traceMode: "minimal",
+    entries: [{ role: "user", text: "apply the change" }],
+    agentConsole: {
+      profileId: "build",
+      pendingDecision: {
+        kind: "user-decision",
+        id: "decision-resume-1",
+        title: "Continue?",
+        questions: [{
+          id: "continue",
+          question: "Continue this operation?",
+          options: [{ label: "Continue" }, { label: "Cancel" }],
+        }],
+      },
+      activity: [],
+      agents: [{
+        id: "run-paused",
+        displayName: "Paused worker",
+        agentType: "executor",
+        status: "waiting",
+        startedAt: 10,
+      }],
+      jobs: [{
+        id: "job-paused",
+        type: "executor",
+        label: "Paused step",
+        status: "running",
+        queuedAt: 5,
+        startedAt: 10,
+      }],
+    },
+    pauseCheckpoint: {
+      turnId: "turn-resume-1",
+      boundary: "before_approval",
+      decisionId: "decision-resume-1",
+      contextReceiptId: "receipt-resume-1",
+      attachmentRefs: [],
+      artifactRefs: ["artifact:sha256:resume"],
+    },
+  });
+
+  const resumed = await loadResumedWorkSession({
+    cwd,
+    env,
+    sessionId: "work-session-paused",
+  });
+
+  assert.deepEqual(resumed.initialPauseCheckpoint, {
+    turnId: "turn-resume-1",
+    boundary: "before_approval",
+    decisionId: "decision-resume-1",
+    contextReceiptId: "receipt-resume-1",
+    attachmentRefs: [],
+    artifactRefs: ["artifact:sha256:resume"],
+  });
+  assert.equal(resumed.initialAgentConsole?.pendingDecision?.id, "decision-resume-1");
+  assert.equal(resumed.initialAgentConsole?.agents[0]?.status, "waiting");
+  assert.equal(resumed.initialAgentConsole?.jobs[0]?.status, "running");
+});
+
+test("loadResumedWorkSession rejects in-doubt pause identity and settles active work", async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-work-resume-unsafe-pause-"));
+  const sessionStoreRoot = path.join(cwd, ".state");
+  const env = { ...process.env, UNCLECODE_SESSION_STORE_ROOT: sessionStoreRoot };
+  await persistWorkShellSessionSnapshot({
+    cwd,
+    env,
+    sessionId: "work-session-unsafe-pause",
+    model: "gpt-5.4",
+    mode: "ultrawork",
+    state: "paused",
+    summary: "Turn paused at after_provider.",
+    traceMode: "minimal",
+    agentConsole: {
+      profileId: "build",
+      pendingDecision: {
+        kind: "user-decision",
+        id: "decision-live",
+        questions: [{ id: "q", question: "Continue?", options: [{ label: "Yes" }] }],
+      },
+      activity: [],
+      agents: [{
+        id: "run-unsafe",
+        displayName: "Unsafe worker",
+        agentType: "executor",
+        status: "running",
+        startedAt: 10,
+      }],
+      jobs: [],
+    },
+    pauseCheckpoint: {
+      turnId: "turn-unsafe",
+      boundary: "before_approval",
+      decisionId: "decision-stale",
+      attachmentRefs: [],
+      artifactRefs: [],
+    },
+  });
+
+  const resumed = await loadResumedWorkSession({ cwd, env, sessionId: "work-session-unsafe-pause" });
+
+  assert.equal(resumed.initialPauseCheckpoint, undefined);
+  assert.equal(resumed.initialAgentConsole?.agents[0]?.status, "interrupted");
+});
+
+test("loadResumedWorkSession never restores a stale pause checkpoint from a non-paused snapshot", async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-work-resume-stale-pause-"));
+  const sessionStoreRoot = path.join(cwd, ".state");
+  const env = { ...process.env, UNCLECODE_SESSION_STORE_ROOT: sessionStoreRoot };
+  await persistWorkShellSessionSnapshot({
+    cwd,
+    env,
+    sessionId: "work-session-stale-pause",
+    model: "gpt-5.4",
+    mode: "default",
+    state: "idle",
+    summary: "Idle checkpoint with stale pause data.",
+    traceMode: "minimal",
+    agentConsole: {
+      profileId: "build",
+      pendingDecision: {
+        kind: "user-decision",
+        id: "decision-stale-state",
+        questions: [{ id: "q", question: "Continue?", options: [{ label: "Yes" }] }],
+      },
+      activity: [],
+      agents: [],
+      jobs: [],
+    },
+    pauseCheckpoint: {
+      turnId: "turn-stale-state",
+      boundary: "before_approval",
+      decisionId: "decision-stale-state",
+      attachmentRefs: [],
+      artifactRefs: [],
+    },
+  });
+
+  const resumed = await loadResumedWorkSession({ cwd, env, sessionId: "work-session-stale-pause" });
+
+  assert.equal(resumed.initialPauseCheckpoint, undefined);
 });
 
 test("loadResumedWorkSession falls back to legacy session memory summaries when checkpoints have no transcript entries", async () => {
@@ -202,6 +359,52 @@ test("loadResumedWorkSession round-trips safe lifecycle records and settles unre
     entries: [{ role: "user", text: "dispatch the plan" }],
     agentConsole: {
       profileId: "build",
+      workGraph: {
+        id: "graph-interrupted",
+        goal: "Finish the interrupted change",
+        qualityProfile: "deep",
+        currentStage: "work",
+        gateStatus: "proceed",
+        iteration: 1,
+        approval: "approved",
+        nodes: [{
+          id: "node-interrupted",
+          title: "Implement",
+          prompt: "Implement safely",
+          status: "running",
+          dependsOn: [],
+          fileOwnership: ["src/runtime.ts"],
+          acceptanceCriteria: ["Tests pass"],
+          evidenceRefs: [],
+          stage: "work",
+          role: "worker",
+          attempt: 1,
+          artifactRefs: [],
+          reviewRequired: true,
+        }],
+      },
+      qualityReview: {
+        runId: "quality-interrupted",
+        graphId: "graph-interrupted",
+        profile: "deep",
+        currentStage: "work",
+        iteration: 1,
+        refineCount: 0,
+        pivotCount: 0,
+        latestDecision: "proceed",
+        history: [{
+          event: "gate",
+          stage: "work",
+          decision: "proceed",
+          iteration: 1,
+          failures: [],
+          evidenceRefs: [],
+          artifactRefs: [],
+          independentVerification: false,
+          stale: false,
+          startedAt: 20,
+        }],
+      },
       activity: [],
       agents: [
         {
@@ -301,13 +504,20 @@ test("loadResumedWorkSession round-trips safe lifecycle records and settles unre
   assert.equal(resumedConsole.agents[2]?.summary, "Refactored the auth guard.");
   assert.equal(resumedConsole.agents[2]?.parentRunId, "run-running");
   assert.equal(resumedConsole.agents[2]?.transcriptRef, "transcripts/run-done.jsonl");
-  assert.deepEqual(resumedConsole.agents[2]?.usage?.eventIds, ["usage-run-done"]);
+  assert.equal(resumedConsole.agents[2]?.usage?.eventIds, undefined);
   assert.equal(resumedConsole.agents[2]?.usage?.routes?.[0]?.model, "gpt-5.6-sol");
+  assert.equal(resumedConsole.agents[2]?.usage?.routes?.[0]?.eventIds, undefined);
   assert.equal(resumedConsole.jobs[1]?.summary, "Plan step two finished.");
   assert.equal(resumedConsole.jobs[1]?.agentRunId, "run-done");
   assert.equal(resumedConsole.mainUsage?.inputTokens, 900);
   assert.equal(resumedConsole.mainUsage?.cacheReadTokens, 400);
-  assert.deepEqual(resumedConsole.mainUsage?.eventIds, ["usage-main"]);
+  assert.equal(resumedConsole.mainUsage?.eventIds, undefined);
+  assert.equal(resumedConsole.mainUsage?.routes?.[0]?.eventIds, undefined);
+  assert.equal(resumedConsole.qualityReview?.latestDecision, "unproven");
+  assert.equal(resumedConsole.qualityReview?.history.at(-1)?.event, "completed");
+  assert.deepEqual(resumedConsole.qualityReview?.history.at(-1)?.failures, ["QUALITY_RUN_INTERRUPTED"]);
+  assert.equal(resumedConsole.workGraph?.gateStatus, "unproven");
+  assert.equal(resumedConsole.workGraph?.nodes[0]?.status, "failed");
 
   // Unrecoverable work settles exactly once: interrupted records gain one
   // completion stamped at the resume, settled records keep their own.

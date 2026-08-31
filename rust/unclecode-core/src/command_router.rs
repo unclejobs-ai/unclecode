@@ -128,19 +128,19 @@ const WORK_SHELL_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
     BuiltinSlashCommand {
         command: "/agents",
         route: &["agents"],
-        description: "에이전트 실행 상태와 transcript를 엽니다",
+        description: "Open agent run status and transcripts.",
         aliases: &[],
     },
     BuiltinSlashCommand {
         command: "/jobs",
         route: &["jobs"],
-        description: "백그라운드 job 상태를 엽니다",
+        description: "Open background job status.",
         aliases: &[],
     },
     BuiltinSlashCommand {
         command: "/todo",
         route: &["todo"],
-        description: "현재 WorkGraph 진행 상태를 엽니다",
+        description: "Open current WorkGraph progress.",
         aliases: &[],
     },
     BuiltinSlashCommand {
@@ -223,8 +223,32 @@ const WORK_SHELL_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
     },
     BuiltinSlashCommand {
         command: "/review",
+        route: &["review"],
+        description: "Inspect SCC Quality Engine gates, critic findings, and evidence without starting a model turn.",
+        aliases: &[],
+    },
+    BuiltinSlashCommand {
+        command: "/scc",
+        route: &["review"],
+        description: "Open the SCC Quality Engine status already enforcing this run.",
+        aliases: &[],
+    },
+    BuiltinSlashCommand {
+        command: "/review run",
         route: &["prompt", "review"],
-        description: "Review the current changes, risks, and missing verification.",
+        description: "Run a model-backed code review. Optional focus text may follow.",
+        aliases: &[],
+    },
+    BuiltinSlashCommand {
+        command: "/code-review",
+        route: &["prompt", "review"],
+        description: "Run a model-backed code review. Optional focus text may follow.",
+        aliases: &[],
+    },
+    BuiltinSlashCommand {
+        command: "/scc review",
+        route: &["prompt", "review"],
+        description: "Run an explicit model-backed review through the SCC Quality Engine.",
         aliases: &[],
     },
     BuiltinSlashCommand {
@@ -309,7 +333,15 @@ pub fn route_work_shell_slash_command(input: &str) -> SlashRoute {
         };
     }
 
-    for (command, kind) in [("/review", "review"), ("/commit", "commit")] {
+    for (command, kind) in [
+        ("/review run", "review"),
+        ("/code-review", "review"),
+        ("/scc review", "review"),
+        // Compatibility: an argument-bearing legacy `/review <focus>` remains
+        // executable, while the exact bare command is intercepted locally.
+        ("/review", "review"),
+        ("/commit", "commit"),
+    ] {
         if let Some(route) = route_prompt_style(&normalized, command, kind) {
             return SlashRoute {
                 kind: SlashRouteKind::Dynamic,
@@ -497,6 +529,8 @@ pub fn work_shell_agent_console_tab(line: &str) -> Option<&'static str> {
         "/agents" => Some("agents"),
         "/jobs" => Some("jobs"),
         "/todo" => Some("plan"),
+        "/review" => Some("quality"),
+        "/scc" => Some("quality"),
         _ => None,
     }
 }
@@ -537,16 +571,26 @@ pub fn is_work_shell_console_invalid_form(line: &str) -> bool {
         .filter(|entry| work_shell_agent_console_tab(entry.command).is_none())
         .any(|entry| {
             entry.command.starts_with(token)
-                || entry
-                    .aliases
-                    .iter()
-                    .any(|alias| alias.starts_with(token))
+                || entry.aliases.iter().any(|alias| alias.starts_with(token))
         })
 }
 
 fn work_shell_builtin_submit_command(line: &str) -> Option<Value> {
     if let Some(tab) = work_shell_agent_console_tab(line) {
         return Some(json!({ "kind": "agent-console", "tab": tab }));
+    }
+    let queue_parts = line.split_whitespace().collect::<Vec<_>>();
+    if let ["/queue", "remove", id] = queue_parts.as_slice() {
+        if id.parse::<u64>().is_ok_and(|value| value > 0) {
+            return Some(json!({ "kind": "queue-remove", "id": id.parse::<u64>().ok() }));
+        }
+    }
+    if let ["/queue", "move", id, direction @ ("up" | "down")] = queue_parts.as_slice() {
+        if id.parse::<u64>().is_ok_and(|value| value > 0) {
+            return Some(
+                json!({ "kind": "queue-move", "id": id.parse::<u64>().ok(), "direction": direction }),
+            );
+        }
     }
     match line {
         "/exit" => Some(json!({ "kind": "exit" })),
@@ -558,9 +602,11 @@ fn work_shell_builtin_submit_command(line: &str) -> Option<Value> {
         "/status" => Some(json!({ "kind": "status" })),
         "/sessions" => Some(json!({ "kind": "sessions" })),
         "/tools" => Some(json!({ "kind": "tools" })),
+        "/policy" => Some(json!({ "kind": "policy" })),
         "/skills" => Some(json!({ "kind": "skills" })),
         "/queue" => Some(json!({ "kind": "queue" })),
         "/queue clear" => Some(json!({ "kind": "queue-clear" })),
+        "/queue resume" => Some(json!({ "kind": "queue-resume" })),
         "/cancel" | "/interrupt" | "/stop" => Some(json!({ "kind": "cancel" })),
         "/harness" => Some(json!({ "kind": "harness" })),
         "/auth key" => Some(json!({ "kind": "auth-key" })),
@@ -1222,6 +1268,26 @@ mod tests {
             .unwrap()["kind"],
             "queue-clear"
         );
+        let resume = serde_json::from_str::<Value>(
+            &work_shell_builtin_submit_command_json("/queue resume").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(resume["kind"], "queue-resume");
+
+        let remove = serde_json::from_str::<Value>(
+            &work_shell_builtin_submit_command_json("/queue remove 42").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(remove["kind"], "queue-remove");
+        assert_eq!(remove["id"], 42);
+
+        let moved = serde_json::from_str::<Value>(
+            &work_shell_builtin_submit_command_json("/queue move 42 up").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(moved["kind"], "queue-move");
+        assert_eq!(moved["id"], 42);
+        assert_eq!(moved["direction"], "up");
         assert_eq!(
             serde_json::from_str::<Value>(
                 &work_shell_builtin_submit_command_json("/cancel").unwrap()
@@ -1274,13 +1340,22 @@ mod tests {
             work_shell_builtin_submit_command("/todo"),
             Some(json!({ "kind": "agent-console", "tab": "plan" })),
         );
+        assert_eq!(
+            work_shell_builtin_submit_command("/review"),
+            Some(json!({ "kind": "agent-console", "tab": "quality" })),
+        );
         assert_eq!(work_shell_agent_console_tab("/queue"), None);
         assert_eq!(work_shell_agent_console_tab("/agents extra"), None);
     }
 
     #[test]
     fn routes_agent_console_submits_as_builtins() {
-        for (line, tab) in [("/agents", "agents"), ("/jobs", "jobs"), ("/todo", "plan")] {
+        for (line, tab) in [
+            ("/agents", "agents"),
+            ("/jobs", "jobs"),
+            ("/todo", "plan"),
+            ("/review", "quality"),
+        ] {
             let route = serde_json::from_str::<Value>(
                 &route_work_shell_submit_json(line, false, "default", true).unwrap(),
             )

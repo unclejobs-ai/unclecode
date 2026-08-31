@@ -70,7 +70,7 @@ pub fn resolve_work_shell_attachment_layout_json(input_json: &str) -> Result<Str
     let line_index = number_field(&input, "lineIndex").unwrap_or(0);
     serde_json::to_string(&json!({
         "composerHintMinHeight": 1,
-        "attachmentPlacement": "after-composer",
+        "attachmentPlacement": "above-composer",
         "attachmentMinHeight": 4,
         "attachmentLineColorRole": resolve_attachment_line_color_role(line_index),
     }))
@@ -634,17 +634,27 @@ pub fn format_work_shell_thinking_line(reasoning_label: &str) -> String {
 pub fn format_work_shell_status_line_json(input_json: &str) -> Result<String, String> {
     let input: Value = serde_json::from_str(input_json)
         .map_err(|error| format!("Invalid work-shell status JSON: {error}"))?;
-    Ok(format_work_shell_status_line(
+    Ok(format_work_shell_status_line_for_locale(
         str_field(&input, "model").unwrap_or_default(),
         str_field(&input, "mode").unwrap_or_default(),
         str_field(&input, "authLabel").unwrap_or_default(),
+        str_field(&input, "uiLocale").unwrap_or("en"),
     ))
 }
 
 pub fn format_work_shell_status_line(model: &str, mode: &str, auth_label: &str) -> String {
+    format_work_shell_status_line_for_locale(model, mode, auth_label, "en")
+}
+
+pub fn format_work_shell_status_line_for_locale(
+    model: &str,
+    mode: &str,
+    auth_label: &str,
+    locale: &str,
+) -> String {
     format!(
         "{model} · {} · {} · work context",
-        format_work_shell_mode_label(mode),
+        crate::mode::mode_label_for_locale(mode, locale),
         compact_work_shell_auth_label(auth_label)
     )
 }
@@ -1601,11 +1611,20 @@ mod tests {
         );
         assert_eq!(
             format_work_shell_status_line("gpt-5.4", "default", "Browser OAuth · file"),
-            "gpt-5.4 · 작업 모드 · Saved OAuth · work context"
+            "gpt-5.4 · Work mode · Saved OAuth · work context"
         );
         assert_eq!(
             format_work_shell_status_line("gpt-5.4", "default", "OAuth file · API blocked"),
-            "gpt-5.4 · 작업 모드 · OAuth · needs API key · work context"
+            "gpt-5.4 · Work mode · OAuth · needs API key · work context"
+        );
+        assert_eq!(
+            format_work_shell_status_line_for_locale(
+                "gpt-5.4",
+                "default",
+                "Browser OAuth · file",
+                "ko",
+            ),
+            "gpt-5.4 · 작업 모드 · Saved OAuth · work context"
         );
         assert_eq!(
             format_work_shell_usage_line(false, None, None, Some(1480), None),
@@ -1636,7 +1655,7 @@ mod tests {
                 Some("Enter send · Shift+Enter newline"),
                 None,
             ),
-            "~/project/unclecode  ·  gpt-5.4 · 작업 모드 · Saved OAuth · work context  ·  Enter send · Shift+Enter newline"
+            "~/project/unclecode  ·  gpt-5.4 · Work mode · Saved OAuth · work context  ·  Enter send · Shift+Enter newline"
         );
         assert_eq!(
             format_work_shell_footer_line(
@@ -1662,7 +1681,7 @@ mod tests {
                 Some("Enter send · Shift+Enter newline · / commands"),
                 Some(72),
             ),
-            "~/project/unclecode  ·  gpt-5.4 · YOLO 모드 · Saved OAuth · context"
+            "~/project/unclecode  ·  gpt-5.4 · YOLO mode · Saved OAuth · context"
         );
         assert_eq!(
             format_work_shell_footer_line(
@@ -1675,7 +1694,7 @@ mod tests {
                 None,
                 Some(120),
             ),
-            "~/project/unclecode  ·  gpt-5.4 · 작업 모드 · Saved OAuth · work context  ·  context 2 ready · 1 held back"
+            "~/project/unclecode  ·  gpt-5.4 · Work mode · Saved OAuth · work context  ·  context 2 ready · 1 held back"
         );
     }
 
@@ -1787,19 +1806,19 @@ mod tests {
     fn resolves_work_shell_attachment_layout() {
         assert_eq!(
             resolve_work_shell_attachment_layout_json(r#"{"lineIndex":0}"#).unwrap(),
-            r#"{"attachmentLineColorRole":"user","attachmentMinHeight":4,"attachmentPlacement":"after-composer","composerHintMinHeight":1}"#
+            r#"{"attachmentLineColorRole":"user","attachmentMinHeight":4,"attachmentPlacement":"above-composer","composerHintMinHeight":1}"#
         );
         assert_eq!(
             resolve_work_shell_attachment_layout_json(r#"{"lineIndex":1}"#).unwrap(),
-            r#"{"attachmentLineColorRole":"text","attachmentMinHeight":4,"attachmentPlacement":"after-composer","composerHintMinHeight":1}"#
+            r#"{"attachmentLineColorRole":"text","attachmentMinHeight":4,"attachmentPlacement":"above-composer","composerHintMinHeight":1}"#
         );
         assert_eq!(
             resolve_work_shell_attachment_layout_json(r#"{"lineIndex":2}"#).unwrap(),
-            r#"{"attachmentLineColorRole":"textMuted","attachmentMinHeight":4,"attachmentPlacement":"after-composer","composerHintMinHeight":1}"#
+            r#"{"attachmentLineColorRole":"textMuted","attachmentMinHeight":4,"attachmentPlacement":"above-composer","composerHintMinHeight":1}"#
         );
         assert_eq!(
             resolve_work_shell_attachment_layout_json("").unwrap(),
-            r#"{"attachmentLineColorRole":"user","attachmentMinHeight":4,"attachmentPlacement":"after-composer","composerHintMinHeight":1}"#
+            r#"{"attachmentLineColorRole":"user","attachmentMinHeight":4,"attachmentPlacement":"above-composer","composerHintMinHeight":1}"#
         );
     }
 

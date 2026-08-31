@@ -18,6 +18,16 @@
 
 type Background = "light" | "dark";
 
+/** Shared semantic names consumed by the Ink and web palettes. */
+export const SEMANTIC_TUI_TOKENS = {
+  accent: "accent",
+  success: "success",
+  warning: "warning",
+  danger: "danger",
+  muted: "muted",
+  surface: "surface",
+} as const;
+
 let probedBackground: Background | undefined;
 
 export function detectTerminalBackground(): Background {

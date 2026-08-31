@@ -67,9 +67,16 @@ function parseRustSubmitRoute(raw: string): WorkShellSubmitRoute | undefined {
 
 function isBuiltinCommand(value: unknown): value is ResolvedWorkShellBuiltinCommand {
   if (!value || typeof value !== "object") return false;
-  const command = value as { kind?: unknown; tab?: unknown; traceMode?: unknown; line?: unknown; skillName?: unknown; suggestion?: unknown; consoleInvalid?: unknown };
+  const command = value as { kind?: unknown; tab?: unknown; traceMode?: unknown; line?: unknown; skillName?: unknown; suggestion?: unknown; consoleInvalid?: unknown; id?: unknown; direction?: unknown };
   if (typeof command.kind !== "string") return false;
   if (command.kind === "agent-console") return isAgentConsoleTab(command.tab);
+  if (command.kind === "queue-remove") {
+    return typeof command.id === "number" && Number.isSafeInteger(command.id) && command.id > 0;
+  }
+  if (command.kind === "queue-move") {
+    return typeof command.id === "number" && Number.isSafeInteger(command.id) && command.id > 0
+      && (command.direction === "up" || command.direction === "down");
+  }
   if (command.kind === "trace-mode") return command.traceMode === "verbose" || command.traceMode === "minimal";
   if (command.kind === "reasoning" || command.kind === "model") return typeof command.line === "string";
   if (command.kind === "unknown-slash") return typeof command.line === "string" && (command.suggestion === undefined || typeof command.suggestion === "string") && (command.consoleInvalid === undefined || typeof command.consoleInvalid === "boolean");
@@ -84,9 +91,11 @@ function isBuiltinCommand(value: unknown): value is ResolvedWorkShellBuiltinComm
     "status",
     "sessions",
     "tools",
+    "policy",
     "skills",
     "queue",
     "queue-clear",
+    "queue-resume",
     "cancel",
     "harness",
     "auth-key",
@@ -161,6 +170,9 @@ function suggestKnownSlashCommand(line: string): string | undefined {
     );
   const best = ranked[0];
   if (!best) {
+    return undefined;
+  }
+  if (best.command === token) {
     return undefined;
   }
   const threshold = token.length <= 5 ? 2 : 3;

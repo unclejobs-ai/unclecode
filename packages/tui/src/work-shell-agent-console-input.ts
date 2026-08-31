@@ -26,7 +26,7 @@ import type { AgentConsoleControlState, WorkShellComposerMode } from "@unclecode
  *
  * 1. secure API-key entry owns every keystroke — nothing leaks to the console;
  * 2. the slash command picker owns its keys next;
- * 3. ctrl chords stay global (Ctrl+C, Ctrl+O, Ctrl+V);
+ * 3. ctrl chords stay global (Ctrl+C, Ctrl+O tool history, Ctrl+V);
  * 4. `Alt+A` toggles the console from any other composer state, draft or not;
  * 5. a closed console has no further claim;
  * 6. `agent-steer` gives every non-`Esc` key to the Composer and nothing to
@@ -38,7 +38,12 @@ import type { AgentConsoleControlState, WorkShellComposerMode } from "@unclecode
  * 9. browsing owns `j`/`k`, the arrows, `Tab`, `Enter`, `s`, `x`, `r`, `Esc`.
  */
 export type AgentConsoleInputDecision =
-  | { readonly kind: "dispatch"; readonly action: AgentConsoleInputAction }
+  | {
+      readonly kind: "dispatch";
+      readonly action: AgentConsoleInputAction;
+      /** The dispatched action abandons an agent-addressed child draft. */
+      readonly discardComposer?: true;
+    }
   | { readonly kind: "consume" }
   | { readonly kind: "compose" }
   | { readonly kind: "pass" };
@@ -105,15 +110,15 @@ export function resolveAgentConsoleInputDecision(
     return PASS;
   }
   // Ctrl chords are the shell's global escape hatches (Ctrl+C exit, Ctrl+O
-  // sessions, Ctrl+V paste) and stay reachable from every console state.
+  // tool history, Ctrl+V paste) and stay reachable from every console state.
   if (input.key.ctrl === true) {
     return PASS;
   }
   // `Alt+A` reaches ink as one keypress: the terminal writes `ESC` then `a`,
   // and `parse-keypress` reports `meta` with the escape byte stripped off the
-  // input. ink also sets `meta` for a bare `Escape`, so the escape flag has to
-  // be ruled out before the character is trusted.
-  if (input.key.meta === true && input.key.escape !== true && input.value.toLowerCase() === "a") {
+  // input. Some terminal/Ink combinations retain `escape` on that same chord;
+  // the non-empty `a` value distinguishes it from a bare Escape reliably.
+  if (input.key.meta === true && input.value.toLowerCase() === "a") {
     return act(input.open ? { kind: "close" } : { kind: "open" });
   }
   if (!input.open) {
@@ -169,10 +174,13 @@ export function resolveAgentConsoleInputDecision(
     case "k":
       return act({ kind: "move", delta: -1 });
     case "s":
+      if (input.tab === "quality") return CONSUME;
       return act({ kind: "begin-steer" });
     case "x":
+      if (input.tab === "quality") return CONSUME;
       return act({ kind: "request-cancel" });
     case "r":
+      if (input.tab === "quality") return CONSUME;
       return act({ kind: "continue" });
     default:
       return PASS;

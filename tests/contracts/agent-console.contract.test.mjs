@@ -7,6 +7,7 @@ import {
   AGENT_RUN_STATUSES,
   ASYNC_JOB_STATUSES,
   MAX_LIFECYCLE_SUMMARY_CHARS,
+  WORK_NODE_STATUSES,
   boundLifecycleSummary,
   createAgentConsoleSnapshot,
   isAskUserQuestionAnswered,
@@ -45,6 +46,38 @@ test("agent-console distinguishes answered questions from non-answer outcomes", 
     }),
     false,
   );
+});
+
+test("agent-console keeps decision types outside the exact work-node status tuple", () => {
+  assert.deepEqual(WORK_NODE_STATUSES, [
+    "proposed",
+    "approved",
+    "ready",
+    "running",
+    "blocked",
+    "requires_action",
+    "completed",
+    "failed",
+    "cancelled",
+  ]);
+  for (const kind of ["security-approval", "user-decision"]) {
+    const snapshot = createAgentConsoleSnapshot({
+      profileId: "review",
+      pendingDecision: {
+        kind,
+        id: `${kind}-1`,
+        questions: [
+          {
+            id: "choice",
+            question: "Continue?",
+            options: [{ label: "Continue" }, { label: "Stop" }],
+          },
+        ],
+      },
+      activity: [],
+    });
+    assert.equal(snapshot.pendingDecision?.kind, kind);
+  }
 });
 
 test("agent-console refuses work dispatch until graph approval", () => {
@@ -105,7 +138,12 @@ test("agent-console only coalesces completed routine read and search evidence", 
 test("agent-console journal snapshot restores one pending decision and running work node", () => {
   const snapshot = createAgentConsoleSnapshot({
     profileId: "review",
+    securityApprovals: [
+      { kind: "tool", key: "bash" },
+      { kind: "tool", key: "write_file" },
+    ],
     pendingDecision: {
+      kind: "user-decision",
       id: "decision-1",
       questions: [
         {
@@ -134,6 +172,11 @@ test("agent-console journal snapshot restores one pending decision and running w
     },
     activity: [],
   });
+  assert.equal(snapshot.pendingDecision.kind, "user-decision");
+  assert.deepEqual(snapshot.securityApprovals, [
+    { kind: "tool", key: "bash" },
+    { kind: "tool", key: "write_file" },
+  ]);
 
   assert.equal(snapshot.pendingDecision?.id, "decision-1");
   assert.equal(snapshot.workGraph?.nodes[0]?.status, "running");
@@ -202,6 +245,94 @@ test("agent-console resume parser accepts goal metadata before a prompt manifest
     "Auth tests pass",
   ]);
   assert.equal(parsed?.workGraph?.nodes[0]?.manifestId, undefined);
+});
+
+test("agent-console quality graph fields round-trip and legacy graphs receive conservative defaults", () => {
+  const legacy = parseAgentConsoleSnapshot({
+    profileId: "build",
+    workGraph: {
+      id: "legacy-graph",
+      approval: "approved",
+      nodes: [
+        {
+          id: "legacy-node",
+          title: "Legacy work",
+          prompt: "Continue legacy work.",
+          status: "ready",
+          dependsOn: [],
+          fileOwnership: ["src/legacy.ts"],
+          evidenceRefs: [],
+        },
+      ],
+    },
+    activity: [],
+  });
+
+  assert.deepEqual(
+    {
+      qualityProfile: legacy?.workGraph?.qualityProfile,
+      currentStage: legacy?.workGraph?.currentStage,
+      gateStatus: legacy?.workGraph?.gateStatus,
+      iteration: legacy?.workGraph?.iteration,
+      node: legacy?.workGraph?.nodes[0],
+    },
+    {
+      qualityProfile: "minimal",
+      currentStage: "work",
+      gateStatus: "unproven",
+      iteration: 0,
+      node: {
+        id: "legacy-node",
+        title: "Legacy work",
+        prompt: "Continue legacy work.",
+        status: "ready",
+        dependsOn: [],
+        fileOwnership: ["src/legacy.ts"],
+        acceptanceCriteria: [],
+        evidenceRefs: [],
+        stage: "work",
+        role: "worker",
+        attempt: 0,
+        artifactRefs: [],
+        reviewRequired: false,
+      },
+    },
+  );
+
+  const current = createAgentConsoleSnapshot({
+    profileId: "build",
+    workGraph: {
+      id: "quality-graph",
+      qualityProfile: "deep",
+      currentStage: "critic",
+      gateStatus: "refine",
+      iteration: 2,
+      approval: "approved",
+      nodes: [
+        {
+          id: "critic-node",
+          title: "Review artifacts",
+          prompt: "Review the artifact hash.",
+          status: "running",
+          dependsOn: ["work-node"],
+          fileOwnership: [],
+          acceptanceCriteria: ["Independent review is recorded"],
+          evidenceRefs: ["evidence/reviewer.json"],
+          stage: "critic",
+          role: "critic",
+          attempt: 2,
+          artifactRefs: ["sha256:abc123"],
+          reviewRequired: true,
+        },
+      ],
+    },
+    activity: [],
+  });
+
+  assert.deepEqual(
+    parseAgentConsoleSnapshot(current)?.workGraph,
+    current.workGraph,
+  );
 });
 
 test("agent-console resume parser round-trips every safe lifecycle field", () => {
@@ -293,7 +424,6 @@ test("agent-console resume parser round-trips every safe lifecycle field", () =>
       summary: "Mapped the execution path",
       errorSummary: "one retried tool call",
       usage: {
-        eventIds: ["usage-run-1"],
         inputTokens: 120,
         outputTokens: 45,
         cacheReadTokens: 12,
@@ -316,7 +446,6 @@ test("agent-console resume parser round-trips every safe lifecycle field", () =>
     },
   ]);
   assert.deepEqual(parsed?.mainUsage, {
-    eventIds: ["usage-main-1"],
     inputTokens: 300,
     outputTokens: 90,
     cacheReadTokens: 24,
@@ -325,7 +454,6 @@ test("agent-console resume parser round-trips every safe lifecycle field", () =>
       {
         provider: "openai",
         model: "gpt-5.6-sol",
-        eventIds: ["usage-main-1"],
         inputTokens: 300,
         outputTokens: 90,
         cacheReadTokens: 24,
@@ -335,6 +463,44 @@ test("agent-console resume parser round-trips every safe lifecycle field", () =>
   });
   assert.equal(parsed?.activity[0]?.agentRunId, "run-1");
   assert.doesNotMatch(JSON.stringify(parsed), /must disappear/);
+});
+
+test("agent-console round-trips only bounded redacted plugin diagnostics", () => {
+  const parsed = parseAgentConsoleSnapshot({
+    profileId: "build",
+    activity: [],
+    agents: [],
+    jobs: [],
+    pluginDiagnostics: [
+      {
+        runId: "run-plugin-1",
+        source: "workspace",
+        trustLane: "workspace-trusted",
+        pluginId: "workspace-reviewer",
+        pluginName: "workspace-reviewer",
+        hookName: "runClassified",
+        status: "error",
+        errorName: "PluginHookError",
+        errorMessage: `Failure at /Users/alice/private/plugin.mjs token=super-secret ${"x".repeat(400)}`,
+        exitStatus: "2",
+        dedupeKey: `sha256:${"a".repeat(64)}`,
+        startedAt: 42,
+      },
+    ],
+  });
+
+  const roundTripped = parseAgentConsoleSnapshot(
+    JSON.parse(JSON.stringify(parsed)),
+  );
+  const [diagnostic] = roundTripped?.pluginDiagnostics ?? [];
+  assert.equal(diagnostic?.source, "workspace");
+  assert.equal(diagnostic?.trustLane, "workspace-trusted");
+  assert.equal(diagnostic?.hookName, "runClassified");
+  assert.equal(diagnostic?.exitStatus, "2");
+  assert.match(diagnostic?.errorMessage ?? "", /\[PATH\]/);
+  assert.match(diagnostic?.errorMessage ?? "", /token=\[REDACTED\]/);
+  assert.ok(Array.from(diagnostic?.errorMessage ?? "").length <= 240);
+  assert.doesNotMatch(JSON.stringify(roundTripped), /alice|super-secret/);
 });
 
 test("agent-console resume parser defaults legacy snapshots to empty lifecycle arrays", () => {
@@ -509,7 +675,46 @@ test("agent-console resume parser tolerates accumulated money rounding", () => {
   );
 });
 
-test("agent-console snapshot factory copies and bounds lifecycle projections", () => {
+test("agent-console round-trips owner materialized session totals without replay ids", () => {
+  const parsed = parseAgentConsoleSnapshot({
+    profileId: "build",
+    activity: [],
+    agents: [],
+    jobs: [],
+    totalUsage: {
+      inputTokens: 10_000,
+      outputTokens: 2_500,
+      costUsd: 1.25,
+      routes: [
+        {
+          provider: "openai",
+          model: "gpt-5.6-sol",
+          inputTokens: 10_000,
+          outputTokens: 2_500,
+          costUsd: 1.25,
+        },
+      ],
+    },
+  });
+
+  assert.deepEqual(parsed?.totalUsage, {
+    inputTokens: 10_000,
+    outputTokens: 2_500,
+    costUsd: 1.25,
+    routes: [
+      {
+        provider: "openai",
+        model: "gpt-5.6-sol",
+        inputTokens: 10_000,
+        outputTokens: 2_500,
+        costUsd: 1.25,
+      },
+    ],
+  });
+  assert.doesNotMatch(JSON.stringify(parsed?.totalUsage), /eventIds/);
+});
+
+test("agent-console snapshot factory copies bounded totals without replay identities", () => {
   const agents = Array.from({ length: 200 }, (_, index) => ({
     id: `run-${index}`,
     displayName: `Agent ${index}`,
@@ -539,8 +744,8 @@ test("agent-console snapshot factory copies and bounds lifecycle projections", (
   assert.equal(snapshot.agents[0]?.id, "run-72");
   assert.equal(snapshot.jobs.length, 128);
   assert.equal(snapshot.jobs[0]?.id, "job-72");
-  assert.equal(snapshot.mainUsage?.eventIds.length, 300);
-  assert.equal(snapshot.mainUsage?.eventIds[0], "usage-0");
+  assert.doesNotMatch(JSON.stringify(snapshot.mainUsage), /eventIds/);
+  assert.equal(snapshot.mainUsage?.inputTokens, 12);
 
   agents.push({
     id: "run-late",
@@ -552,7 +757,7 @@ test("agent-console snapshot factory copies and bounds lifecycle projections", (
   eventIds.push("usage-late");
   assert.equal(snapshot.agents.length, 128);
   assert.equal(snapshot.agents.at(-1)?.id, "run-199");
-  assert.equal(snapshot.mainUsage?.eventIds.at(-1), "usage-299");
+  assert.doesNotMatch(JSON.stringify(snapshot.mainUsage), /usage-late/);
 });
 
 test("agent-console snapshot factory retains active work and trims settled history first", () => {
@@ -992,7 +1197,7 @@ test("agent-console exposes lifecycle, control, and tab unions", () => {
     "not_delivered",
     "rejected",
   ]);
-  assert.deepEqual(AGENT_CONSOLE_TABS, ["agents", "jobs", "plan"]);
+  assert.deepEqual(AGENT_CONSOLE_TABS, ["agents", "jobs", "plan", "quality"]);
 });
 
 test("agent-console parser bounds oversized lifecycle lists to the newest tail", () => {
@@ -1178,42 +1383,52 @@ test("agent-console parser rejects a malformed record inside the discarded prefi
   );
 });
 
-test("agent-console deduplicates usage event ids without evicting replay identities", () => {
-  const snapshot = createAgentConsoleSnapshot({
-    profileId: "build",
-    activity: [],
-    agents: [],
-    jobs: [],
-    mainUsage: {
-      eventIds: [
-        ...Array.from({ length: 300 }, () => "usage-repeat"),
-        "usage-distinct-a",
-        "usage-distinct-b",
-      ],
-    },
-  });
-
-  assert.deepEqual(snapshot.mainUsage?.eventIds, [
-    "usage-repeat",
-    "usage-distinct-a",
-    "usage-distinct-b",
-  ]);
-
-  const preserved = createAgentConsoleSnapshot({
+test("agent-console idempotently migrates 10k legacy identities to totals-only projection", () => {
+  const legacy = {
     profileId: "build",
     activity: [],
     agents: [],
     jobs: [],
     mainUsage: {
       eventIds: Array.from(
-        { length: 300 },
-        (_, index) => `usage-${index % 260}`,
+        { length: 10_000 },
+        (_, index) => `usage-${String(index)}`,
       ),
+      inputTokens: 30_000,
+      costUsd: 10_000,
+      routes: [
+        {
+          provider: "openai",
+          model: "gpt-5.6-sol",
+          eventIds: Array.from(
+            { length: 10_000 },
+            (_, index) => `usage-${String(index)}`,
+          ),
+          inputTokens: 30_000,
+          costUsd: 10_000,
+        },
+      ],
     },
-  });
+  };
+  const migrated = parseAgentConsoleSnapshot(legacy);
+  const migratedAgain = parseAgentConsoleSnapshot(
+    JSON.parse(JSON.stringify(migrated)),
+  );
 
-  assert.equal(preserved.mainUsage?.eventIds.length, 260);
-  assert.equal(new Set(preserved.mainUsage?.eventIds).size, 260);
+  assert.deepEqual(migrated?.mainUsage, {
+    inputTokens: 30_000,
+    costUsd: 10_000,
+    routes: [
+      {
+        provider: "openai",
+        model: "gpt-5.6-sol",
+        inputTokens: 30_000,
+        costUsd: 10_000,
+      },
+    ],
+  });
+  assert.deepEqual(migratedAgain, migrated);
+  assert.doesNotMatch(JSON.stringify(migrated), /eventIds/);
 });
 
 test("agent-console snapshot factory copies nested manifest, decision, and graph arrays", () => {

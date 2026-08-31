@@ -1,9 +1,14 @@
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const modulePath = fileURLToPath(import.meta.url);
+const RUST_COMMAND_INPUT_FILE_ENV = "UNCLECODE_RUST_INPUT_FILE";
+const RUST_COMMAND_TIMEOUT_ENV = "UNCLECODE_RUST_COMMAND_TIMEOUT_MS";
+const MAX_RUST_COMMAND_INPUT_BYTES = 8 * 1024 * 1024;
+const DEFAULT_RUST_COMMAND_TIMEOUT_MS = 120_000;
 let cachedRustEntrypoint: { command: string; argsPrefix: string[]; runCwd?: string } | undefined;
 
 function findWorkspaceRoot(start: string): string | undefined {
@@ -86,6 +91,21 @@ function findRustEntrypoint(): { command: string; argsPrefix: string[]; runCwd?:
   return cachedRustEntrypoint;
 }
 
+function rustCommandTimeoutMs(env: NodeJS.ProcessEnv): number {
+  const configured = env[RUST_COMMAND_TIMEOUT_ENV];
+  if (configured === undefined) {
+    return DEFAULT_RUST_COMMAND_TIMEOUT_MS;
+  }
+
+  const timeoutMs = Number(configured);
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > DEFAULT_RUST_COMMAND_TIMEOUT_MS) {
+    throw new Error(
+      `${RUST_COMMAND_TIMEOUT_ENV} must be an integer from 1 to ${DEFAULT_RUST_COMMAND_TIMEOUT_MS}`,
+    );
+  }
+  return timeoutMs;
+}
+
 export function runRustCommandSync(
   args: readonly string[],
   cwd: string,
@@ -93,17 +113,42 @@ export function runRustCommandSync(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
   const rust = findRustEntrypoint();
+  const childEnv: NodeJS.ProcessEnv = { ...process.env, ...env, UNCLECODE_WORK_CWD: cwd };
+  delete childEnv[RUST_COMMAND_INPUT_FILE_ENV];
+
+  let inputDirectory: string | undefined;
   try {
+    if (stdin !== undefined) {
+      const byteLength = typeof stdin === "string" ? Buffer.byteLength(stdin) : stdin.byteLength;
+      if (byteLength > MAX_RUST_COMMAND_INPUT_BYTES) {
+        throw new Error(
+          `Rust command input is ${byteLength} bytes, which exceeds the ${MAX_RUST_COMMAND_INPUT_BYTES}-byte limit`,
+        );
+      }
+
+      inputDirectory = mkdtempSync(path.join(os.tmpdir(), "unclecode-rust-input-"));
+      chmodSync(inputDirectory, 0o700);
+      const inputPath = path.join(inputDirectory, "input");
+      writeFileSync(inputPath, stdin, { flag: "wx", mode: 0o600 });
+      childEnv[RUST_COMMAND_INPUT_FILE_ENV] = inputPath;
+    }
+
     return execFileSync(rust.command, [...rust.argsPrefix, ...args], {
       cwd: rust.runCwd ?? cwd,
       windowsHide: true,
       maxBuffer: 8 * 1024 * 1024,
-      env: { ...process.env, ...env, UNCLECODE_WORK_CWD: cwd },
+      timeout: rustCommandTimeoutMs(childEnv),
+      killSignal: "SIGKILL",
+      env: childEnv,
       encoding: "utf8",
-      input: stdin,
+      stdio: ["ignore", "pipe", "pipe"],
     });
   } catch (error) {
     const output = `${(error as { stdout?: string }).stdout ?? ""}${(error as { stderr?: string }).stderr ?? ""}`.trim();
     throw new Error(output || (error instanceof Error ? error.message : String(error)));
+  } finally {
+    if (inputDirectory) {
+      rmSync(inputDirectory, { recursive: true, force: true });
+    }
   }
 }

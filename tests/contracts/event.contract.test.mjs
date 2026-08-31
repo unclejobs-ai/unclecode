@@ -18,7 +18,13 @@ test("event fixtures expose canonical engine and task lifecycle discriminants", 
     "session.state_changed",
   ]);
 
-  assert.deepEqual(SESSION_STATES, ["idle", "running", "requires_action"]);
+  assert.deepEqual(SESSION_STATES, [
+    "idle",
+    "running",
+    "pause_pending",
+    "paused",
+    "requires_action",
+  ]);
 
   assert.deepEqual(BACKGROUND_TASK_STATUSES, [
     "pending",

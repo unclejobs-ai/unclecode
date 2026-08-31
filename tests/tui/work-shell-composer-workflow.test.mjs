@@ -71,7 +71,7 @@ test("resolveWorkShellComposerHint prioritizes busy queue guidance over slash hi
       slashSuggestionCount: 4,
       selectedSlashCommand: "/model gpt-5.4",
     }),
-    "Enter queues follow-up · Ctrl+C/Esc interrupt · /queue",
+    "Queue a follow-up... · Enter queue · Esc interrupt · /queue",
   );
 });
 
@@ -129,9 +129,9 @@ test("busy WorkShellView renders composer hint above the composer dock", async (
   instance.unmount();
   instance.cleanup();
 
-  assert.match(output, /Enter queues follow-up · Ctrl\+C\/Esc interrupt · \/queue/);
+  assert.match(output, /Queue a follow-up\.\.\. · Enter queue · Esc interrupt · \/queue/);
   const busyRows = output.split("\n");
-  const hintIndex = busyRows.findIndex((row) => row.includes("Enter queues follow-up"));
+  const hintIndex = busyRows.findIndex((row) => row.includes("Queue a follow-up"));
   const dockIndex = paneDockDividerIndex(busyRows);
   assert.ok(hintIndex >= 0 && dockIndex > hintIndex, "composer hint should appear above the composer dock divider");
   // Task 9: the live activity row is pinned directly above the hint row, so
@@ -210,8 +210,8 @@ test("queued WorkShellView keeps queue indicator and composer hint visible", asy
   instance.unmount();
   instance.cleanup();
 
-  assert.match(output, /1 queued/);
-  assert.match(output, /Enter queues follow-up/);
+  assert.match(output, /1 follow-up/);
+  assert.match(output, /Queue a follow-up/);
 });
 
 test("composer dock footer keeps context cost readable on dark terminals", async () => {
@@ -283,7 +283,7 @@ test("the shell header shows the session identity when no caller supplies a hint
     const output = getOutput();
     assert.match(
       output,
-      /gemini-3-pro · 작업 모드/,
+      /gemini-3-pro · Work mode/,
       "the header must carry the model and mode label when no headerHint is supplied",
     );
     assert.doesNotMatch(
@@ -330,7 +330,7 @@ test("the shell header carries the auth warning chip when auth needs action", as
     assert.ok(headerLine !== undefined, "the header wordmark line should render");
     assert.match(
       headerLine,
-      /gpt-5\.4 · 작업 모드 · No auth/,
+      /gpt-5\.4 · Work mode · No auth/,
       "the auth warning chip should ride after the session facts on the header row",
     );
   } finally {
@@ -931,7 +931,7 @@ async function mountDeskWithParkedAttachment(rendered) {
     30_000,
   );
   await waitForComposerCondition(
-    () => rendered.getFrame().includes("[1/5]"),
+    () => rendered.getFrame().includes("attachments · 1/5"),
     "the parked clipboard attachment badge",
     30_000,
   );

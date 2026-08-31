@@ -113,13 +113,16 @@ test("loadWorkCliBootstrap keeps the direct conversation agent on the configured
       ...originalEnv,
       LLM_PROVIDER: "openai",
       OPENAI_MODEL: "gpt-5.4",
+      // Bootstrap identity is the subject of this test, not credential
+      // discovery. A synthetic key keeps the fixture independent from the
+      // developer machine and from secret-free CI runners.
+      OPENAI_API_KEY: "sk-test-unclecode-bootstrap-fixture",
       HOME: fakeHome,
       ...preserveRustToolchainEnv(originalEnv),
       UNCLECODE_SESSION_STORE_ROOT: path.join(workspaceRoot, ".state"),
       OPENAI_OAUTH_CLIENT_ID: "",
       ...unreachableOmpEnv(),
     };
-    delete process.env.OPENAI_API_KEY;
     delete process.env.OPENAI_AUTH_TOKEN;
 
     const result = await loadWorkCliBootstrap({ argv: ["--cwd", workspaceRoot] });

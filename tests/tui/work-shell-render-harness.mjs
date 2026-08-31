@@ -12,6 +12,17 @@ function createWritableOutput(columns = 100, rows = 30) {
   return output;
 }
 
+function createReadableInput() {
+  const input = new PassThrough();
+  input.isTTY = true;
+  input.setRawMode = () => input;
+  input.resume = () => input;
+  input.pause = () => input;
+  input.ref = () => input;
+  input.unref = () => input;
+  return input;
+}
+
 function createWritableError(columns = 100, rows = 30) {
   const error = new Writable({
     write(_chunk, _encoding, callback) {
@@ -31,10 +42,18 @@ export function renderDebugFrame(element, options = {}) {
   const rows = options.rows ?? 30;
   const stdout = createWritableOutput(columns, rows);
   let output = "";
+  let frame = "";
   stdout.on("data", (chunk) => {
-    output += chunk.toString();
+    const rendered = chunk.toString();
+    // Ink may publish a cursor-position escape as a standalone write after
+    // the complete debug frame. Keep the newest physical frame, not that
+    // trailing control-only chunk.
+    if (rendered.includes("\n")) frame = rendered;
+    output += rendered;
   });
+  const stdin = createReadableInput();
   const instance = render(element, {
+    stdin,
     stdout,
     stderr: createWritableError(columns, rows),
     debug: true,
@@ -43,7 +62,9 @@ export function renderDebugFrame(element, options = {}) {
   });
   return {
     instance,
+    stdin,
     getOutput: () => output,
+    getFrame: () => frame,
   };
 }
 

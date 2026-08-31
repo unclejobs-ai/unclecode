@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { repoRoot, ttyResponseText } from "./constants.mjs";
 import { run, shellQuote } from "./cli-helpers.mjs";
+import { stopRuntimeOwnersUnder } from "./runtime-owner-cleanup.mjs";
 import {
   calculatePaneWidth,
   IDLE_COMPOSER_PATTERN,
@@ -41,7 +42,7 @@ export async function runTtySmoke({ port, tmp, observations }) {
 
   try {
     await runTmux(["new-session", "-d", "-x", "100", "-y", "30", "-s", session, command]);
-    const initialPane = await waitForPane(session, /UncleCode|unclecode>/, paneFile);
+    const initialPane = await waitForPane(session, /prompt deck|UncleCode · Gemini/, paneFile);
     await sendKeys(session, "/status");
     await waitForPane(session, /Status shown\. Live steps return on the next action\./, paneFile);
     await waitForPane(session, IDLE_COMPOSER_PATTERN, paneFile);
@@ -57,7 +58,7 @@ export async function runTtySmoke({ port, tmp, observations }) {
       throw new Error(`${message}\nRecent provider observations:\n${JSON.stringify(observations.slice(beforeRequests), null, 2)}`);
     }
     const pane = readFileSync(paneFile, "utf8");
-    assert.match(initialPane, /UncleCode|unclecode>/);
+    assert.match(initialPane, /prompt deck|UncleCode · Gemini/);
     assert.match(contextPane, /Sources · \d+ sent · \d+ held/);
     assert.doesNotMatch(pane, /Unknown command|panic|TypeError|ReferenceError/);
 
@@ -70,5 +71,6 @@ export async function runTtySmoke({ port, tmp, observations }) {
     };
   } finally {
     await runTmux(["kill-session", "-t", session], { allowFailure: true });
+    await stopRuntimeOwnersUnder(tmp);
   }
 }

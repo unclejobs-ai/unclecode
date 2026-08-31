@@ -1,15 +1,70 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import {
   createTeamMiniLoopExecutor,
   createTeamMiniLoopPolicyEvaluator,
+  defaultCliExecutor,
   miniLoopMessagesToProviderQuery,
   runShell,
 } from "@unclecode/orchestrator";
+
+async function waitForFile(filePath, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      return readFileSync(filePath, "utf8").trim();
+    } catch {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  }
+  throw new Error(`Timed out waiting for ${filePath}`);
+}
+
+function processExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+function writeStubbornTree(root, name) {
+  const scriptPath = path.join(root, `${name}.mjs`);
+  const childScriptPath = path.join(root, `${name}-child.mjs`);
+  const pidPath = path.join(root, `${name}.pid`);
+  const childPidPath = path.join(root, `${name}-child.pid`);
+  const readyPath = path.join(root, `${name}.ready`);
+  const childReadyPath = path.join(root, `${name}-child.ready`);
+  const termPath = path.join(root, `${name}.term`);
+  const childTermPath = path.join(root, `${name}-child.term`);
+  writeFileSync(childScriptPath, `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(childPidPath)}, String(process.pid));
+process.on("SIGTERM", () => writeFileSync(${JSON.stringify(childTermPath)}, "term"));
+writeFileSync(${JSON.stringify(childReadyPath)}, "ready");
+setInterval(() => {}, 1000);
+`);
+  writeFileSync(scriptPath, `import { existsSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+process.on("SIGTERM", () => writeFileSync(${JSON.stringify(termPath)}, "term"));
+process.stdout.write("0123456789abcdef0123456789abcdef");
+spawn(process.execPath, [${JSON.stringify(childScriptPath)}], { stdio: "ignore" });
+const timer = setInterval(() => {
+  if (existsSync(${JSON.stringify(childReadyPath)})) {
+    writeFileSync(${JSON.stringify(readyPath)}, "ready");
+    clearInterval(timer);
+  }
+}, 10);
+setInterval(() => {}, 1000);
+`);
+  return { scriptPath, pidPath, childPidPath, readyPath, termPath, childTermPath };
+}
 
 test("runShell captures stdout and exit code for a successful command", async () => {
   const dir = mkdtempSync(path.join(tmpdir(), "unclecode-runshell-"));
@@ -65,6 +120,136 @@ test("runShell kills runaway commands at the configured timeout", async () => {
   });
   assert.equal(result.exitCode, -1);
   assert.match(result.stderr, /timed out/);
+});
+
+test("runShell timeout awaits TERM-to-KILL settlement of its full process group", {
+  skip: process.platform === "win32" ? "POSIX process groups only" : false,
+  timeout: 5_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "unclecode-runshell-tree-"));
+  let pid;
+  let childPid;
+  try {
+    const stubborn = writeStubbornTree(root, "run-shell");
+    const invocation = runShell({
+      command: `${JSON.stringify(process.execPath)} ${JSON.stringify(stubborn.scriptPath)}`,
+      cwd: root,
+      timeoutMs: 300,
+      forceKillDelayMs: 300,
+    });
+    await waitForFile(stubborn.readyPath);
+    pid = Number(await waitForFile(stubborn.pidPath));
+    childPid = Number(await waitForFile(stubborn.childPidPath));
+    const result = await invocation;
+    assert.equal(result.exitCode, -1);
+    assert.equal(readFileSync(stubborn.termPath, "utf8"), "term");
+    assert.equal(readFileSync(stubborn.childTermPath, "utf8"), "term");
+    assert.equal(processExists(pid), false);
+    assert.equal(processExists(childPid), false);
+  } finally {
+    if (pid && processExists(pid)) process.kill(pid, "SIGKILL");
+    if (childPid && processExists(childPid)) process.kill(childPid, "SIGKILL");
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runShell abort is idempotent and awaits full process-group settlement", {
+  skip: process.platform === "win32" ? "POSIX process groups only" : false,
+  timeout: 5_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "unclecode-runshell-abort-"));
+  const abort = new AbortController();
+  let pid;
+  let childPid;
+  try {
+    const stubborn = writeStubbornTree(root, "run-shell-abort");
+    const invocation = runShell({
+      command: `${JSON.stringify(process.execPath)} ${JSON.stringify(stubborn.scriptPath)}`,
+      cwd: root,
+      timeoutMs: 4_000,
+      forceKillDelayMs: 100,
+      signal: abort.signal,
+    });
+    await waitForFile(stubborn.readyPath);
+    pid = Number(await waitForFile(stubborn.pidPath));
+    childPid = Number(await waitForFile(stubborn.childPidPath));
+    abort.abort();
+    abort.abort();
+    const result = await invocation;
+    assert.equal(result.exitCode, -1);
+    assert.match(result.stderr, /aborted/);
+    assert.equal(processExists(pid), false);
+    assert.equal(processExists(childPid), false);
+  } finally {
+    if (pid && processExists(pid)) process.kill(pid, "SIGKILL");
+    if (childPid && processExists(childPid)) process.kill(childPid, "SIGKILL");
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("team CLI executor timeout awaits TERM-to-KILL settlement of descendants", {
+  skip: process.platform === "win32" ? "POSIX process groups only" : false,
+  timeout: 5_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "unclecode-cli-tree-"));
+  let pid;
+  let childPid;
+  try {
+    const stubborn = writeStubbornTree(root, "cli-exec");
+    const invocation = defaultCliExecutor(process.execPath, [stubborn.scriptPath], {
+      cwd: root,
+      timeoutMs: 300,
+      forceKillDelayMs: 300,
+    });
+    await waitForFile(stubborn.readyPath);
+    pid = Number(await waitForFile(stubborn.pidPath));
+    childPid = Number(await waitForFile(stubborn.childPidPath));
+    const result = await invocation;
+    assert.equal(result.timedOut, true);
+    assert.equal(readFileSync(stubborn.termPath, "utf8"), "term");
+    assert.equal(readFileSync(stubborn.childTermPath, "utf8"), "term");
+    assert.equal(processExists(pid), false);
+    assert.equal(processExists(childPid), false);
+  } finally {
+    if (pid && processExists(pid)) process.kill(pid, "SIGKILL");
+    if (childPid && processExists(childPid)) process.kill(childPid, "SIGKILL");
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("team CLI executor abort settles descendants and caps captured output", {
+  skip: process.platform === "win32" ? "POSIX process groups only" : false,
+  timeout: 5_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "unclecode-cli-abort-"));
+  const abort = new AbortController();
+  let pid;
+  let childPid;
+  try {
+    const stubborn = writeStubbornTree(root, "cli-abort");
+    const invocation = defaultCliExecutor(process.execPath, [stubborn.scriptPath], {
+      cwd: root,
+      timeoutMs: 4_000,
+      forceKillDelayMs: 100,
+      outputCap: 8,
+      signal: abort.signal,
+    });
+    await waitForFile(stubborn.readyPath);
+    pid = Number(await waitForFile(stubborn.pidPath));
+    childPid = Number(await waitForFile(stubborn.childPidPath));
+    abort.abort();
+    abort.abort();
+    const result = await invocation;
+    assert.equal(result.timedOut, false);
+    assert.match(result.stderr, /aborted/);
+    assert.equal(result.stdout, "01234567");
+    assert.equal(processExists(pid), false);
+    assert.equal(processExists(childPid), false);
+  } finally {
+    if (pid && processExists(pid)) process.kill(pid, "SIGKILL");
+    if (childPid && processExists(childPid)) process.kill(childPid, "SIGKILL");
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("createTeamMiniLoopExecutor dispatches run_shell actions", async () => {

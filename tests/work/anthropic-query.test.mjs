@@ -83,7 +83,8 @@ test("AnthropicProvider.query returns plain text when model emits no tool_use", 
 
   assert.equal(result.content, "all done");
   assert.deepEqual(result.actions, []);
-  assert.ok(Math.abs(result.costUsd - 0.000078) < 1e-12);
+  // Claude Sonnet 4.6: $3/M ordinary input + $0.30/M cache reads + $15/M output.
+  assert.ok(Math.abs(result.costUsd - 0.0000591) < 1e-12);
   assert.deepEqual(result.usage, { inputTokens: 9, outputTokens: 2, cacheReadTokens: 7 });
   assert.equal(captured.length, 1);
   assert.deepEqual(captured[0].system, [
@@ -247,7 +248,9 @@ test("AnthropicProvider.query reports token usage and caches stable prompt prefi
   ]);
 
   // Provider usage keeps uncached, cache-read, and cache-write input disjoint.
-  assert.equal(result.costUsd, 20.25);
+  // Claude Sonnet 4.6: $3.00/M ordinary input + $0.30/M cache reads
+  // + $15.00/M output.
+  assert.equal(result.costUsd, 18.225);
   assert.deepEqual(result.usage, {
     inputTokens: 1_000_000,
     outputTokens: 1_000_000,

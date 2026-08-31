@@ -134,10 +134,13 @@ mod tests {
                 state: "idle".to_string(),
                 summary: "Mapped local context".to_string(),
                 trace_mode: None,
+                ui_locale: None,
                 reasoning_effort: None,
                 last_submitted_context_receipt_id: None,
+                owner_mutation_revision: None,
                 entries: vec![],
                 agent_console: None,
+                pause_checkpoint: None,
             })
             .unwrap();
 
@@ -175,10 +178,13 @@ mod tests {
                     "Prepared a local research bundle for \"audit workflow\" with 12 changed files."
                         .to_string(),
                 trace_mode: None,
+                ui_locale: None,
                 reasoning_effort: None,
                 last_submitted_context_receipt_id: None,
+                owner_mutation_revision: None,
                 entries: vec![],
                 agent_console: None,
+                pause_checkpoint: None,
             })
             .unwrap();
 

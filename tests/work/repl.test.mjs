@@ -376,9 +376,11 @@ test("resolveWorkShellSlashCommand maps supported operational and prompt surface
   assert.deepEqual(resolveWorkShellSlashCommand("/mcp list"), ["mcp", "list"]);
   assert.deepEqual(resolveWorkShellSlashCommand("/mode status"), ["mode", "status"]);
   assert.deepEqual(resolveWorkShellSlashCommand("/mode set yolo"), ["mode", "set", "yolo"]);
-  assert.deepEqual(resolveWorkShellSlashCommand("/review"), ["prompt", "review"]);
+  assert.deepEqual(resolveWorkShellSlashCommand("/review"), ["review"]);
+  assert.deepEqual(resolveWorkShellSlashCommand("/review run"), ["prompt", "review"]);
+  assert.deepEqual(resolveWorkShellSlashCommand("/review run auth flow"), ["prompt", "review", "auth", "flow"]);
+  assert.deepEqual(resolveWorkShellSlashCommand("/code-review auth flow"), ["prompt", "review", "auth", "flow"]);
   assert.deepEqual(resolveWorkShellSlashCommand("/review auth flow"), ["prompt", "review", "auth", "flow"]);
-  assert.deepEqual(resolveWorkShellSlashCommand("/rev"), ["prompt", "review"]);
   assert.deepEqual(resolveWorkShellSlashCommand("/commit"), ["prompt", "commit"]);
   assert.deepEqual(resolveWorkShellSlashCommand("/commit auth flow"), ["prompt", "commit", "auth", "flow"]);
   assert.deepEqual(resolveWorkShellSlashCommand("/com"), ["prompt", "commit"]);
@@ -1401,7 +1403,7 @@ test("getConversationLayout gives answer blocks more room than lower-signal note
       mode: "yolo",
       authLabel: "Browser OAuth · file",
     }),
-    /YOLO 모드/,
+    /YOLO mode/,
   );
   const previousHome = process.env.HOME;
   process.env.HOME = "/Users/example";

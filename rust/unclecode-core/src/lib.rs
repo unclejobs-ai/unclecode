@@ -65,6 +65,7 @@ pub mod runtime;
 pub mod sensitive_input_command;
 pub mod session;
 pub mod session_listing;
+mod session_safe_io;
 pub mod sessions_command;
 pub mod setup_report;
 pub mod sha256;

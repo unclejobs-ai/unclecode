@@ -12,7 +12,7 @@ import {
 import type { RuntimeReasoningConfig, ToolRuntime } from "@unclecode/providers";
 
 type PiTurnRequest = {
-  readonly provider: "anthropic" | "gemini" | "openai";
+  readonly provider: "anthropic" | "gemini" | "openai" | "deepseek";
   readonly model: string;
   readonly prompt: string;
   readonly cwd: string;
@@ -36,8 +36,13 @@ function parsePiTurnRequest(raw: string): PiTurnRequest {
     throw new Error("work-pi-turn: request must be a JSON object.");
   }
   const { provider, model, prompt, cwd } = parsed;
-  if (provider !== "anthropic" && provider !== "gemini" && provider !== "openai") {
-    throw new Error("work-pi-turn: provider must be anthropic, gemini, or openai.");
+  if (
+    provider !== "anthropic"
+    && provider !== "gemini"
+    && provider !== "openai"
+    && provider !== "deepseek"
+  ) {
+    throw new Error("work-pi-turn: provider must be anthropic, gemini, openai, or deepseek.");
   }
   if (typeof model !== "string" || typeof prompt !== "string" || typeof cwd !== "string") {
     throw new Error("work-pi-turn: model, prompt, and cwd must be strings.");
@@ -143,7 +148,9 @@ export async function runWorkPiTurn(): Promise<number> {
         ? "OpenAI"
         : request.provider === "anthropic"
           ? "Anthropic"
-          : "Gemini";
+          : request.provider === "gemini"
+            ? "Gemini"
+            : "DeepSeek";
       const oauthSuffix = request.provider === "openai"
         ? " and no Codex OAuth credentials were available"
         : "";

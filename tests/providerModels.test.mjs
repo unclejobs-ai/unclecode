@@ -15,20 +15,20 @@ test("providerLabel returns human readable provider names", () => {
 
 test("providerModelCatalog includes active model and defaults", () => {
   const catalog = providerModelCatalog("openai", { OPENAI_MODEL: "gpt-5.4" });
-  assert.equal(catalog[0], "gpt-5.4");
-  assert.equal(catalog[1], "gpt-5.5");
-  assert.ok(catalog.includes("gpt-5.4-mini"));
-  assert.ok(catalog.includes("gpt-4.1"));
-  assert.ok(catalog.includes("o4-mini"));
+  assert.deepEqual(catalog, [
+    "gpt-5.4",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+  ]);
 });
 
 test("providerModelCatalog is backed by the Rust model registry ordering", () => {
   const catalog = providerModelCatalog("openai", {});
-  assert.deepEqual(catalog.slice(0, 4), [
-    "gpt-5.5",
-    "gpt-5.4",
-    "gpt-5.4-mini",
-    "o4-mini",
+  assert.deepEqual(catalog, [
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
   ]);
 });
 

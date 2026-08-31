@@ -7,6 +7,7 @@ import {
 } from "@unclecode/orchestrator";
 
 const request = {
+  kind: "user-decision",
   id: "decision-1",
   title: "Execution choice",
   questions: [{

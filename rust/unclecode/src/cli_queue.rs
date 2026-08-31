@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use unclecode_core::queue::{
-    queue_item_json, queue_items_json, queue_length_json, PersistentWorkQueue,
+    queue_item_json, queue_items_json, queue_length_json, PersistentWorkQueue, QueueMoveDirection,
 };
 
 pub fn top_level_queue_args(args: &[OsString]) -> Option<Vec<OsString>> {
@@ -28,9 +28,8 @@ pub fn run_top_level_queue_command(args: &[OsString]) -> Result<u8, String> {
             print_queue_help();
             Ok(0)
         }
-        Some("push") | Some("pop") | Some("list") | Some("len") | Some("clear") => {
-            run_queue_action(args)
-        }
+        Some("push") | Some("pop") | Some("remove") | Some("move") | Some("list") | Some("len")
+        | Some("clear") => run_queue_action(args),
         _ => Err(queue_usage()),
     }
 }
@@ -85,6 +84,45 @@ fn run_queue_action(args: &[OsString]) -> Result<u8, String> {
                 println!("Queue empty.");
             }
         }
+        "remove" => {
+            let id = positional
+                .get(1)
+                .and_then(|arg| arg.to_str())
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(queue_usage)?;
+            let item = queue
+                .remove(id)
+                .map_err(|error| format!("Failed to remove queue item: {error}"))?;
+            if json {
+                println!("{}", queue_item_json(item.as_ref()));
+            } else if let Some(item) = item {
+                println!("Removed #{}: {}", item.id, item.line);
+            } else {
+                println!("Queue item #{id} not found.");
+            }
+        }
+        "move" => {
+            let id = positional
+                .get(1)
+                .and_then(|arg| arg.to_str())
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(queue_usage)?;
+            let direction = match positional.get(2).and_then(|arg| arg.to_str()) {
+                Some("up") => QueueMoveDirection::Up,
+                Some("down") => QueueMoveDirection::Down,
+                _ => return Err(queue_usage()),
+            };
+            let item = queue
+                .move_item(id, direction)
+                .map_err(|error| format!("Failed to move queue item: {error}"))?;
+            if json {
+                println!("{}", queue_item_json(item.as_ref()));
+            } else if let Some(item) = item {
+                println!("Moved #{}: {}", item.id, item.line);
+            } else {
+                println!("Queue item #{id} cannot move {direction:?}.");
+            }
+        }
         "list" => {
             let items = queue
                 .snapshot()
@@ -131,6 +169,8 @@ fn print_queue_help() {
     println!("  unclecode queue list <session-id>");
     println!("  unclecode queue push <session-id> <follow-up...>");
     println!("  unclecode queue pop <session-id>");
+    println!("  unclecode queue remove <session-id> <id>");
+    println!("  unclecode queue move <session-id> <id> <up|down>");
     println!("  unclecode queue len <session-id>");
     println!("  unclecode queue clear <session-id>");
     println!();
@@ -138,7 +178,8 @@ fn print_queue_help() {
 }
 
 fn queue_usage() -> String {
-    "Usage: unclecode queue <list|push|pop|len|clear> <session-id> [line...] [--json]".to_string()
+    "Usage: unclecode queue <list|push|pop|remove|move|len|clear> <session-id> [args...] [--json]"
+        .to_string()
 }
 
 fn queue_path(workspace_root: &Path, session_id: &str) -> PathBuf {

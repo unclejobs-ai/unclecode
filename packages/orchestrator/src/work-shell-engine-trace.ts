@@ -334,7 +334,7 @@ export function applyWorkShellTraceEvent<
 >(input: {
   state: WorkShellEngineState<Reasoning>;
   event: TraceEvent;
-  formatAgentTraceLine: (event: TraceEvent) => string;
+  formatAgentTraceLine: (event: TraceEvent, uiLocale?: "en" | "ko") => string;
   setState: (patch: Partial<WorkShellEngineState<Reasoning>>) => void;
   appendEntries: (...entries: readonly WorkShellChatEntry[]) => void;
   pushTraceLine: (line: string) => void;
@@ -380,7 +380,7 @@ export function applyWorkShellTraceEvent<
     }
   }
 
-  const line = input.formatAgentTraceLine(input.event);
+  const line = input.formatAgentTraceLine(input.event, input.state.uiLocale);
   const busyPatch = createTraceEventBusyPatch({
     state: input.state,
     event: input.event,
@@ -394,6 +394,14 @@ export function applyWorkShellTraceEvent<
   // turn accumulated before any other end-of-turn effects append entries.
   if (input.event.type === "turn.completed") {
     flushStreamingReasoning();
+  }
+
+  // External plugin failures are durable operator diagnostics, not verbose
+  // tool chatter. The source-labelled line is appended exactly once by the
+  // plugin host's per-run dedupe and therefore survives the existing session
+  // snapshot while remaining visible in minimal mode.
+  if (input.event.type === "plugin.diagnostic" && line.trim().length > 0) {
+    input.appendEntries({ role: "system", text: line });
   }
 
   if (line.trim().length > 0 && input.state.traceMode === "verbose") {

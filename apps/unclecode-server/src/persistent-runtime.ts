@@ -1,0 +1,325 @@
+import { lstat, opendir, readFile } from "node:fs/promises";
+import { join } from "node:path";
+
+import { parseWorkShellReplaySafePauseCheckpoint } from "@unclecode/orchestrator";
+
+import { BoundedEventJournal, type EventJournal } from "./event-journal.js";
+import { createRuntimeAdapter, type RuntimeAdapter, type RuntimeControlPort, type RuntimeControlRequest, type RuntimeControlResult } from "./runtime-adapter.js";
+import type {
+  RuntimeReadSource,
+  RuntimeSessionSource,
+} from "./control-room.js";
+import type {
+  RuntimeCacheTelemetryReadResult,
+  RuntimeCacheTelemetryReport,
+  RuntimeSystemObservabilitySource,
+} from "./system-observability.js";
+import type { RuntimeSessionMutationArbiter } from "./runtime-mutation-arbiter.js";
+import { boundedRuntimeRpcError } from "./runtime-error-redaction.js";
+
+const MAX_CHECKPOINTS = 128;
+const MAX_DIRECTORIES = 2_048;
+const MAX_CHECKPOINT_BYTES = 2 * 1024 * 1024;
+
+export type AttachedRuntimeControl = {
+  readonly revision: () => number;
+  readonly mutationArbiter?: RuntimeSessionMutationArbiter | undefined;
+  readonly snapshot?: (() => RuntimeSessionSource) | undefined;
+  readonly onCommitted?: ((result: RuntimeControlResult) => void) | undefined;
+  readonly onAdmitted?: ((request: RuntimeControlRequest) => void) | undefined;
+  readonly precondition?: ((request: RuntimeControlRequest) => RuntimeControlResult | undefined) | undefined;
+  readonly control: (request: RuntimeControlRequest) => Promise<RuntimeControlResult>;
+};
+
+export class LiveRuntimeControlRegistry implements RuntimeControlPort {
+  readonly #controls = new Map<string, AttachedRuntimeControl>();
+
+  attach(sessionId: string, control: AttachedRuntimeControl): () => void {
+    this.#controls.set(sessionId, control);
+    return () => {
+      if (this.#controls.get(sessionId) === control) this.#controls.delete(sessionId);
+    };
+  }
+
+  revision(sessionId: string): number | undefined {
+    return this.#controls.get(sessionId)?.revision();
+  }
+
+  snapshot(sessionId: string): RuntimeSessionSource | undefined {
+    return this.#controls.get(sessionId)?.snapshot?.();
+  }
+
+  snapshots(): readonly RuntimeSessionSource[] {
+    return [...this.#controls.values()].flatMap(control => {
+      const snapshot = control.snapshot?.();
+      return snapshot ? [snapshot] : [];
+    });
+  }
+
+  async control(request: RuntimeControlRequest): Promise<RuntimeControlResult> {
+    const attached = this.#controls.get(request.sessionId);
+    if (!attached) return { ok: false, code: "not_attached", message: "Session is not attached to this runtime server." };
+    const revision = attached.revision();
+    if (!attached.mutationArbiter) {
+      if (revision !== request.expectedRevision) {
+        return { ok: false, code: "revision_conflict", message: "Session revision changed.", revision };
+      }
+      return attached.control(request);
+    }
+    const result = await attached.mutationArbiter.mutate<RuntimeControlResult, RuntimeControlResult>({
+      idempotencyKey: request.idempotencyKey,
+      fingerprint: {
+        action: request.action,
+        payload: request.payload ?? null,
+        expectedRevision: request.expectedRevision,
+      },
+      expectedRevision: request.expectedRevision,
+      ...(request.action === "cancel"
+        ? { lane: "cancel" as const }
+        : request.action === "follow-up"
+          ? {}
+          : { lane: "control" as const }),
+      ...(request.action === "pause" ? { bindsCancelGeneration: true } : {}),
+      conflict: (current) => ({ ok: false, code: "revision_conflict", message: "Session revision changed.", revision: current }),
+      invalidReuse: (current) => ({ ok: false, code: "invalid_action", message: "Idempotency-Key was reused for another runtime action.", revision: current }),
+      ...(attached.onAdmitted ? { onAdmitted: () => attached.onAdmitted?.(request) } : {}),
+      ...(attached.precondition ? { precondition: () => attached.precondition?.(request) } : {}),
+      execute: () => attached.control(request),
+      didMutate: (response) => response.ok,
+      complete: (response, current) => ({ ...response, revision: current }),
+      fail: (error, current) => ({
+        ok: false,
+        code: "invalid_action",
+        message: boundedRuntimeRpcError(error),
+        revision: current,
+      }),
+    });
+    attached.onCommitted?.(result);
+    return result;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stateOf(value: unknown): RuntimeSessionSource["state"] {
+  if (value === "running" || value === "pause_pending" || value === "paused" || value === "requires_action" || value === "completed" || value === "failed" || value === "cancelled") return value;
+  return "idle";
+}
+
+function localeOf(checkpoint: Record<string, unknown>): "en" | "ko" {
+  const metadata = isRecord(checkpoint.metadata) ? checkpoint.metadata : {};
+  return checkpoint.uiLocale === "ko" || metadata.uiLocale === "ko" ? "ko" : "en";
+}
+
+async function checkpointPaths(rootDir: string): Promise<readonly string[]> {
+  const pending = [rootDir];
+  const found: string[] = [];
+  let visited = 0;
+  while (pending.length > 0 && visited < MAX_DIRECTORIES && found.length < MAX_CHECKPOINTS) {
+    const directory = pending.shift();
+    if (!directory) break;
+    visited += 1;
+    let handle;
+    try {
+      handle = await opendir(directory);
+    } catch {
+      continue;
+    }
+    for await (const entry of handle) {
+      const path = join(directory, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) pending.push(path);
+      else if (entry.isFile() && entry.name.endsWith(".checkpoint.json")) found.push(path);
+      if (found.length >= MAX_CHECKPOINTS) break;
+    }
+  }
+  return found;
+}
+
+async function readCheckpoint(path: string, controls: LiveRuntimeControlRegistry): Promise<RuntimeSessionSource | null> {
+  try {
+    const stat = await lstat(path);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CHECKPOINT_BYTES) return null;
+    const parsed = JSON.parse(await readFile(path, "utf8")) as unknown;
+    if (!isRecord(parsed) || typeof parsed.sessionId !== "string" || typeof parsed.projectPath !== "string") return null;
+    const metadata = isRecord(parsed.metadata) ? parsed.metadata : undefined;
+    const agentConsole = isRecord(parsed.agentConsole) ? parsed.agentConsole : undefined;
+    const ownerMutationRevision = typeof metadata?.ownerMutationRevision === "number"
+      && Number.isSafeInteger(metadata.ownerMutationRevision)
+      && metadata.ownerMutationRevision >= 0
+      ? metadata.ownerMutationRevision
+      : 0;
+    const checkpointState = stateOf(parsed.state);
+    const pendingDecision = agentConsole && isRecord(agentConsole.pendingDecision)
+      ? agentConsole.pendingDecision
+      : undefined;
+    const replaySafePause = checkpointState === "paused"
+      ? parseWorkShellReplaySafePauseCheckpoint(
+          parsed.pauseCheckpoint,
+          typeof pendingDecision?.id === "string" ? pendingDecision.id : undefined,
+        )
+      : undefined;
+    const wasInFlight = checkpointState === "running"
+      || checkpointState === "pause_pending"
+      || (checkpointState === "paused" && !replaySafePause);
+    const recoveredMetadata = replaySafePause
+      ? {
+          ...(metadata ?? {}),
+          recoveryStatus: "replay_safe_pause_restored",
+          checkpointState,
+          decisionId: replaySafePause.decisionId,
+        }
+      : wasInFlight
+        ? { ...(metadata ?? {}), recoveryStatus: "non_resumable_owner_restart", checkpointState }
+        : metadata;
+    const persisted: RuntimeSessionSource = {
+      sessionId: parsed.sessionId,
+      projectPath: parsed.projectPath,
+      locale: localeOf(parsed),
+      state: wasInFlight ? "failed" : checkpointState,
+      revision: controls.revision(parsed.sessionId) ?? ownerMutationRevision,
+      ...(typeof parsed.updatedAt === "string" ? { updatedAt: parsed.updatedAt } : {}),
+      ...(recoveredMetadata ? { metadata: recoveredMetadata } : {}),
+      ...(agentConsole ? { agentConsole } : {}),
+      context: {
+        included: [],
+        excluded: [],
+        compacted: false,
+        ...(typeof metadata?.lastSubmittedContextReceiptId === "string" ? { receiptId: metadata.lastSubmittedContextReceiptId } : {}),
+      },
+    };
+    return controls.snapshot(parsed.sessionId) ?? persisted;
+  } catch {
+    return null;
+  }
+}
+
+export async function readPersistentRuntime(
+  rootDir: string,
+  controls: LiveRuntimeControlRegistry,
+  readCacheTelemetry?: () => RuntimeCacheTelemetryReadResult,
+  readSystemObservability?: () => RuntimeSystemObservabilitySource,
+): Promise<RuntimeReadSource> {
+  const paths = await checkpointPaths(rootDir);
+  const settled = await Promise.all(paths.map(path => readCheckpoint(path, controls)));
+  const bySessionId = new Map(
+    settled.filter((item): item is RuntimeSessionSource => item !== null)
+      .map(item => [item.sessionId, item] as const),
+  );
+  for (const live of controls.snapshots()) bySessionId.set(live.sessionId, live);
+  const sessions = [...bySessionId.values()]
+    .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
+  const systemEvidence = readSystemObservabilitySafely(readSystemObservability);
+  const cacheEvidence = readCacheTelemetrySafely(readCacheTelemetry);
+  const ownerCacheTelemetry = systemEvidence.value.cacheTelemetry;
+  const cacheTelemetry: RuntimeCacheTelemetryReport = {
+    caches: [
+      ...(systemEvidence.value.caches ?? []),
+      ...cacheEvidence.caches,
+    ],
+    sources: [
+      ...(ownerCacheTelemetry?.sources ?? []),
+      ...cacheEvidence.sources,
+    ],
+    sourceFailures: (ownerCacheTelemetry?.sourceFailures ?? 0) + (cacheEvidence.sourceFailures ?? 0),
+    projectionFailures: (ownerCacheTelemetry?.projectionFailures ?? 0) + (cacheEvidence.projectionFailures ?? 0),
+    truncated: ownerCacheTelemetry?.truncated === true || cacheEvidence.truncated === true,
+  };
+  const cacheTelemetryAvailable = cacheTelemetry.sources.length > 0
+    && cacheTelemetry.sources.every(source => source.status === "available" && source.failureCount === 0)
+    && (cacheTelemetry.sourceFailures ?? 0) === 0
+    && (cacheTelemetry.projectionFailures ?? 0) === 0
+    && cacheTelemetry.truncated !== true;
+  return {
+    generatedAt: Date.now(),
+    sessions,
+    system: {
+      ...systemEvidence.value,
+      evidenceSources: {
+        owner: systemEvidence.status,
+        cacheTelemetry: cacheTelemetryAvailable ? "available" : "unavailable",
+      },
+      caches: cacheTelemetry.caches,
+      cacheTelemetry: {
+        sources: cacheTelemetry.sources,
+        sourceFailures: cacheTelemetry.sourceFailures,
+        projectionFailures: cacheTelemetry.projectionFailures,
+        truncated: cacheTelemetry.truncated,
+      },
+    },
+  };
+}
+
+function readSystemObservabilitySafely(
+  readSystemObservability: (() => RuntimeSystemObservabilitySource) | undefined,
+): { readonly status: "available" | "unavailable"; readonly value: RuntimeSystemObservabilitySource } {
+  if (!readSystemObservability) return { status: "unavailable", value: {} };
+  try {
+    return { status: "available", value: readSystemObservability() };
+  } catch {
+    return { status: "unavailable", value: {} };
+  }
+}
+
+function readCacheTelemetrySafely(
+  readCacheTelemetry: (() => RuntimeCacheTelemetryReadResult) | undefined,
+): RuntimeCacheTelemetryReport {
+  if (!readCacheTelemetry) {
+    return {
+      caches: [],
+      sources: [{ name: "runtime-cache-telemetry", status: "unavailable", failureCount: 0 }],
+    };
+  }
+  try {
+    const result = readCacheTelemetry();
+    if (Array.isArray(result)) {
+      return {
+        caches: result,
+        sources: [{ name: "runtime-cache-telemetry", status: "available", failureCount: 0 }],
+      };
+    }
+    if (!isRecord(result) || !Array.isArray(result.caches) || !Array.isArray(result.sources)) {
+      throw new Error("Cache telemetry reader returned an invalid report.");
+    }
+    return result as RuntimeCacheTelemetryReport;
+  } catch {
+    return {
+      caches: [],
+      sources: [{ name: "runtime-cache-telemetry", status: "unavailable", failureCount: 1 }],
+      sourceFailures: 1,
+    };
+  }
+}
+
+export function createPersistentRuntimeAdapter(input: {
+  readonly rootDir: string;
+  readonly controls?: LiveRuntimeControlRegistry;
+  readonly journal?: EventJournal;
+  readonly journalCapacity?: number;
+  readonly readCacheTelemetry?: () => RuntimeCacheTelemetryReadResult;
+  readonly readSystemObservability?: () => RuntimeSystemObservabilitySource;
+}): {
+  readonly adapter: RuntimeAdapter;
+  readonly controls: LiveRuntimeControlRegistry;
+  readonly journal: EventJournal;
+} {
+  const controls = input.controls ?? new LiveRuntimeControlRegistry();
+  const journal = input.journal ?? new BoundedEventJournal(
+    input.journalCapacity === undefined ? {} : { capacity: input.journalCapacity },
+  );
+  return {
+    controls,
+    journal,
+    adapter: createRuntimeAdapter({
+      read: () => readPersistentRuntime(
+        input.rootDir,
+        controls,
+        input.readCacheTelemetry,
+        input.readSystemObservability,
+      ),
+      controls,
+    }),
+  };
+}

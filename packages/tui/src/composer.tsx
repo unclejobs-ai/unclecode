@@ -4,7 +4,7 @@ import {
   type ClipboardImageResult,
 } from "@unclecode/orchestrator";
 import { Box, Text, useCursor, useInput, type DOMElement } from "ink";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useContext, useEffect, useRef, useState } from "react";
 
 import { getDisplayWidth, segmentDisplayGraphemes, truncateForDisplayWidth } from "./text-width.js";
 import type { AgentConsoleKeyState } from "./work-shell-agent-console-input.js";
@@ -17,9 +17,27 @@ export type { ClipboardImageResult };
 const COMPOSER_PASTE_THRESHOLD = 48;
 const PASTE_SETTLE_MS = 120;
 const BRACKETED_PASTE_ARTIFACT_PATTERN = /(?:\u001b\[(?:200|201|990)~|\[(?:200|201|990)~)/g;
+const TERMINAL_MOUSE_ARTIFACT_PATTERN = /(?:\u001b)?\[<\d+;\d+;\d+[mM]/g;
 const NON_TEXT_CONTROL_PATTERN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 const COMPOSER_DEFAULT_VISIBLE_WIDTH = 72;
 const COMPOSER_MAX_VISIBLE_ROWS = 4;
+
+/**
+ * Geometry supplied by the owning work-shell dock. The Composer still owns
+ * editing and grapheme layout, but it must not guess where a pinned dock ends
+ * or how many rows the surrounding frame can afford. Keeping this as context
+ * lets the WorkShellView provide the same budget to every branch (including
+ * overlays) without cloning an arbitrary user-supplied React node.
+ */
+export type ComposerFrameGeometry = {
+  readonly maxVisibleRows?: number;
+  readonly cursorAnchor?: {
+    readonly x: number;
+    readonly bottom: number;
+  };
+};
+
+export const WorkShellComposerFrameContext = React.createContext<ComposerFrameGeometry | undefined>(undefined);
 
 export function isRawComposerEmpty(value: string, pendingValue?: string): boolean {
   return (pendingValue ?? value).length === 0;
@@ -28,6 +46,7 @@ export function isRawComposerEmpty(value: string, pendingValue?: string): boolea
 export function sanitizeComposerInput(value: string): string {
   return value
     .replace(BRACKETED_PASTE_ARTIFACT_PATTERN, "")
+    .replace(TERMINAL_MOUSE_ARTIFACT_PATTERN, "")
     .replace(NON_TEXT_CONTROL_PATTERN, "");
 }
 
@@ -99,7 +118,7 @@ export function applyComposerEdit(input: {
     };
   }
 
-  if (input.key.backspace || input.key.delete) {
+  if (input.key.backspace) {
     if (cursorOffset === 0) {
       return {
         nextValue: input.value,
@@ -112,6 +131,23 @@ export function applyComposerEdit(input: {
     return {
       nextValue: `${input.value.slice(0, previousOffset)}${input.value.slice(cursorOffset)}`,
       nextCursorOffset: previousOffset,
+      submitted: false,
+    };
+  }
+
+  if (input.key.delete) {
+    if (cursorOffset === input.value.length) {
+      return {
+        nextValue: input.value,
+        nextCursorOffset: cursorOffset,
+        submitted: false,
+      };
+    }
+
+    const nextOffset = nextComposerCursorOffset(input.value, cursorOffset);
+    return {
+      nextValue: `${input.value.slice(0, cursorOffset)}${input.value.slice(nextOffset)}`,
+      nextCursorOffset: cursorOffset,
       submitted: false,
     };
   }
@@ -184,8 +220,11 @@ export function resolveComposerCursorOffsetAfterValueChange(input: {
   readonly currentCursorOffset: number;
   readonly pendingLocalValue?: string | undefined;
 }): number {
-  if (input.pendingLocalValue === input.nextValue) {
-    return normalizeComposerCursorOffset(input.nextValue, input.currentCursorOffset);
+  if (input.pendingLocalValue !== undefined) {
+    // A controlled parent can acknowledge an earlier edit after a newer local
+    // edit is already pending. Preserve both the newer draft and its cursor;
+    // explicit owner resets use resetEpoch instead of masquerading as an ack.
+    return normalizeComposerCursorOffset(input.pendingLocalValue, input.currentCursorOffset);
   }
 
   return input.nextValue.length;
@@ -290,6 +329,19 @@ export function resolveComposerTerminalCursor(input: {
   };
 }
 
+function resolveAnchoredComposerOrigin(
+  anchor: { readonly x: number; readonly bottom: number },
+  viewport: ComposerViewportLayout,
+): { readonly x: number; readonly y: number } {
+  const renderedRows = viewport.lines.length
+    + (viewport.hiddenAbove > 0 ? 1 : 0)
+    + (viewport.hiddenBelow > 0 ? 1 : 0);
+  return {
+    x: anchor.x,
+    y: Math.max(0, anchor.bottom - renderedRows + 1),
+  };
+}
+
 function padComposerLine(value: string, width: number): string {
   const padding = Math.max(0, width - getDisplayWidth(value));
   return `${value}${" ".repeat(padding)}`;
@@ -310,6 +362,30 @@ export function formatComposerOverflowLine(
 export function resolveComposerVisibleWidth(terminalColumns?: number): number {
   const columns = terminalColumns ?? process.stdout.columns ?? COMPOSER_DEFAULT_VISIBLE_WIDTH + 10;
   return Math.max(12, columns - 10);
+}
+
+/**
+ * Measure the physical rows the Composer can paint for a draft. This shares
+ * the exact grapheme/cursor-boundary algorithm used by the live component, so
+ * a parent never budgets one row while CJK input paints two. The live viewport
+ * can show four value rows plus an overflow marker on either side.
+ */
+export function resolveComposerRenderedRowCount(
+  value: string,
+  terminalColumns?: number,
+): number {
+  const viewport = layoutComposerViewport({
+    value: value || " ",
+    cursorOffset: value.length,
+    width: resolveComposerVisibleWidth(terminalColumns),
+    maxRows: COMPOSER_MAX_VISIBLE_ROWS,
+  });
+  const overflows = viewport.hiddenAbove > 0 || viewport.hiddenBelow > 0;
+  // The parent does not own Composer's movable cursor. Once the complete
+  // draft is taller than the four-row value viewport, reserve both possible
+  // overflow markers: a cursor in the middle can paint one above and one
+  // below even though measuring at the end only observes the upper marker.
+  return viewport.lines.length + (overflows ? 2 : 0);
 }
 
 /**
@@ -359,7 +435,8 @@ function getComposerAbsolutePosition(
 export function Composer(props: {
   readonly value: string;
   readonly onChange: (value: string) => void;
-  readonly onSubmit: (value: string) => void | Promise<void>;
+  /** Return false (or reject) when the owner did not accept the line; the draft is restored. */
+  readonly onSubmit: (value: string) => void | boolean | Promise<void | boolean>;
   readonly onPaste?: ((text: string) => void) | undefined;
   readonly onIsPastingChange?: ((isPasting: boolean) => void) | undefined;
   readonly onClipboardImage?:
@@ -376,6 +453,16 @@ export function Composer(props: {
   readonly captureClipboardImage?: (() => ClipboardImageResult) | undefined;
   readonly mask?: string | undefined;
   readonly terminalColumns?: number | undefined;
+  /**
+   * Legacy screen-space anchor seam for hosts that render Composer outside the
+   * work-shell frame. WorkShellView supplies the equivalent geometry through
+   * WorkShellComposerFrameContext so the pinned dock remains the sole owner of
+   * its budget and cursor origin.
+   */
+  readonly cursorAnchor?: {
+    readonly x: number;
+    readonly bottom: number;
+  } | undefined;
   /**
    * Explicit text color for typed input. Critical for dark terminals: without
    * it the Composer inherits terminal default fg and typed text vanishes on
@@ -427,14 +514,17 @@ export function Composer(props: {
    * Agent Console (Sprint 3): the console's key ownership is state-dependent
    * (toggle chord, browse keys, cancel confirmation, steer mode), so the
    * Composer asks the console's own resolver instead of carrying a second
-   * copy of the key map. Returning true keeps the keystroke out of the draft.
+   * copy of the key map. Returning true keeps the keystroke out of the draft;
+   * `compose` reserves the keystroke for this composer ahead of stale panel
+   * suppression flags without swallowing the text. `consume-reset` also
+   * discards a child-owned steer draft in the same terminal event.
    */
   readonly suppressAgentConsoleKey?:
     | ((
       input: string,
       key: AgentConsoleKeyState,
       composerEmpty: boolean,
-    ) => boolean)
+    ) => boolean | "compose" | "consume-reset")
     | undefined;
   /**
    * Work shell action keys (empty-screen starter prompts, decision replies,
@@ -444,7 +534,7 @@ export function Composer(props: {
    * as `suppressAgentConsoleKey`.
    */
   readonly suppressShellActionKeys?:
-    | ((input: string, composerEmpty: boolean) => boolean)
+    | ((input: string, composerEmpty: boolean, key: AgentConsoleKeyState) => boolean)
     | undefined;
   /**
    * Ghost hint painted onto the empty input row. Shown only while the draft is
@@ -454,7 +544,10 @@ export function Composer(props: {
    */
   readonly placeholder?: string | undefined;
   readonly cursorVisible?: boolean | undefined;
+  /** Explicit owner reset; unlike controlled value acknowledgements, this discards pending local input. */
+  readonly resetEpoch?: number | undefined;
 }) {
+  const frameGeometry = useContext(WorkShellComposerFrameContext);
   const { setCursorPosition } = useCursor();
   const composerRef = useRef<DOMElement>(null);
   const [terminalOrigin, setTerminalOrigin] = useState<{ readonly x: number; readonly y: number }>();
@@ -462,13 +555,24 @@ export function Composer(props: {
   const [cursorOffset, setCursorOffset] = useState(props.value.length);
   const cursorOffsetRef = useRef(props.value.length);
   const pendingLocalValueRef = useRef<string | undefined>(undefined);
+  const resetEpochRef = useRef(props.resetEpoch);
   const pasteTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const suppressNextSubmitRef = useRef(false);
+  const inputEpochRef = useRef(0);
   // Ink's useInput rebinds when the handler identity changes, but Enter after
   // Ctrl+V can still observe a stale onSubmit/onClipboardImage closure from
   // the pre-attachment render. Always read the latest props through a ref.
   const propsRef = useRef(props);
   propsRef.current = props;
+  // An explicit owner reset is stronger than a delayed controlled-value ack.
+  // Clear the pending draft during render so the very next input handler
+  // cannot submit an Esc-cancelled IME/steer draft before effects run.
+  const resetEpochChanged = resetEpochRef.current !== props.resetEpoch;
+  if (resetEpochChanged) {
+    inputEpochRef.current += 1;
+    resetEpochRef.current = props.resetEpoch;
+    pendingLocalValueRef.current = undefined;
+    cursorOffsetRef.current = props.value.length;
+  }
 
   useEffect(() => {
     propsRef.current.onIsPastingChange?.(isPasting);
@@ -487,6 +591,10 @@ export function Composer(props: {
     }
   }, [props.value]);
 
+  useEffect(() => {
+    if (resetEpochChanged) setCursorOffset(props.value.length);
+  }, [resetEpochChanged, props.value]);
+
   useEffect(
     () => () => {
       if (pasteTimeoutRef.current) {
@@ -496,6 +604,7 @@ export function Composer(props: {
     [],
   );
   useEffect(() => {
+    if (props.cursorAnchor ?? frameGeometry?.cursorAnchor) return;
     const nextOrigin = getComposerAbsolutePosition(composerRef.current);
     setTerminalOrigin((current) => (
       current?.x === nextOrigin?.x && current?.y === nextOrigin?.y ? current : nextOrigin
@@ -503,14 +612,12 @@ export function Composer(props: {
   });
 
   const armPasteWindow = (text: string): void => {
-    suppressNextSubmitRef.current = true;
     setIsPasting(true);
     propsRef.current.onPaste?.(text);
     if (pasteTimeoutRef.current) {
       clearTimeout(pasteTimeoutRef.current);
     }
     pasteTimeoutRef.current = setTimeout(() => {
-      suppressNextSubmitRef.current = false;
       setIsPasting(false);
     }, PASTE_SETTLE_MS);
   };
@@ -520,26 +627,64 @@ export function Composer(props: {
     setCursorOffset(0);
   };
 
+  const submitAndRestoreIfRejected = (submittedValue: string): void => {
+    const normalizedSubmittedValue = sanitizeComposerInput(submittedValue);
+    const submittedAtEpoch = inputEpochRef.current;
+    resetLocalValueAfterSubmit();
+    let result: void | boolean | Promise<void | boolean>;
+    try {
+      result = propsRef.current.onSubmit(normalizedSubmittedValue);
+    } catch {
+      result = false;
+    }
+    void Promise.resolve(result).then(
+      (accepted) => {
+        if (accepted !== false || inputEpochRef.current !== submittedAtEpoch) return;
+        pendingLocalValueRef.current = normalizedSubmittedValue;
+        cursorOffsetRef.current = normalizedSubmittedValue.length;
+        setCursorOffset(normalizedSubmittedValue.length);
+        propsRef.current.onChange(normalizedSubmittedValue);
+      },
+      () => {
+        if (inputEpochRef.current !== submittedAtEpoch) return;
+        pendingLocalValueRef.current = normalizedSubmittedValue;
+        cursorOffsetRef.current = normalizedSubmittedValue.length;
+        setCursorOffset(normalizedSubmittedValue.length);
+        propsRef.current.onChange(normalizedSubmittedValue);
+      },
+    );
+  };
+
   useInput((input, key) => {
+    inputEpochRef.current += 1;
     const latestProps = propsRef.current;
     // The Agent Console takes the frame ahead of every panel overlay, so its
     // ownership question is asked first.
-    if (
-      latestProps.suppressAgentConsoleKey?.(
-        input,
-        key,
-        isRawComposerEmpty(latestProps.value ?? "", pendingLocalValueRef.current),
-      )
-    ) {
+    const agentConsoleKeyOwnership = latestProps.suppressAgentConsoleKey?.(
+      input,
+      key,
+      isRawComposerEmpty(latestProps.value ?? "", pendingLocalValueRef.current),
+    );
+    if (agentConsoleKeyOwnership === true || agentConsoleKeyOwnership === "consume-reset") {
+      // Esc and Alt+A can tear down an agent-steer composer before React has
+      // painted the parent's cleared value. Discard the child-owned draft in
+      // the same terminal input event so a following Enter can never submit
+      // the abandoned agent message as an ordinary provider prompt.
+      if (key.escape || agentConsoleKeyOwnership === "consume-reset") {
+        resetLocalValueAfterSubmit();
+      }
       return;
     }
+    const agentConsoleOwnsComposer = agentConsoleKeyOwnership === "compose";
     // Shell action keys (starter prefill, decision one-key replies, `?`
     // keymap) resolve through the same shared predicate the input controller
     // dispatches on, so an owned character is never also draft text.
     if (
-      latestProps.suppressShellActionKeys?.(
+      !agentConsoleOwnsComposer
+      && latestProps.suppressShellActionKeys?.(
         input,
         isRawComposerEmpty(latestProps.value ?? "", pendingLocalValueRef.current),
+        key,
       )
     ) {
       return;
@@ -572,7 +717,8 @@ export function Composer(props: {
 
 
     if (
-      latestProps.suppressTelemetryHotkeys
+      !agentConsoleOwnsComposer
+      && latestProps.suppressTelemetryHotkeys
       && isRawComposerEmpty(latestProps.value ?? "", pendingLocalValueRef.current)
       && (input.toLowerCase() === "a" || input.toLowerCase() === "c")
     ) {
@@ -583,7 +729,8 @@ export function Composer(props: {
     // enabled action keys out of the draft. Read-only panes leave unavailable
     // action letters available as ordinary text.
     if (
-      latestProps.suppressInspectorKeys
+      !agentConsoleOwnsComposer
+      && latestProps.suppressInspectorKeys
       && isRawComposerEmpty(latestProps.value ?? "", pendingLocalValueRef.current)
     ) {
       const suppressMutationKeys =
@@ -644,17 +791,7 @@ export function Composer(props: {
       const submittedValue = textBeforeReturn.length > 0
         ? `${currentValue.slice(0, currentCursorOffset)}${sanitizeComposerInput(textBeforeReturn)}${currentValue.slice(currentCursorOffset)}`
         : currentValue;
-      if (suppressNextSubmitRef.current || isPasting) {
-        cursorOffsetRef.current = submittedValue.length;
-        setCursorOffset(submittedValue.length);
-        pendingLocalValueRef.current = submittedValue;
-        if (submittedValue !== currentValue) {
-          latestProps.onChange(submittedValue);
-        }
-        return;
-      }
-      resetLocalValueAfterSubmit();
-      void Promise.resolve(latestProps.onSubmit(sanitizeComposerInput(submittedValue))).catch(() => undefined);
+      submitAndRestoreIfRejected(submittedValue);
       return;
     }
 
@@ -670,11 +807,7 @@ export function Composer(props: {
     setCursorOffset(result.nextCursorOffset);
 
     if (result.submitted) {
-      if (suppressNextSubmitRef.current || isPasting) {
-        return;
-      }
-      resetLocalValueAfterSubmit();
-      void Promise.resolve(latestProps.onSubmit(sanitizeComposerInput(result.nextValue))).catch(() => undefined);
+      submitAndRestoreIfRejected(result.nextValue);
       return;
     }
 
@@ -687,20 +820,30 @@ export function Composer(props: {
     }
   }, { isActive: true });
 
-  const visibleValue = maskComposerValue(props.value, props.mask);
-  const normalizedCursorOffset = normalizeComposerCursorOffset(props.value, cursorOffset);
+  // Local input owns the prompt until the controlled parent acknowledges the
+  // exact value. Rendering `props.value` during that window makes IME preedit
+  // text blink out whenever an unrelated async engine update rerenders the
+  // pane. The pending value is already the edit/submit authority above; use
+  // that same owner for paint and cursor math.
+  const renderValue = pendingLocalValueRef.current ?? props.value;
+  const visibleValue = maskComposerValue(renderValue, props.mask);
+  const normalizedCursorOffset = normalizeComposerCursorOffset(renderValue, cursorOffset);
   const visibleCursorOffset = props.mask
-    ? maskComposerValue(props.value.slice(0, normalizedCursorOffset), props.mask).length
+    ? maskComposerValue(renderValue.slice(0, normalizedCursorOffset), props.mask).length
     : normalizedCursorOffset;
   const visibleWidth = resolveComposerVisibleWidth(props.terminalColumns);
   const viewport = layoutComposerViewport({
     value: visibleValue,
     cursorOffset: visibleCursorOffset,
     width: visibleWidth,
-    maxRows: COMPOSER_MAX_VISIBLE_ROWS,
+    maxRows: frameGeometry?.maxVisibleRows ?? COMPOSER_MAX_VISIBLE_ROWS,
   });
+  const cursorAnchor = props.cursorAnchor ?? frameGeometry?.cursorAnchor;
+  const cursorOrigin = cursorAnchor
+    ? resolveAnchoredComposerOrigin(cursorAnchor, viewport)
+    : terminalOrigin;
   const terminalCursor = resolveComposerTerminalCursor({
-    origin: terminalOrigin,
+    origin: cursorOrigin,
     viewport,
     visible: props.cursorVisible ?? true,
   });
@@ -709,7 +852,7 @@ export function Composer(props: {
   // The placeholder replaces the padded blank row of an empty draft (mask and
   // paste windows keep their own presentation), never the typed text.
   const placeholderLine = props.placeholder !== undefined
-    && props.value.length === 0
+    && renderValue.length === 0
     && props.mask === undefined
     && !isPasting
     ? props.placeholder

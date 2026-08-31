@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { binEntrypoint, repoRoot, reportPath, tmpPrefix } from "./runtime-qa/constants.mjs";
+import { buildRuntimeForQa } from "./runtime-qa/build-runtime.mjs";
 import { persistReport } from "./runtime-qa/cli-helpers.mjs";
 import { startAnthropicMessagesServer } from "./runtime-qa/fake-anthropic-server.mjs";
 import { startGeminiServer } from "./runtime-qa/fake-gemini-server.mjs";
@@ -19,17 +20,23 @@ import {
   buildRuntimeEvidence,
   formatRuntimeQaCompactReport,
 } from "./runtime-qa/report-evidence.mjs";
+import { stopRuntimeOwnersUnder } from "./runtime-qa/runtime-owner-cleanup.mjs";
 import { runAgentConsoleTuiSmoke } from "./runtime-qa/tui-basic-smokes.mjs";
-import { killRuntimeTmuxServer } from "./runtime-qa/tmux-helpers.mjs";
+import { killRuntimeTmuxServer, startRuntimeTmuxKeeper } from "./runtime-qa/tmux-helpers.mjs";
 import { runTtySmoke } from "./runtime-qa/tty-smoke.mjs";
-import { runTuiSmokeSuite } from "./runtime-qa/tui-suite-smokes.mjs";
-
-if (!existsSync(binEntrypoint)) {
-  throw new Error(`Missing UncleCode bin entrypoint: ${binEntrypoint}`);
-}
+import { runTuiSmokeSuite, runWithRuntimeHome } from "./runtime-qa/tui-suite-smokes.mjs";
 
 const args = parseArgs(process.argv.slice(2));
+await buildRuntimeForQa();
+if (!existsSync(binEntrypoint)) {
+  throw new Error(`Missing UncleCode bin entrypoint after build: ${binEntrypoint}`);
+}
 const tmp = mkdtempSync(path.join(tmpdir(), tmpPrefix));
+const qaHome = path.join(tmp, "home");
+mkdirSync(qaHome, { recursive: true });
+process.env.HOME = qaHome;
+process.env.USERPROFILE = qaHome;
+process.env.UNCLECODE_RUNTIME_QA_HOME_ROOT = qaHome;
 const observations = [];
 const openAIObservations = [];
 const anthropicObservations = [];
@@ -44,11 +51,21 @@ try {
     const toolCallSmoke = await runToolCallSmoke(server.port, observations);
     const openAIToolCallSmoke = await runOpenAIToolCallSmoke(openAIServer.port, openAIObservations);
     const anthropicToolCallSmoke = await runAnthropicToolCallSmoke(anthropicServer.port, anthropicObservations);
+    // Non-interactive provider gates use persistent owners too. Reap them
+    // before allocating the TTY/TUI fleet so responsiveness evidence is not
+    // distorted by idle pollers and sockets from already-settled smokes.
+    await stopRuntimeOwnersUnder(tmp);
+    await startRuntimeTmuxKeeper();
     const ttySmoke = await runTtySmoke({ port: server.port, tmp, observations });
     const tuiSmokes = await runTuiSmokeSuite({ port: server.port, tmp, observations });
     // The Agent Console gate scripts its own provider and OMP executor
     // boundaries, so it needs no shared fake-provider port or observation log.
-    const agentConsoleTuiSmoke = await runAgentConsoleTuiSmoke({ tmp });
+    const agentConsoleTuiSmoke = await runWithRuntimeHome(
+      tmp,
+      "agent-console",
+      () => runAgentConsoleTuiSmoke({ tmp }),
+      { extraOwnerRoots: [path.join(tmp, "agent-console-session-store")] },
+    );
     const providerSmokes = { toolCallSmoke, openAIToolCallSmoke, anthropicToolCallSmoke };
     const evidence = buildRuntimeEvidence({ ...providerSmokes, ...tuiSmokes });
     const report = {
@@ -85,6 +102,9 @@ try {
         "YOLO greeting stays on the simple one-call path",
         "YOLO greeting does not leak planner or guardian internals",
         "Korean full-screen input does not duplicate during submit",
+        "real prompt line edits committed Hangul and ASCII with cursor, Backspace, and forward Delete",
+        "Ctrl+O preserves the draft while toggling only tool-history presentation",
+        "busy composer submits a distinct queued follow-up after prompt editing",
         "Korean delayed response shows a live busy spinner",
         "busy state avoids a duplicate lower activity row below the conversation",
         "ultrawork Korean parallel-mode question strips planner JSON and English meta leaks",
@@ -93,7 +113,7 @@ try {
         "context expanded overlay uses readable foreground colors on light terminals",
         "slash commander first paint, warm reopen, filter, and model picker stay within latency budgets",
         "model-bound context packets expose included/excluded/warnings sections during real TUI turns",
-        "80-column and 120-column TUI resize captures do not overflow",
+        "60-, 80-, 100-, 120-, and 140-column TUI captures do not overflow",
         "Agent Console fans one work turn out to two live executor runs",
         "Alt+A opens the Agent Console roster and inspector over live runs",
         "steering a live agent run returns an accepted control receipt",
@@ -113,6 +133,7 @@ try {
   }
 } finally {
   await killRuntimeTmuxServer();
+  await stopRuntimeOwnersUnder(tmp);
   rmSync(tmp, { recursive: true, force: true });
 }
 

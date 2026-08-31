@@ -346,7 +346,7 @@ test("createTurnOrchestrator hands the trace listener into planComplexTurn for l
       options?.onTrace?.({
         type: "orchestrator.step",
         level: "high-signal",
-        stepId: "planner-PLANNER",
+        stepId: "planner-1",
         role: "planner",
         kind: "agent-step",
         status: "running",
@@ -359,6 +359,7 @@ test("createTurnOrchestrator hands the trace listener into planComplexTurn for l
           { id: "task-2", summary: "Second", writePaths: [] },
         ],
         usedLlm: true,
+        plannerStartedAt: 1,
       };
     },
     async executeComplexTask(task) {
@@ -383,6 +384,8 @@ test("createTurnOrchestrator hands the trace listener into planComplexTurn for l
   );
   assert.equal(plannerRunning.length, 1, "planner running must fire exactly once (from inside planComplexTurn)");
   assert.equal(plannerCompleted.length, 1, "planner completed must fire exactly once (from the orchestrator after await)");
+  assert.equal(plannerCompleted[0].stepId, plannerRunning[0].stepId,
+    "planner completion must settle the exact live row instead of leaving a stale spinner");
 });
 
 test("runGoalTaskExecutorPool honors dependencies and blocks dependents after failure", async () => {

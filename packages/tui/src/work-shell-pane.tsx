@@ -3,6 +3,7 @@ import React from "react";
 
 import {
   captureClipboardImage as defaultCaptureClipboardImage,
+  getWorkShellMessages,
   type ClipboardImageResult,
 } from "@unclecode/orchestrator";
 
@@ -12,6 +13,7 @@ import {
   handleComposerClipboardPaste,
   isRawComposerEmpty,
 } from "./composer.js";
+import { enterMouseTracking } from "./alt-screen.js";
 import {
   buildAttachmentPreviewLines,
   formatAttachmentErrorLine,
@@ -21,6 +23,7 @@ import {
 import {
   useWorkShellPaneState,
   type WorkShellComposerPreview,
+  type WorkShellEngineOwnership,
   type WorkShellPaneEngine,
   type WorkShellPaneRuntimeState,
   type WorkShellSlashSuggestion,
@@ -31,7 +34,6 @@ import { formatAuthLabelForDisplay } from "./work-shell-panels.js";
 import {
   getWorkShellComposerTextColor,
   resolveWorkShellComposerAdditionalRows,
-  WORK_SHELL_COMPOSER_PLACEHOLDER,
   WorkShellView,
 } from "./work-shell-view.js";
 import { useOmpAuthProviderPicker } from "./work-shell-auth-provider-picker-state.js";
@@ -48,6 +50,8 @@ export type WorkShellPaneProps<
   readonly model: string;
   readonly mode: string;
   readonly engine: WorkShellPaneEngine<State>;
+  /** Explicit lifecycle ownership: shared runtime engines survive pane detach. */
+  readonly engineOwnership?: WorkShellEngineOwnership | undefined;
   readonly cwd: string;
   readonly resolveComposerInput: (
     value: string,
@@ -169,6 +173,7 @@ export function WorkShellPane<
   const { stdout } = useStdout();
   const [terminalColumns, setTerminalColumns] = React.useState(() => resolveWorkShellPaneTerminalColumns(stdout));
   const [terminalRows, setTerminalRows] = React.useState(() => resolveWorkShellPaneTerminalRows(stdout));
+  React.useEffect(() => enterMouseTracking(stdout).restore, [stdout]);
   React.useEffect(() => {
     const updateTerminalSize = () => {
       setTerminalColumns(resolveWorkShellPaneTerminalColumns(stdout));
@@ -183,12 +188,17 @@ export function WorkShellPane<
   const {
     inputValue,
     setInputValue,
+    composerResetEpoch,
     engineState,
     transcriptScrollOffset,
+    transcriptReservedRows,
     composerPreview,
     activePanel,
+    queueSelectedId,
     slashSuggestionCount,
     selectedSlashCommand,
+    decisionSelectedIndex,
+    decisionSelectionActive,
     contextAdviceKeyActionsEnabled,
     contextPinKeyActionsEnabled,
     contextDeliveryKeyActionsEnabled,
@@ -205,6 +215,7 @@ export function WorkShellPane<
     pendingClipboardAttachmentCount,
   } = useWorkShellPaneState<Attachment, State>({
     engine: props.engine,
+    engineOwnership: props.engineOwnership ?? "owned",
     cwd: props.cwd,
     resolveComposerInput: props.resolveComposerInput,
     getSuggestions: props.getSuggestions,
@@ -220,6 +231,7 @@ export function WorkShellPane<
       ? { refreshHomeState: props.refreshHomeState }
       : {}),
     shouldBlockSlashSubmit: props.shouldBlockSlashSubmit,
+    terminalColumns,
     terminalRows,
   });
 
@@ -280,6 +292,8 @@ export function WorkShellPane<
     queuePaused,
     agentConsole,
     agentConsoleView,
+    traceMode,
+    uiLocale,
   } = engineState;
   // `git status` forks a child process, so it is synced outside render and
   // refreshed only while the main turn or a delegated run could still be
@@ -289,6 +303,7 @@ export function WorkShellPane<
     isBusy || (agentConsole !== undefined && hasActiveAgentConsoleWork(agentConsole)),
   );
   const isSecureApiKeyEntry = engineState.composerMode === "api-key-entry";
+  const decisionSelectionOwnsCursor = decisionSelectionActive && isRawComposerEmpty(inputValue);
   // Most recent rejection reason from the clipboard capture or cap gate.
   // Surfaces in the attachment preview area so the user sees one line of
   // explanation instead of a paste silently disappearing. Auto-clears when
@@ -304,14 +319,11 @@ export function WorkShellPane<
     () => props.getReasoningLabel(reasoning),
     [props.getReasoningLabel, reasoning],
   );
-  // Task 10: the dock's live tool feed carries only the trace tail — what the
-  // running turn touched most recently. The feed reads the engine's
-  // always-filled liveTraceLines buffer (cap 8, every trace mode), not the
-  // verbose-only traceLines, so it stays alive in default (minimal) mode.
-  // The transcript's own trace filtering is untouched; these raw lines never
-  // enter the conversation rail.
+  // Ctrl+O is the sole tool-history disclosure control. The pane retains only
+  // the newest live state for verbose mode; the default minimal frame carries
+  // the current activity row without replaying start/completion trace pairs.
   const liveToolTraceLines = liveTraceLines !== undefined && liveTraceLines.length > 0
-    ? liveTraceLines.slice(-3)
+    ? liveTraceLines.slice(-1)
     : undefined;
   const reasoningSupported = React.useMemo(
     () => props.isReasoningSupported(reasoning),
@@ -456,6 +468,8 @@ export function WorkShellPane<
       authLabel={authDisplayLabel}
       {...(contextIndicator ? { contextIndicator } : {})}
       entries={entries}
+      {...(traceMode ? { traceMode } : {})}
+      uiLocale={uiLocale ?? "en"}
       {...(streamingAssistantText ? { streamingAssistantText } : {})}
       isBusy={isBusy}
       {...(busyStatus ? { busyStatus } : {})}
@@ -463,6 +477,7 @@ export function WorkShellPane<
       {...(lastTurnDurationMs !== undefined ? { lastTurnDurationMs } : {})}
       {...(liveToolTraceLines ? { liveToolTraceLines } : {})}
       activePanel={activePanel}
+      {...(queueSelectedId !== undefined ? { queueSelectedId } : {})}
       {...(contextActionReceipt ? { contextActionReceipt } : {})}
       {...(contextPreviewReceipt ? { contextPreviewReceipt } : {})}
       {...(contextSubmittedReceipt ? { contextSubmittedReceipt } : {})}
@@ -481,16 +496,19 @@ export function WorkShellPane<
       {...(modelWindow !== undefined ? { modelWindow } : {})}
       {...(agentConsole ? { agentConsole } : {})}
       {...(agentConsoleView ? { agentConsoleView } : {})}
+      {...(decisionSelectionActive ? { decisionSelectedIndex } : {})}
       {...(attachmentLines ? { attachmentLines } : {})}
       {...(pendingClipboardAttachmentCount > 0 ? { attachmentCount: pendingClipboardAttachmentCount } : {})}
       {...{ terminalRows }}
       {...(transcriptScrollOffset > 0 ? { transcriptScrollOffset } : {})}
+      transcriptReservedRows={transcriptReservedRows}
       {...(authPickerActive && authPicker.catalog ? { ompAuthCatalog: authPicker.catalog } : {})}
       ompAuthPickerCursor={authPicker.cursor}
       {...(authPickerActive && authPicker.signInReceipt ? { ompAuthSignInReceipt: authPicker.signInReceipt } : {})}
       composer={
         <Composer
           value={inputValue}
+          resetEpoch={composerResetEpoch}
           onChange={handleComposerChange}
           onSubmit={async (line) => {
             // The steer composer routes to an agent's control mailbox, which
@@ -555,6 +573,7 @@ export function WorkShellPane<
             if (accepted) {
               clearClipboardAttachments(submittedClipboardAttachments);
             }
+            return accepted;
           }}
           captureClipboardImage={captureClipboardImage}
           onClipboardImage={(attachment) => {
@@ -568,12 +587,15 @@ export function WorkShellPane<
           }}
           terminalColumns={terminalColumns}
           textColor={getWorkShellComposerTextColor()}
-          placeholder={WORK_SHELL_COMPOSER_PLACEHOLDER}
+          placeholder={decisionSelectionOwnsCursor
+            ? getWorkShellMessages(uiLocale ?? "en").decisionComposerPlaceholder
+            : getWorkShellMessages(uiLocale ?? "en").composerPlaceholder}
           {...(isSecureApiKeyEntry ? { mask: "•" } : {})}
           cursorVisible={
             !shouldSuppressComposerKeysForInspector
             && !shouldSuppressComposerKeysForTelemetry
             && !agentConsoleOwnsKeyboard
+            && !decisionSelectionOwnsCursor
           }
           {...(suppressAgentConsoleKey ? { suppressAgentConsoleKey } : {})}
           suppressShellActionKeys={suppressShellActionKeys}

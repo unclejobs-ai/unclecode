@@ -1,5 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
+import { createInstrumentedLruCache } from "@unclecode/contracts";
 
 import { runRustCommandSync } from "./rust-command.js";
 import { loadPinnedSkillNames } from "./pinned-skills.js";
@@ -45,7 +46,37 @@ type WorkspaceGuidanceConflict = {
 };
 
 const GUIDANCE_FILE_NAMES = ["AGENTS.md", "CLAUDE.md", "GEMINI.md", "UNCLECODE.md"] as const;
-const workspaceGuidanceCache = new Map<string, WorkspaceGuidance>();
+const WORKSPACE_GUIDANCE_CACHE_MAX_ENTRIES = 32;
+const WORKSPACE_GUIDANCE_CACHE_MAX_RETAINED_BYTES = 4 * 1024 * 1024;
+const workspaceGuidanceCache = createInstrumentedLruCache<string, WorkspaceGuidance>({
+  name: "workspace-guidance",
+  maxEntries: WORKSPACE_GUIDANCE_CACHE_MAX_ENTRIES,
+  maxRetainedBytes: WORKSPACE_GUIDANCE_CACHE_MAX_RETAINED_BYTES,
+  estimateEntryBytes(key, guidance) {
+    const strings = [
+      key,
+      guidance.systemPromptAppendix,
+      ...guidance.contextSummaryLines,
+      ...guidance.sources,
+      ...guidance.guidanceSources.flatMap((source) => [
+        source.id,
+        source.path,
+        source.label,
+        source.authority,
+        source.sha256,
+      ]),
+    ];
+    const stringBytes = strings.reduce(
+      (total, value) => total + 32 + value.length * 2,
+      0,
+    );
+    return 256 + stringBytes + guidance.guidanceSources.length * 128;
+  },
+});
+
+export function getWorkspaceGuidanceCacheTelemetrySnapshot() {
+  return workspaceGuidanceCache.snapshot();
+}
 
 function summarizeContent(content: string): string {
   const line = content
@@ -84,7 +115,10 @@ function listGuidanceDirectories(cwd: string): readonly string[] {
 }
 
 function getWorkspaceGuidanceCacheKey(cwd: string, userHomeDir?: string): string {
-  return `${path.resolve(cwd)}::${path.resolve(userHomeDir ?? process.env.HOME ?? cwd)}`;
+  return JSON.stringify([
+    path.resolve(cwd),
+    path.resolve(userHomeDir ?? process.env.HOME ?? cwd),
+  ]);
 }
 
 async function readGuidanceFile(filePath: string, name: string): Promise<WorkspaceGuidanceSource | undefined> {
@@ -268,12 +302,12 @@ function isWorkspaceGuidance(value: unknown): value is WorkspaceGuidancePayload 
 
 export function clearCachedWorkspaceGuidance(cwd?: string, userHomeDir?: string): void {
   if (!cwd) {
-    workspaceGuidanceCache.clear();
+    workspaceGuidanceCache.invalidateAll();
     clearWorkspaceSkillCache();
     return;
   }
 
-  workspaceGuidanceCache.delete(getWorkspaceGuidanceCacheKey(cwd, userHomeDir));
+  workspaceGuidanceCache.invalidate(getWorkspaceGuidanceCacheKey(cwd, userHomeDir));
   const skillHomeDir = userHomeDir ?? process.env.HOME;
   if (skillHomeDir) {
     clearWorkspaceSkillCache(cwd, skillHomeDir);
@@ -287,9 +321,9 @@ export async function loadCachedWorkspaceGuidance(input: {
   readonly userHomeDir?: string | undefined;
 }): Promise<WorkspaceGuidance> {
   const cacheKey = getWorkspaceGuidanceCacheKey(input.cwd, input.userHomeDir);
-  const cached = workspaceGuidanceCache.get(cacheKey);
-  if (cached) {
-    return cached;
+  const cached = workspaceGuidanceCache.lookup(cacheKey);
+  if (cached.hit) {
+    return cached.value;
   }
 
   const skillHomeDir = input.userHomeDir ?? process.env.HOME;

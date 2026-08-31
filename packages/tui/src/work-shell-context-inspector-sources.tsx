@@ -1,5 +1,4 @@
 import type { ContextPacketSourceCounts } from "@unclecode/contracts";
-import { resolveWorkShellContextDetailLayout } from "@unclecode/orchestrator";
 import { Box, Text } from "ink";
 import React from "react";
 
@@ -13,6 +12,65 @@ import {
   type ContextInspectorSourceRow,
 } from "./work-shell-context-inspector-model.js";
 
+function localizeContextMetadataLine(line: string, uiLocale: "en" | "ko"): string {
+  if (uiLocale !== "ko") {
+    return line;
+  }
+  const prefix = (english: string, korean: string) => line.startsWith(`${english} · `)
+    ? `${korean} · ${line.slice(english.length + 3)}`
+    : undefined;
+  const status = prefix("Status", "상태");
+  if (status !== undefined) {
+    return status.replace(/\b(?:requires action|completed|running|approved|proposed|ready|blocked|failed|cancelled)\b/u, (value) => ({
+      "requires action": "입력 필요",
+      completed: "완료됨",
+      running: "실행 중",
+      approved: "승인됨",
+      proposed: "제안됨",
+      ready: "준비됨",
+      blocked: "차단됨",
+      failed: "실패",
+      cancelled: "취소됨",
+    } as Readonly<Record<string, string>>)[value] ?? value);
+  }
+  const evidence = prefix("Evidence", "증거");
+  if (evidence !== undefined) {
+    return evidence.replace(/(\d+) of (\d+) collected/u, "$2개 중 $1개 수집됨");
+  }
+  const warning = line.match(/^Warning · compressed summary is (stale|expired); refresh before relying on it(?: · last seen turn (\d+))?$/u);
+  if (warning) {
+    const state = warning[1] === "stale" ? "오래됨" : "만료됨";
+    return `경고 · 압축 요약이 ${state}; 사용하기 전에 새로 고치세요${warning[2] ? ` · 마지막 확인 ${warning[2]}턴` : ""}`;
+  }
+  const compression = prefix("Compression", "압축");
+  if (compression !== undefined) {
+    return compression
+      .replace(/ · (\d+) compacted · (\d+) recent kept · /u, " · $1개 압축 · 최근 $2개 유지 · ")
+      .replace(/t in \/ ~(.+)t out$/u, "t 입력 / ~$1t 출력");
+  }
+  const provenance = prefix("Provenance", "출처");
+  if (provenance !== undefined) {
+    return provenance.replace(/ · (\d+) trace ids · /u, " · 추적 ID $1개 · ");
+  }
+  return prefix("Goal", "목표")
+    ?? prefix("Must hold", "유지 조건")
+    ?? prefix("Accepted when", "승인 조건")
+    ?? prefix("Summary", "요약")
+    ?? prefix("Reason", "이유")
+    ?? line;
+}
+
+function getLocalizedContextItemDetailLines(
+  item: ContextInspectorSourceRow["item"],
+  uiLocale: "en" | "ko",
+): readonly string[] {
+  const [preview, ...metadataLines] = getContextItemDetailLines(item);
+  return [
+    ...(preview === undefined ? [] : [preview]),
+    ...metadataLines.map((line) => localizeContextMetadataLine(line, uiLocale)),
+  ];
+}
+
 function renderContextInspectorSourceRow(input: {
   readonly row: ContextInspectorSourceRow;
   readonly selected: boolean;
@@ -22,6 +80,7 @@ function renderContextInspectorSourceRow(input: {
   readonly maxDetailLines: number;
   readonly width: number;
   readonly palette: ContextInspectorPalette;
+  readonly uiLocale?: "en" | "ko";
 }): React.ReactNode {
   const { row, palette } = input;
   const { item } = row;
@@ -30,11 +89,11 @@ function renderContextInspectorSourceRow(input: {
   const sourceCount = Math.max(1, Math.trunc(item.sourceCount ?? 1));
   const label = sanitizeContextPreview(item.label);
   const pinned = !row.heldBack && (item.salience ?? 0) >= 1;
-  const tokenLabel = formatContextTokenEstimate(item.tokenEstimate);
+  const tokenLabel = formatContextTokenEstimate(item.tokenEstimate, undefined, input.uiLocale ?? "en");
   const parts = [
     label,
-    ...(sourceCount > 1 ? [`${sourceCount} sources`] : []),
-    ...(row.heldBack ? ["held"] : pinned ? ["pinned"] : []),
+    ...(sourceCount > 1 ? [input.uiLocale === "ko" ? `소스 ${sourceCount}개` : `${sourceCount} sources`] : []),
+    ...(row.heldBack ? [input.uiLocale === "ko" ? "보류" : "held"] : pinned ? [input.uiLocale === "ko" ? "고정" : "pinned"] : []),
     tokenLabel,
   ];
   // The row prefix ("› " + status glyph) paints 4 cells; one trailing cell of
@@ -44,7 +103,7 @@ function renderContextInspectorSourceRow(input: {
     Math.max(18, input.width - 5),
   );
   const detailLines = expanded
-    ? getContextItemDetailLines(item)
+    ? getLocalizedContextItemDetailLines(item, input.uiLocale ?? "en")
       .flatMap((line) => wrapDisplayTextFast(line, Math.max(24, input.width - 8)))
       .slice(0, input.maxDetailLines)
     : [];
@@ -178,6 +237,7 @@ function renderVisibleSourceRows(input: {
   readonly maxDetailLines: number;
   readonly width: number;
   readonly palette: ContextInspectorPalette;
+  readonly uiLocale?: "en" | "ko";
 }): React.ReactNode {
   return input.visibleRows.map((row, index) => renderContextInspectorSourceRow({
     row,
@@ -187,6 +247,7 @@ function renderVisibleSourceRows(input: {
     maxDetailLines: input.maxDetailLines,
     width: input.width,
     palette: input.palette,
+    ...(input.uiLocale ? { uiLocale: input.uiLocale } : {}),
   }));
 }
 
@@ -197,13 +258,27 @@ function renderContextInspectorDetailReader(input: {
   readonly maxRows: number;
   readonly width: number;
   readonly palette: ContextInspectorPalette;
+  readonly uiLocale?: "en" | "ko";
 }): React.ReactNode {
-  const layout = resolveWorkShellContextDetailLayout({
-    item: input.row.item,
-    ...(input.content === undefined ? {} : { content: input.content }),
-    width: input.width,
-    maxRows: input.maxRows,
-  });
+  const lineWidth = Math.max(24, input.width - 8);
+  const summaryLines = getLocalizedContextItemDetailLines(input.row.item, input.uiLocale ?? "en")
+    .flatMap((line) => wrapDisplayTextFast(line, lineWidth));
+  const contentLines = input.content?.trim()
+    ? input.content.split(/\r?\n/u)
+      .flatMap((line) => wrapDisplayTextFast(line.length > 0 ? line : " ", lineWidth))
+    : [];
+  const layoutLines = [
+    ...summaryLines,
+    ...(contentLines.length > 0
+      ? ["", input.uiLocale === "ko" ? "로컬 소스 내용" : "Local source content", ...contentLines]
+      : []),
+  ];
+  const layoutAvailableRows = Math.max(1, input.maxRows - 3);
+  const bottomPageSize = Math.max(1, layoutAvailableRows - 1);
+  const layout = {
+    lines: layoutLines,
+    maxOffset: layoutLines.length <= layoutAvailableRows ? 0 : Math.max(0, layoutLines.length - bottomPageSize),
+  };
   const { lines, maxOffset } = layout;
   // `maxRows` includes the margin, separator, and detail heading. Overflow
   // markers consume rows too, so reserve them before slicing the content.
@@ -215,11 +290,12 @@ function renderContextInspectorDetailReader(input: {
   const visibleCount = Math.max(1, rowsAfterAboveMarker - (hasBelow ? 1 : 0));
   const visibleLines = lines.slice(offset, offset + visibleCount);
   const detailHeading = truncateForDisplayWidth(
-    `Detail · ${sanitizeContextPreview(input.row.item.label)}`,
+    `${input.uiLocale === "ko" ? "상세" : "Detail"} · ${sanitizeContextPreview(input.row.item.label)}`,
     input.width,
   );
-  const detailSuffix = detailHeading.startsWith("Detail")
-    ? detailHeading.slice("Detail".length)
+  const detailLabel = input.uiLocale === "ko" ? "상세" : "Detail";
+  const detailSuffix = detailHeading.startsWith(detailLabel)
+    ? detailHeading.slice(detailLabel.length)
     : "";
 
   return (
@@ -228,10 +304,10 @@ function renderContextInspectorDetailReader(input: {
         {"─".repeat(Math.min(64, Math.max(24, input.width - 4)))}
       </Text>
       <Text>
-        <Text color={input.palette.assistant} bold>{"Detail"}</Text>
+        <Text color={input.palette.assistant} bold>{detailLabel}</Text>
         <Text color={input.palette.textDim}>{detailSuffix}</Text>
       </Text>
-      {offset > 0 ? <Text color={input.palette.textDim}>{`  … ${offset} lines above`}</Text> : null}
+      {offset > 0 ? <Text color={input.palette.textDim}>{input.uiLocale === "ko" ? `  … 위에 ${offset}줄` : `  … ${offset} lines above`}</Text> : null}
       {visibleLines.map((line, index) => (
         <Text key={`context-detail-${offset + index}`} color={input.palette.text}>
           {line.length > 0 ? line : " "}
@@ -239,7 +315,7 @@ function renderContextInspectorDetailReader(input: {
       ))}
       {offset + visibleLines.length < lines.length ? (
         <Text color={input.palette.textDim}>
-          {`  … ${lines.length - offset - visibleLines.length} lines below`}
+          {input.uiLocale === "ko" ? `  … 아래에 ${lines.length - offset - visibleLines.length}줄` : `  … ${lines.length - offset - visibleLines.length} lines below`}
         </Text>
       ) : null}
     </Box>
@@ -263,6 +339,7 @@ export function renderContextInspectorGroupedViewport(input: {
   readonly marginTop?: number | undefined;
   /** Empty-state copy when this collection has no rows of its own. */
   readonly emptyMessage?: string | undefined;
+  readonly uiLocale?: "en" | "ko";
 }): React.ReactNode {
   const detailRow = input.expandedId
     ? input.rows.find((row) => row.item.id === input.expandedId)
@@ -275,6 +352,7 @@ export function renderContextInspectorGroupedViewport(input: {
       maxRows: input.maxRows,
       width: input.width,
       palette: input.palette,
+      ...(input.uiLocale ? { uiLocale: input.uiLocale } : {}),
     });
   }
   const visible = buildContextInspectorViewportPlan({
@@ -286,11 +364,11 @@ export function renderContextInspectorGroupedViewport(input: {
   return (
     <Box marginTop={input.marginTop ?? 1} flexDirection="column">
       {input.rows.length === 0 ? (
-        <Text color={input.palette.textMuted}>{input.emptyMessage ?? "No context sources yet."}</Text>
+        <Text color={input.palette.textMuted}>{input.emptyMessage ?? (input.uiLocale === "ko" ? "아직 컨텍스트 소스가 없습니다." : "No context sources yet.")}</Text>
       ) : (
         <>
           {visible.showHiddenBefore ? (
-            <Text color={input.palette.textDim}>{`  … ${visible.hiddenBefore} more above`}</Text>
+            <Text color={input.palette.textDim}>{input.uiLocale === "ko" ? `  … 위에 ${visible.hiddenBefore}개 더 있음` : `  … ${visible.hiddenBefore} more above`}</Text>
           ) : null}
           {renderVisibleSourceRows({
             visibleRows: visible.rows,
@@ -301,9 +379,10 @@ export function renderContextInspectorGroupedViewport(input: {
             maxDetailLines: visible.detailLineLimit,
             width: input.width,
             palette: input.palette,
+            ...(input.uiLocale ? { uiLocale: input.uiLocale } : {}),
           })}
           {visible.showHiddenAfter ? (
-            <Text color={input.palette.textDim}>{`  … ${visible.hiddenAfter} more below`}</Text>
+            <Text color={input.palette.textDim}>{input.uiLocale === "ko" ? `  … 아래에 ${visible.hiddenAfter}개 더 있음` : `  … ${visible.hiddenAfter} more below`}</Text>
           ) : null}
         </>
       )}

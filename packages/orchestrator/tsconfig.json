@@ -12,6 +12,7 @@
     { "path": "../context-broker" },
     { "path": "../contracts" },
     { "path": "../policy-engine" },
+    { "path": "../plugin-host" },
     { "path": "../providers" },
     { "path": "../session-store" }
   ],

@@ -15,8 +15,10 @@
     "@unclecode/mcp-host": "file:../../packages/mcp-host",
     "@unclecode/orchestrator": "file:../../packages/orchestrator",
     "@unclecode/pi-bridge": "file:../../packages/pi-bridge",
+    "@unclecode/plugin-host": "file:../../packages/plugin-host",
     "@unclecode/providers": "file:../../packages/providers",
     "@unclecode/runtime-broker": "file:../../packages/runtime-broker",
+    "@unclecode/server": "file:../unclecode-server",
     "@unclecode/session-store": "file:../../packages/session-store",
     "@unclecode/tui": "file:../../packages/tui",
     "commander": "^13.1.0"

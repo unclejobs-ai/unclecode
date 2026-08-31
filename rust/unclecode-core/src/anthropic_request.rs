@@ -4,6 +4,10 @@ use crate::provider_attachments::cap_provider_attachments_values;
 use crate::provider_request::ProviderRequestSpec;
 use serde_json::{json, Value};
 
+const ANTHROPIC_CACHE_READ_MULTIPLIER: f64 = 0.1;
+const ANTHROPIC_CACHE_WRITE_5M_MULTIPLIER: f64 = 1.25;
+const ANTHROPIC_CACHE_WRITE_1H_MULTIPLIER: f64 = 2.0;
+
 pub fn build_anthropic_messages_request_spec(api_key: &str) -> ProviderRequestSpec {
     build_anthropic_messages_request_spec_with_base(api_key, "https://api.anthropic.com/v1")
 }
@@ -227,15 +231,10 @@ pub fn parse_anthropic_response_json_for_model(
         .get("cache_read_input_tokens")
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let cache_write_tokens = usage
-        .get("cache_creation_input_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let billable_input_tokens = prompt_tokens
-        .saturating_add(cache_read_tokens)
-        .saturating_add(cache_write_tokens);
+    let (cache_write_tokens, cache_write_5m_tokens, cache_write_1h_tokens, cache_creation) =
+        anthropic_cache_creation_buckets(usage);
 
-    serde_json::to_string(&json!({
+    let mut parsed = json!({
         "content": content,
         "actions": actions,
         "promptTokens": prompt_tokens,
@@ -244,10 +243,13 @@ pub fn parse_anthropic_response_json_for_model(
         "cacheWriteTokens": cache_write_tokens,
         "costUsd": model
             .map(|model| {
-                estimate_cost_usd(
+                estimate_anthropic_cost_usd(
                     model,
-                    billable_input_tokens as f64,
-                    completion_tokens as f64,
+                    prompt_tokens,
+                    completion_tokens,
+                    cache_read_tokens,
+                    cache_write_5m_tokens,
+                    cache_write_1h_tokens,
                 )
             })
             .unwrap_or(0.0),
@@ -255,8 +257,77 @@ pub fn parse_anthropic_response_json_for_model(
             "role": "assistant",
             "content": content_blocks
         }
-    }))
-    .map_err(|error| error.to_string())
+    });
+    if let Some(cache_creation) = cache_creation {
+        parsed["cacheCreation"] = cache_creation;
+        parsed["cacheWrite5mTokens"] = json!(cache_write_5m_tokens);
+        parsed["cacheWrite1hTokens"] = json!(cache_write_1h_tokens);
+    }
+
+    serde_json::to_string(&parsed).map_err(|error| error.to_string())
+}
+
+fn anthropic_cache_creation_buckets(usage: &Value) -> (u64, u64, u64, Option<Value>) {
+    let aggregate = usage
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let Some(cache_creation) = usage
+        .get("cache_creation")
+        .filter(|value| value.is_object())
+    else {
+        // The Messages API historically exposed only the aggregate counter.
+        // Its ephemeral cache control defaults to the 5-minute write rate.
+        return (aggregate, aggregate, 0, None);
+    };
+
+    let cache_write_5m_tokens = cache_creation
+        .get("ephemeral_5m_input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let cache_write_1h_tokens = cache_creation
+        .get("ephemeral_1h_input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    // Keep compatibility with responses that provide both the aggregate and
+    // only one of the duration buckets: unspecified creation tokens use the
+    // default 5-minute duration. If the aggregate is absent, the buckets win.
+    let specified_buckets = cache_write_5m_tokens.saturating_add(cache_write_1h_tokens);
+    let cache_write_5m_tokens =
+        cache_write_5m_tokens.saturating_add(aggregate.saturating_sub(specified_buckets));
+    let cache_write_tokens = cache_write_5m_tokens.saturating_add(cache_write_1h_tokens);
+    (
+        cache_write_tokens,
+        cache_write_5m_tokens,
+        cache_write_1h_tokens,
+        Some(cache_creation.clone()),
+    )
+}
+
+fn estimate_anthropic_cost_usd(
+    model: &str,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_5m_tokens: u64,
+    cache_write_1h_tokens: u64,
+) -> f64 {
+    estimate_cost_usd(model, prompt_tokens as f64, completion_tokens as f64)
+        + estimate_cost_usd(
+            model,
+            cache_read_tokens as f64 * ANTHROPIC_CACHE_READ_MULTIPLIER,
+            0.0,
+        )
+        + estimate_cost_usd(
+            model,
+            cache_write_5m_tokens as f64 * ANTHROPIC_CACHE_WRITE_5M_MULTIPLIER,
+            0.0,
+        )
+        + estimate_cost_usd(
+            model,
+            cache_write_1h_tokens as f64 * ANTHROPIC_CACHE_WRITE_1H_MULTIPLIER,
+            0.0,
+        )
 }
 
 pub fn build_anthropic_messages_request_json(
@@ -451,7 +522,38 @@ mod tests {
         assert_eq!(parsed["completionTokens"], 3);
         assert_eq!(parsed["cacheReadTokens"], 5);
         assert_eq!(parsed["cacheWriteTokens"], 7);
-        assert!((parsed["costUsd"].as_f64().unwrap_or(0.0) - 0.000_087).abs() < f64::EPSILON);
+        assert!((parsed["costUsd"].as_f64().unwrap_or(0.0) - 0.000_078_75).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn prices_anthropic_cache_creation_buckets_separately() {
+        let output = parse_anthropic_response_json_for_model(
+            r#"{
+                "content":[{"type":"text","text":"done"}],
+                "usage":{
+                    "input_tokens":100000,
+                    "output_tokens":200000,
+                    "cache_read_input_tokens":300000,
+                    "cache_creation_input_tokens":500000,
+                    "cache_creation":{
+                        "ephemeral_5m_input_tokens":200000,
+                        "ephemeral_1h_input_tokens":300000
+                    }
+                }
+            }"#,
+            Some("claude-sonnet-4-6"),
+        )
+        .unwrap();
+
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["cacheWriteTokens"], 500000);
+        assert_eq!(parsed["cacheWrite5mTokens"], 200000);
+        assert_eq!(parsed["cacheWrite1hTokens"], 300000);
+        assert_eq!(parsed["cacheCreation"]["ephemeral_5m_input_tokens"], 200000);
+        assert_eq!(parsed["cacheCreation"]["ephemeral_1h_input_tokens"], 300000);
+        // $0.30 ordinary + $0.09 cache read + $0.75 5m write + $1.80 1h write
+        // + $3.00 output = $5.94.
+        assert!((parsed["costUsd"].as_f64().unwrap_or(0.0) - 5.94).abs() < 1e-12);
     }
 
     #[test]

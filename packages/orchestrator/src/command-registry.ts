@@ -173,19 +173,19 @@ export function createWorkShellCommandRegistry(extraEntries: readonly Registered
     {
       command: "/agents",
       routeTo: ["agents"],
-      metadata: builtinLocal("에이전트 실행 상태와 transcript를 엽니다"),
+      metadata: builtinLocal("Open agent run status and transcripts."),
       exactOnly: true,
     },
     {
       command: "/jobs",
       routeTo: ["jobs"],
-      metadata: builtinLocal("백그라운드 job 상태를 엽니다"),
+      metadata: builtinLocal("Open background job status."),
       exactOnly: true,
     },
     {
       command: "/todo",
       routeTo: ["todo"],
-      metadata: builtinLocal("현재 WorkGraph 진행 상태를 엽니다"),
+      metadata: builtinLocal("Open current WorkGraph progress."),
       exactOnly: true,
     },
     {
@@ -255,8 +255,30 @@ export function createWorkShellCommandRegistry(extraEntries: readonly Registered
     },
     {
       command: "/review",
+      routeTo: ["review"],
+      metadata: builtinLocal("Inspect SCC Quality Engine gates, critic findings, and evidence without starting a model turn."),
+      exactOnly: true,
+    },
+    {
+      command: "/scc",
+      routeTo: ["review"],
+      metadata: builtinLocal("Open the SCC Quality Engine status already enforcing this run."),
+      exactOnly: true,
+    },
+    {
+      command: "/review run",
       routeTo: ["prompt", "review"],
-      metadata: builtinPrompt("Review the current changes, risks, and missing verification."),
+      metadata: builtinPrompt("Run a model-backed code review. Optional focus text may follow."),
+    },
+    {
+      command: "/code-review",
+      routeTo: ["prompt", "review"],
+      metadata: builtinPrompt("Run a model-backed code review. Optional focus text may follow."),
+    },
+    {
+      command: "/scc review",
+      routeTo: ["prompt", "review"],
+      metadata: builtinPrompt("Run an explicit model-backed review through the SCC Quality Engine."),
     },
     {
       command: "/commit",

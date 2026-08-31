@@ -522,6 +522,7 @@ test("createSessionCenterDashboardRenderOptions merges embedded pane state into 
 
 test("createEmbeddedWorkPaneController keeps embedded pane state in sync across session switches", async () => {
   let snapshotIndex = 0;
+  const disposed = [];
   const controller = await createEmbeddedWorkPaneController({
     initialSelectedSessionId: "work-session-1",
     loadSnapshot: async (forwardedArgs = []) => {
@@ -538,6 +539,9 @@ test("createEmbeddedWorkPaneController keeps embedded pane state in sync across 
             contextLines: ["Resumed session: work-session-1"],
             renderWorkPane: () =>
               `pane:${forwardedArgs.join(" ") || "initial"}`,
+            dispose: () => {
+              disposed.push("work-session-1");
+            },
           }
         : {
             authLabel: "oauth-file",
@@ -549,6 +553,9 @@ test("createEmbeddedWorkPaneController keeps embedded pane state in sync across 
             contextLines: ["Resumed session: work-session-2"],
             renderWorkPane: () =>
               `pane:${forwardedArgs.join(" ") || "updated"}`,
+            dispose: () => {
+              disposed.push("work-session-2");
+            },
           };
     },
   });
@@ -579,6 +586,11 @@ test("createEmbeddedWorkPaneController keeps embedded pane state in sync across 
       sessions: [],
     },
   });
+  assert.deepEqual(
+    disposed,
+    ["work-session-1"],
+    "switching must release the prior snapshot",
+  );
   assert.equal(
     controller?.renderWorkPane?.({
       openSessions() {},
@@ -586,6 +598,28 @@ test("createEmbeddedWorkPaneController keeps embedded pane state in sync across 
     }),
     "pane:--session-id work-session-2",
   );
+
+  await controller?.dispose?.();
+  await controller?.dispose?.();
+  assert.deepEqual(
+    disposed,
+    ["work-session-1", "work-session-2"],
+    "controller exit must release the active snapshot exactly once",
+  );
+});
+
+test("createEmbeddedWorkPaneController releases an unusable initial snapshot", async () => {
+  let disposeCalls = 0;
+  const controller = await createEmbeddedWorkPaneController({
+    loadSnapshot: async () => ({
+      dispose: () => {
+        disposeCalls += 1;
+      },
+    }),
+  });
+
+  assert.equal(controller, undefined);
+  assert.equal(disposeCalls, 1);
 });
 
 test("DASHBOARD_ACTIONS has six primary actions", () => {

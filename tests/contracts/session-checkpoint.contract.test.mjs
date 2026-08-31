@@ -28,6 +28,7 @@ test("session-checkpoint fixtures expose canonical restore-safe checkpoint shape
     "pendingAction",
     "postTurnSummary",
     "lastSubmittedContextReceiptId",
+    "ownerMutationRevision",
     "taskSummary",
   ]);
 });

@@ -4,11 +4,13 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@second-claude/core": "file:../../vendor/second-claude/second-claude-core-4.0.0.tgz",
     "@unclecode/agentops-db": "file:../agentops-db",
     "@unclecode/config-core": "file:../config-core",
     "@unclecode/context-broker": "file:../context-broker",
     "@unclecode/contracts": "file:../contracts",
     "@unclecode/policy-engine": "file:../policy-engine",
+    "@unclecode/plugin-host": "file:../plugin-host",
     "@unclecode/providers": "file:../providers",
     "@unclecode/session-store": "file:../session-store",
     "dotenv": "^17.4.0",
@@ -26,6 +28,12 @@
       "source": "./src/extension-registry.ts",
       "import": "./dist/extension-registry.js",
       "default": "./dist/extension-registry.js"
+    },
+    "./process-group-settlement": {
+      "types": "./dist/process-group-settlement.d.ts",
+      "source": "./src/process-group-settlement.ts",
+      "import": "./dist/process-group-settlement.js",
+      "default": "./dist/process-group-settlement.js"
     }
   }
 }

@@ -140,6 +140,7 @@ test("the Agent Console shows roster and inspector side by side at 100 columns",
   assert.match(frame, /\[Agents\]/, "the active tab must be marked with text, not colour alone");
   assert.match(frame, /Jobs/);
   assert.match(frame, /Plan/);
+  assert.match(frame, /Quality/);
   // `DocsMap` is a roster-only row (the cursor selects `RuntimeMap`), and
   // `Elapsed` is an inspector-only fact label. Both present means two panes.
   assert.match(frame, /DocsMap/, "the roster pane must stay visible beside the inspector");
@@ -149,8 +150,8 @@ test("the Agent Console shows roster and inspector side by side at 100 columns",
   assert.doesNotMatch(frame, new RegExp(RAW_OUTPUT_SENTINEL));
 });
 
-test("the Agent Console renders only the inspector pane at 80 columns", async () => {
-  const frame = await renderFrame({ agentConsoleView: consoleView() }, 80);
+test("the Agent Console renders only the inspector pane below 100 columns", async () => {
+  const frame = await renderFrame({ agentConsoleView: consoleView() }, 84);
 
   assert.match(frame, /Elapsed/, "the selected pane is the inspector while it is visible");
   assert.doesNotMatch(frame, /DocsMap/, "the roster pane must not share a narrow terminal");
@@ -171,12 +172,13 @@ test("the Agent Console falls back to the roster pane at 80 columns with the ins
   assert.match(frame, /Esc close/);
 });
 
-test("the default shell shows a bounded goal and agent HUD instead of the detailed tool ledger", async () => {
+test("the default shell keeps Plan separate from Agents and Jobs", async () => {
   const frame = await renderFrame({}, 100);
 
   assert.match(frame, /Ship authentication · 1\/6/, "goal progress stays in the default HUD");
-  assert.match(frame, /RuntimeMap · running/, "active agent rows stay in the default HUD");
-  assert.match(frame, /… \+3 more/, "the WorkGraph HUD is bounded to three rows");
+  assert.doesNotMatch(frame, /RuntimeMap · running/, "agent rows belong to the explicit Agents surface");
+  assert.doesNotMatch(frame, /Agents · \d+ active/, "the Plan HUD must not grow an Agents section");
+  assert.doesNotMatch(frame, /… \+3 more/, "the quiet HUD is exactly three nearby progress rows plus its status line");
 
   // The removed detailed ledger: per-call kind column, its metric tail, and
   // the diff preview it hung under each write.
@@ -185,6 +187,352 @@ test("the default shell shows a bounded goal and agent HUD instead of the detail
   assert.doesNotMatch(frame, /⎿ Added/, "the default shell no longer previews diffs");
   assert.doesNotMatch(frame, new RegExp(RAW_PROMPT_SENTINEL));
   assert.doesNotMatch(frame, new RegExp(RAW_OUTPUT_SENTINEL));
+});
+
+test("the Korean quiet HUD keeps agent payloads in the explicit roster", async () => {
+  const base = runningSnapshot();
+  const manyAgents = Array.from({ length: 12 }, (_, index) => ({
+    ...base.agents[0],
+    id: `ko-run-${index}`,
+    displayName: index === 0 ? "RuntimeMap" : `PayloadAgent${index}`,
+  }));
+  const snapshot = { ...base, agents: manyAgents };
+
+  const hud = await renderFrame({ uiLocale: "ko", agentConsole: snapshot }, 100);
+  assert.doesNotMatch(hud, /에이전트 · 12개 활성/);
+  assert.doesNotMatch(hud, /RuntimeMap · 실행 중/);
+  assert.doesNotMatch(hud, /… \+3개 더 있음/);
+  assert.doesNotMatch(hud, /Agents ·| active| · running| more/);
+
+  const roster = await renderFrame({
+    uiLocale: "ko",
+    agentConsole: snapshot,
+    agentConsoleView: consoleView({ inspectorVisible: false }),
+  }, 84);
+  assert.match(roster, /RuntimeMap · 실행 중/);
+  assert.match(roster, /화면 밖 2개 더 있음/);
+  assert.doesNotMatch(roster, /running|more off screen/);
+  assert.match(roster, /PayloadAgent1/, "agent names are operator payload and remain byte-for-byte");
+});
+
+test("the Korean visible inspector localizes agent and job enum chrome while preserving payload fields", async () => {
+  const agentFrame = await renderFrame({
+    uiLocale: "ko",
+    agentConsoleView: consoleView({ inspectorVisible: true }),
+  }, 100);
+  assert.match(agentFrame, /RuntimeMap/);
+  assert.match(agentFrame, /탐색 · 실행 중/);
+  assert.match(agentFrame, /경과/);
+  assert.match(agentFrame, /계보\s+상위 실행 r0/);
+  assert.match(agentFrame, /활동\s+Reading runtime/, "activity payload is not translated");
+  assert.doesNotMatch(agentFrame, /scout · running|child of|Elapsed|Lineage/);
+
+  const jobFrame = await renderFrame({
+    uiLocale: "ko",
+    agentConsoleView: consoleView({ tab: "jobs", inspectorVisible: true }),
+  }, 100);
+  assert.match(jobFrame, /작업 노드 · 실행 중/);
+  assert.match(jobFrame, /소유자\s+RuntimeMap/);
+  assert.doesNotMatch(jobFrame, /work-node · running|Owner/);
+});
+
+test("the Korean plan inspector localizes counts, review state, hashes and evidence labels", async () => {
+  const base = runningSnapshot();
+  const reviewedNode = {
+    ...base.workGraph.nodes[1],
+    stage: "critic",
+    role: "critic",
+    attempt: 2,
+    reviewRequired: true,
+    acceptanceCriteria: ["criterion payload", "두 번째 기준 payload"],
+    evidenceRefs: ["evidence:user-value"],
+    artifactRefs: ["artifact:user-value"],
+  };
+  const snapshot = {
+    ...base,
+    workGraph: {
+      ...base.workGraph,
+      qualityProfile: "deep",
+      currentStage: "critic",
+      gateStatus: "refine",
+      iteration: 2,
+      nodes: base.workGraph.nodes.map((node, index) => index === 1 ? reviewedNode : node),
+    },
+    qualityReview: {
+      profile: "deep",
+      currentStage: "critic",
+      latestDecision: "refine",
+      iteration: 2,
+      refineCount: 1,
+      pivotCount: 0,
+      failures: ["failure:user-value"],
+      history: [{
+        event: "gate",
+        stage: "critic",
+        decision: "refine",
+        iteration: 2,
+        failures: ["failure:user-value"],
+        evidenceRefs: ["evidence:user-value"],
+        artifactRefs: ["artifact:user-value"],
+        reviewedArtifactHash: "sha256:reviewed-user-value",
+        currentArtifactHash: "sha256:current-user-value",
+        stale: true,
+        reviewerId: "reviewer:user-value",
+        reviewerRunId: "review-run:user-value",
+        independentVerification: false,
+        reason: "reason:user-value",
+      }],
+    },
+  };
+  const frame = await renderFrame({
+    uiLocale: "ko",
+    agentConsole: snapshot,
+    agentConsoleView: consoleView({ tab: "plan", cursor: 1, inspectorVisible: true }),
+  }, 100);
+
+  assert.match(frame, /승인 기준\s+기준 2개/);
+  assert.match(frame, /증거\s+참조 1개/);
+  assert.match(frame, /검토\s+필수/);
+  assert.match(frame, /검토자\s+reviewer:user-value · 독립 아님/);
+  assert.match(frame, /현재 해시\s+sha256:current-user-value · 만료/);
+  assert.match(frame, /이유 · reason:user-value/);
+  assert.match(frame, /실패 · failure:user-value/);
+  assert.match(frame, /증거 · evidence:user-value/);
+  assert.doesNotMatch(frame, /criteria|refs|required|not independent|stale|Reason ·|Failure ·|Evidence ·/);
+  for (const payload of [
+    "artifact:user-value",
+    "reviewer:user-value",
+    "sha256:reviewed-user-value",
+    "sha256:current-user-value",
+    "reason:user-value",
+    "failure:user-value",
+    "evidence:user-value",
+  ]) {
+    assert.match(frame, new RegExp(payload.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+});
+
+test("the Quality tab opens with a bounded result summary and reveals evidence on request", async () => {
+  const base = runningSnapshot();
+  const snapshot = {
+    ...base,
+    workGraph: {
+      ...base.workGraph,
+      qualityProfile: "deep",
+      currentStage: "critic",
+      gateStatus: "unproven",
+      iteration: 4,
+      nodes: base.workGraph.nodes.map((node, index) => ({
+        ...node,
+        stage: index === 0 ? "critic" : "work",
+        role: index === 0 ? "critic" : "worker",
+        status: index === 0 ? "failed" : node.status,
+        attempt: 1,
+        artifactRefs: index === 0 ? ["artifacts/auth.patch"] : [],
+        reviewRequired: true,
+      })),
+    },
+    qualityReview: {
+      runId: "quality-run-1",
+      graphId: "goal-1",
+      profile: "deep",
+      currentStage: "critic",
+      iteration: 4,
+      refineCount: 1,
+      pivotCount: 1,
+      latestDecision: "unproven",
+      history: [
+        {
+          event: "gate",
+          stage: "critic",
+          decision: "unproven",
+          iteration: 1,
+          reason: "Independent proof expired",
+          failures: ["Session expiry remains untested"],
+          evidenceRefs: ["evidence/auth-review.json"],
+          artifactRefs: ["artifacts/auth.patch"],
+          reviewedArtifactHash: "sha256:reviewed-auth",
+          currentArtifactHash: "sha256:current-auth",
+          reviewerId: "critic-auth",
+          independentVerification: true,
+          stale: true,
+          startedAt: 10,
+        },
+        {
+          event: "refine", stage: "work", decision: "refine", iteration: 2,
+          failures: [], evidenceRefs: [], artifactRefs: [], independentVerification: false, stale: false, startedAt: 20,
+        },
+        {
+          event: "pivot", stage: "plan", decision: "pivot", iteration: 3,
+          failures: [], evidenceRefs: [], artifactRefs: [], independentVerification: false, stale: false, startedAt: 30,
+        },
+        {
+          event: "completed", stage: "promote", decision: "proceed", iteration: 4,
+          failures: [], evidenceRefs: [], artifactRefs: [], independentVerification: true, stale: false, startedAt: 40,
+        },
+      ],
+    },
+  };
+
+  const frame = await renderFrame({
+    agentConsole: snapshot,
+    agentConsoleView: consoleView({ tab: "quality", cursor: 0, inspectorVisible: false }),
+  }, 120);
+
+  assert.match(frame, /SCC Quality Engine/);
+  assert.doesNotMatch(frame, /Agent Console|Agents  Jobs  Plan/);
+  assert.match(frame, /SCC · Unproven · deep/);
+  assert.match(frame, /Checked · no recorded artifact check; independent review unproven/);
+  assert.match(frame, /Review · no independent review/);
+  assert.match(frame, /Reason · Independent proof expired/);
+  assert.match(frame, /Next · run \/scc review <target> for independent proof/);
+  assert.doesNotMatch(frame, /Reviewed hash|Current hash|evidence\/auth-review|iteration 2 · work/);
+  assert.doesNotMatch(frame, /s steer · x cancel · r continue/);
+
+  const detailed = await renderFrame({
+    agentConsole: snapshot,
+    agentConsoleView: consoleView({ tab: "quality", cursor: 3, inspectorVisible: true }),
+  }, 120);
+  assert.match(detailed, /Evidence · evidence\/auth-review\.json/);
+  assert.match(detailed, /Reviewed hash\s+sha256:reviewed-auth/);
+  assert.match(detailed, /Current hash\s+sha256:current-auth · stale/);
+  assert.match(detailed, /iteration 4 · promote · completed/);
+  assert.match(detailed, /Enter summary · Esc close · read-only/);
+
+  const korean = await renderFrame({
+    uiLocale: "ko",
+    agentConsole: snapshot,
+    agentConsoleView: consoleView({ tab: "quality", cursor: 3, inspectorVisible: true }),
+  }, 120);
+  assert.match(korean, /SCC · 미입증 · 심층/);
+  assert.match(korean, /확인 · 기록된 산출물 검증 없음; 독립 검토는 미입증/);
+  assert.match(korean, /반복 1 · 비평 · 게이트/);
+  assert.match(korean, /반복 2 · 작업 · 개선/);
+  assert.match(korean, /반복 3 · 계획 · 전환/);
+  assert.match(korean, /반복 4 · 정리 · 완료/);
+  assert.doesNotMatch(korean, /· (gate|refine|pivot|completed)/);
+  assert.match(korean, /읽기 전용/);
+});
+
+test("an empty SCC cockpit is actionable without a dead roster or inspector", async () => {
+  const frame = await renderFrame({
+    agentConsole: {
+      profileId: "build",
+      activity: [],
+      agents: [],
+      jobs: [],
+    },
+    agentConsoleView: consoleView({ tab: "quality", cursor: 0 }),
+  }, 100);
+
+  assert.match(frame, /SCC Quality Engine · ready/);
+  assert.match(frame, /No quality run recorded for this session\./);
+  assert.match(frame, /Start a task, or \/scc review <target> for an explicit review\./);
+  assert.doesNotMatch(frame, /No Quality Engine review history yet\./);
+  assert.doesNotMatch(frame, /Select a row to inspect\./);
+  assert.doesNotMatch(frame, /Enter detail/);
+});
+
+test("an active SCC run without history stays actionable and bounds thirty-two findings", async () => {
+  const base = runningSnapshot();
+  const failedCritics = Array.from({ length: 32 }, (_, index) => ({
+    ...base.workGraph.nodes[0],
+    id: `critic-${index + 1}`,
+    title: `Critic finding ${index + 1}`,
+    status: "failed",
+    stage: "critic",
+    role: "critic",
+  }));
+  const frame = await renderFrame({
+    agentConsole: {
+      profileId: "build",
+      activity: [],
+      agents: [],
+      jobs: [],
+      workGraph: {
+        ...base.workGraph,
+        qualityProfile: "deep",
+        currentStage: "critic",
+        gateStatus: "refine",
+        iteration: 2,
+        nodes: failedCritics,
+      },
+      qualityReview: {
+        runId: "quality-active-no-history",
+        graphId: "goal-1",
+        profile: "deep",
+        currentStage: "critic",
+        iteration: 2,
+        refineCount: 0,
+        pivotCount: 0,
+        latestDecision: "refine",
+        history: [],
+      },
+    },
+    agentConsoleView: consoleView({ tab: "quality", cursor: 0 }),
+  }, 100);
+
+  assert.match(frame, /SCC · Needs refinement · deep/);
+  assert.match(frame, /No review history recorded yet\./);
+  assert.match(frame, /Review · no independent review/);
+  assert.match(frame, /Next · fix 32 findings/);
+  assert.doesNotMatch(frame, /Critic findings|Finding · Critic finding|… \+29/);
+  assert.doesNotMatch(frame, /No Quality Engine review history yet\./);
+  assert.doesNotMatch(frame, /Select a row to inspect\./);
+  assert.doesNotMatch(frame, /Enter detail/);
+  assert.ok(frame.split("\n").filter((line) => /^(?:\s*)(?:SCC|Checked|Review|No review|Next) ·?/.test(line)).length <= 5);
+});
+
+test("the SCC cockpit selects the latest history event by default", async () => {
+  const base = runningSnapshot();
+  const history = [
+    {
+      event: "gate",
+      stage: "critic",
+      decision: "refine",
+      iteration: 1,
+      failures: ["old finding"],
+      evidenceRefs: [],
+      artifactRefs: [],
+      independentVerification: false,
+      stale: false,
+      startedAt: 10,
+    },
+    {
+      event: "completed",
+      stage: "promote",
+      decision: "proceed",
+      iteration: 2,
+      failures: [],
+      evidenceRefs: ["evidence:latest"],
+      artifactRefs: [],
+      independentVerification: true,
+      stale: false,
+      startedAt: 20,
+    },
+  ];
+  const frame = await renderFrame({
+    agentConsole: {
+      ...base,
+      qualityReview: {
+        runId: "quality-latest",
+        graphId: "goal-1",
+        profile: "deep",
+        currentStage: "promote",
+        iteration: 2,
+        refineCount: 1,
+        pivotCount: 0,
+        latestDecision: "proceed",
+        history,
+      },
+    },
+    agentConsoleView: consoleView({ tab: "quality", cursor: 0 }),
+  }, 100);
+
+  assert.match(frame, /› .*iteration 2 · promote · comp/);
+  assert.doesNotMatch(frame, /› .*iteration 1 · critic · gate/);
+  assert.match(frame, /Iteration 2 · completed/);
+  assert.match(frame, /evidence:latest/);
 });
 
 /**
@@ -234,13 +582,13 @@ function hostileSnapshot() {
 }
 
 test("the Agent Console breakpoint follows the terminal, not the inner layout width", async () => {
-  const narrow = await renderFrame({ agentConsoleView: consoleView() }, 83);
-  assert.match(narrow, /Elapsed/, "83 columns is one pane: the visible inspector");
-  assert.doesNotMatch(narrow, /DocsMap/, "83 columns must not open a second pane");
+  const narrow = await renderFrame({ agentConsoleView: consoleView() }, 99);
+  assert.match(narrow, /Elapsed/, "99 columns is one pane: the visible inspector");
+  assert.doesNotMatch(narrow, /DocsMap/, "99 columns must not open a second pane");
 
   // The console breakpoint is a terminal-width contract. Charging the chrome's
-  // own four columns against it moved the real breakpoint to 88.
-  for (const columns of [84, 87]) {
+  // own four columns against it must not move the real breakpoint above 100.
+  for (const columns of [100, 120]) {
     const wide = await renderFrame({ agentConsoleView: consoleView() }, columns);
     assert.match(wide, /DocsMap/, `${columns} columns must show the roster pane`);
     assert.match(wide, /Elapsed/, `${columns} columns must show the inspector pane`);
@@ -298,12 +646,13 @@ function delay(ms) {
   return new Promise((resolve) => { setTimeout(resolve, ms); });
 }
 
-test("an idle main turn still advances elapsed labels while an agent is running", async () => {
+test("the explicit agent inspector advances elapsed labels while the main turn is idle", async () => {
   const base = runningSnapshot();
   const startedAt = Date.now() - 2_000;
   const { instance, getOutput } = renderDebugFrame(
     React.createElement(WorkShellView, {
       ...baseProps({
+        agentConsoleView: consoleView(),
         agentConsole: {
           ...base,
           agents: [{ ...base.agents[0], startedAt }],
@@ -316,10 +665,10 @@ test("an idle main turn still advances elapsed labels while an agent is running"
   );
   try {
     await waitForSettledFrame(getOutput);
-    assert.match(stripVTControlCharacters(getOutput()), /RuntimeMap · running 2s/);
+    assert.match(stripVTControlCharacters(getOutput()), /Elapsed\s+2s/);
     // No keypress, no engine event — only the shell's own clock.
     await delay(1_400);
-    const elapsed = [...stripVTControlCharacters(getOutput()).matchAll(/RuntimeMap · running (\d+)s/g)]
+    const elapsed = [...stripVTControlCharacters(getOutput()).matchAll(/Elapsed\s+(\d+)s/g)]
       .map((match) => Number(match[1]));
     assert.ok(Math.max(...elapsed) > 2, `elapsed label did not advance: ${elapsed.join(", ")}`);
   } finally {
@@ -421,6 +770,33 @@ test("an armed cancel confirmation asks an explicit question naming the selected
   assert.match(frame, /y confirm/, "y is the accepted confirmation key");
   assert.match(frame, /n keep running/, "n is the accepted decline key");
   assert.match(frame, /Esc dismiss/, "Esc is the accepted dismissal key");
+});
+
+test("Korean agent controls localize chrome while preserving the selected run name", async () => {
+  const confirm = await renderFrame(
+    {
+      uiLocale: "ko",
+      agentConsoleView: consoleView({
+        control: { kind: "confirm-cancel", agentRunId: "r1" },
+      }),
+    },
+    100,
+  );
+  assert.match(confirm, /⚠ RuntimeMap 취소\? y 확인 · n 계속 실행 · Esc 닫기/u);
+  assert.doesNotMatch(confirm, /Cancel RuntimeMap|y confirm|keep running|Esc dismiss/);
+
+  for (const [status, expected] of [
+    ["accepted", "제어 승인됨"],
+    ["not_delivered", "제어 전달 안 됨"],
+    ["rejected", "제어 거부됨"],
+  ]) {
+    const receipt = await renderFrame({
+      uiLocale: "ko",
+      agentConsoleView: consoleView({ receipt: { status, message: "RAW_ENGINE_MESSAGE" } }),
+    }, 100);
+    assert.match(receipt, new RegExp(expected, "u"));
+    assert.doesNotMatch(receipt, /Control accepted|Control not delivered|Control rejected|RAW_ENGINE_MESSAGE/);
+  }
 });
 
 test("a browsing console carries no cancel question and no outcome row", async () => {

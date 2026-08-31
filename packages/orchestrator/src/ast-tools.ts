@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 
 import type { ToolDefinition, ToolHandler } from "./tools.js";
 import type { ToolRegistry } from "./tool-executor.js";
+import { createOwnedProcessGroupController } from "./process-group-settlement.js";
 
 const DEFAULT_MATCH_LIMIT = 50;
 const MAX_MATCH_LIMIT = 200;
@@ -21,7 +22,14 @@ type AstGrepRunner = (
 export type AstToolRegistryOptions = {
   readonly executable?: string;
   readonly run?: AstGrepRunner;
+  readonly forceKillDelayMs?: number;
 };
+
+function abortError(): Error {
+  const error = new Error("The AST tool request was aborted.");
+  error.name = "AbortError";
+  return error;
+}
 
 function resolveWorkspaceTarget(cwd: string, requestedPath: string): string {
   if (path.isAbsolute(requestedPath)) {
@@ -107,14 +115,19 @@ function runAstGrep(
   cwd: string,
   signal?: AbortSignal,
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  forceKillDelayMs = 2_000,
 ): Promise<string> {
+  if (signal?.aborted) return Promise.reject(abortError());
   const { promise, resolve, reject } = Promise.withResolvers<string>();
   const child = spawn(executable, [...args], {
     cwd,
     stdio: ["ignore", "pipe", "pipe"],
-    timeout: timeoutMs,
-    killSignal: "SIGKILL",
-    ...(signal ? { signal } : {}),
+    detached: process.platform !== "win32",
+  });
+  const processGroup = createOwnedProcessGroupController({
+    child,
+    label: "ast-grep",
+    forceKillDelayMs,
   });
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
@@ -122,18 +135,36 @@ function runAstGrep(
   let stderrBytes = 0;
   let stderrTruncated = false;
   let settled = false;
+  let requestedFailure: Error | undefined;
+  let timeoutTimer: NodeJS.Timeout | undefined;
+
+  const cleanup = () => {
+    if (timeoutTimer) clearTimeout(timeoutTimer);
+    if (signal) signal.removeEventListener("abort", onAbort);
+  };
 
   const fail = (error: Error) => {
     if (settled) return;
     settled = true;
+    cleanup();
     reject(error);
   };
+
+  const requestTermination = (error: Error) => {
+    requestedFailure ??= error;
+    void processGroup.terminate().catch(() => undefined);
+  };
+  const onAbort = () => requestTermination(abortError());
+  if (signal) signal.addEventListener("abort", onAbort, { once: true });
+  timeoutTimer = setTimeout(() => {
+    requestTermination(new Error(`ast-grep timed out after ${timeoutMs}ms`));
+  }, timeoutMs);
+  timeoutTimer.unref();
 
   child.stdout.on("data", (chunk: Buffer) => {
     outputBytes += chunk.length;
     if (outputBytes > MAX_OUTPUT_BYTES) {
-      child.kill("SIGKILL");
-      fail(new Error(`ast-grep output exceeded ${MAX_OUTPUT_BYTES} bytes`));
+      requestTermination(new Error(`ast-grep output exceeded ${MAX_OUTPUT_BYTES} bytes`));
       return;
     }
     stdout.push(chunk);
@@ -149,19 +180,35 @@ function runAstGrep(
     stderrBytes += bounded.length;
     if (bounded.length < chunk.length) stderrTruncated = true;
   });
-  child.once("error", fail);
-  child.once("close", (code, terminatedBySignal) => {
+  child.once("error", (error) => {
+    requestedFailure ??= error;
+    if (!child.pid) fail(error);
+  });
+  child.once("exit", (code, terminatedBySignal) => {
     if (settled) return;
     settled = true;
-    const output = Buffer.concat(stdout).toString("utf8");
-    if (code === 0 || (code === 1 && output.trim() === "[]")) {
-      resolve(output);
-      return;
-    }
-    const rawDetail = Buffer.concat(stderr).toString("utf8").trim();
-    const detail = `${rawDetail}${stderrTruncated ? " [stderr truncated]" : ""}`.trim();
-    const status = terminatedBySignal ? `signal ${terminatedBySignal}` : `exit ${code ?? "unknown"}`;
-    reject(new Error(`ast-grep failed (${status})${detail ? `: ${detail}` : ""}`));
+    void (async () => {
+      try {
+        await processGroup.terminate();
+        if (requestedFailure) {
+          reject(requestedFailure);
+          return;
+        }
+        const output = Buffer.concat(stdout).toString("utf8");
+        if (code === 0 || (code === 1 && output.trim() === "[]")) {
+          resolve(output);
+          return;
+        }
+        const rawDetail = Buffer.concat(stderr).toString("utf8").trim();
+        const detail = `${rawDetail}${stderrTruncated ? " [stderr truncated]" : ""}`.trim();
+        const status = terminatedBySignal ? `signal ${terminatedBySignal}` : `exit ${code ?? "unknown"}`;
+        reject(new Error(`ast-grep failed (${status})${detail ? `: ${detail}` : ""}`));
+      } catch (error) {
+        reject(error);
+      } finally {
+        cleanup();
+      }
+    })();
   });
   return promise;
 }
@@ -226,7 +273,14 @@ export const astToolDefinitions: readonly ToolDefinition[] = [
 export function createAstToolRegistry(options: AstToolRegistryOptions = {}): ToolRegistry {
   const executable = options.executable ?? (process.env.UNCLECODE_AST_GREP?.trim() || "ast-grep");
   const runner = options.run
-    ?? ((args, cwd, signal, timeoutMs) => runAstGrep(executable, args, cwd, signal, timeoutMs));
+    ?? ((args, cwd, signal, timeoutMs) => runAstGrep(
+      executable,
+      args,
+      cwd,
+      signal,
+      timeoutMs,
+      options.forceKillDelayMs,
+    ));
 
   const astSearch: ToolHandler = async (input, cwd, handlerOptions = {}) => {
     const pattern = requiredString(input, "pattern");

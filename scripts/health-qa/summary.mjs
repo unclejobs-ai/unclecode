@@ -68,8 +68,8 @@ export function summarizeResearchStatus(result) {
 }
 
 export function summarizeNodeTest(result) {
-  const pass = matchLast(result.stdout, /ℹ pass (\d+)/);
-  const fail = matchLast(result.stdout, /ℹ fail (\d+)/);
+  const pass = matchLast(result.stdout, /(?:ℹ|#) pass (\d+)/);
+  const fail = matchLast(result.stdout, /(?:ℹ|#) fail (\d+)/);
   if (pass || fail) return `${pass ?? "0"} pass, ${fail ?? "0"} fail`;
   return summarizeFirstLine(result);
 }
@@ -136,7 +136,7 @@ export function recoveryHintForFailure(check, output) {
   if (isNativeAbiFailure(output)) {
     return "npm rebuild better-sqlite3 && npm run qa:health --silent";
   }
-  if (check.label === "live provider QA" || /api ready:\s*no|lacks model\.request|insufficient.scope/i.test(output)) {
+  if (check.label === "live provider QA") {
     return "refresh OpenAI API-capable auth, then npm run qa:live --silent";
   }
   return "";

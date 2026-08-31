@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   formatWorkShellDecisionLines,
+  resolveWorkShellDecisionAnswers,
   resolveWorkShellDecisionReply,
 } from "@unclecode/orchestrator";
 
@@ -81,4 +82,30 @@ test("decision reply parser handles multi-question replies and multi-select opti
     formatWorkShellDecisionLines(multiRequest).join("\n"),
     /Question · scope: Which areas\?.*Question · mode: Which mode\?.*Reply question-id: option-number/s,
   );
+});
+
+test("structured decision answers require exact ids, options, and multiplicity", () => {
+  assert.deepEqual(resolveWorkShellDecisionAnswers({
+    request,
+    decisionId: "decision-1",
+    answers: [{ id: "strategy", selectedOptions: ["Fast"] }],
+  }), {
+    status: "answered",
+    answers: [{ id: "strategy", selectedOptions: ["Fast"] }],
+  });
+  assert.equal(resolveWorkShellDecisionAnswers({
+    request,
+    decisionId: "stale-decision",
+    answers: [{ id: "strategy", selectedOptions: ["Fast"] }],
+  }), undefined);
+  assert.equal(resolveWorkShellDecisionAnswers({
+    request,
+    decisionId: "decision-1",
+    answers: [{ id: "strategy", selectedOptions: ["Unknown"] }],
+  }), undefined);
+  assert.equal(resolveWorkShellDecisionAnswers({
+    request,
+    decisionId: "decision-1",
+    answers: [{ id: "strategy", selectedOptions: ["Safe", "Fast"] }],
+  }), undefined);
 });

@@ -197,6 +197,7 @@ test("WorkAgent plans goal tasks, runs isolated executors, and emits truthful li
     [2, "Update and verify session.ts"],
   ]);
   const proposed = traces.find((event) => event.type === "work.proposed");
+  assert.equal(Number.isSafeInteger(proposed?.sequence), true);
   assert.equal(proposed?.graph?.goal, "Refactor authentication safely");
   assert.deepEqual(proposed?.graph?.nodes[1]?.dependsOn, ["task-1"]);
   assert.deepEqual(

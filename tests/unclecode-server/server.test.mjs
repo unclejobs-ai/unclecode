@@ -23,7 +23,7 @@ test("authed endpoints reject missing bearer token", async () => {
     const response = await fetch(`${url}/sessions`);
     assert.equal(response.status, 401);
     const body = await response.json();
-    assert.match(body.error, /missing_bearer_token/);
+    assert.equal(body.error.code, "missing_bearer_token");
   } finally {
     await stop();
   }
@@ -35,9 +35,9 @@ test("authed endpoints reject disallowed Origin", async () => {
     const response = await fetch(`${url}/sessions`, {
       headers: { Authorization: `Bearer ${TEST_TOKEN}`, Origin: "http://evil.example" },
     });
-    assert.equal(response.status, 401);
+    assert.equal(response.status, 403);
     const body = await response.json();
-    assert.match(body.error, /origin_not_allowed/);
+    assert.equal(body.error.code, "origin_not_allowed");
   } finally {
     await stop();
   }
