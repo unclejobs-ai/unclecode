@@ -21,6 +21,10 @@ import {
   type WorkProposalIdentity,
   type WorkProposalOrderProjection,
 } from "@unclecode/contracts";
+import {
+  reduceProviderTurnPerformance,
+  type ProviderPerformanceTraceEvent,
+} from "@unclecode/contracts";
 
 const MAX_TOOL_ACTIVITY = 80;
 const QUALITY_STAGE_RANK: Readonly<Record<QualityReviewHistoryEntry["stage"], number>> = {
@@ -42,25 +46,65 @@ export function applyTraceEventToAgentConsole(
   event: { readonly type: string },
   usageRecorder?: AgentConsoleUsageRecorder,
 ): AgentConsoleSnapshot {
-  const evolutionSnapshot = applyEvolutionProposalEvent(snapshot, event);
-  if (evolutionSnapshot !== snapshot) {
+  // Let the owner ledger arbitrate usage identity before projecting a receipt.
+  // A replay that was originally scoped to a worker can arrive without its
+  // scope after transport/replay rewriting; projecting it first would turn a
+  // previously settled worker measurement into a new main-turn receipt even
+  // though the ledger correctly rejects the scope mismatch.
+  const usageProjection = event.type === "usage.recorded" && usageRecorder
+    ? (() => {
+        const trace = asRecord(event);
+        return trace ? applyUsageEvent(snapshot, trace, usageRecorder) : snapshot;
+      })()
+    : snapshot;
+  const performanceSnapshot = event.type === "usage.recorded"
+    && usageRecorder
+    && usageProjection === snapshot
+    ? snapshot
+    : applyProviderPerformanceEvent(usageProjection, event);
+  const evolutionSnapshot = applyEvolutionProposalEvent(performanceSnapshot, event);
+  if (evolutionSnapshot !== performanceSnapshot) {
     return evolutionSnapshot;
   }
-  const diagnosticSnapshot = applyPluginDiagnosticEvent(snapshot, event);
-  if (diagnosticSnapshot !== snapshot) {
+  const diagnosticSnapshot = applyPluginDiagnosticEvent(performanceSnapshot, event);
+  if (diagnosticSnapshot !== performanceSnapshot) {
     return diagnosticSnapshot;
   }
-  const lifecycleSnapshot = applyAgentLifecycleEvent(snapshot, event, usageRecorder);
-  if (lifecycleSnapshot !== snapshot) {
+  const lifecycleSnapshot = applyAgentLifecycleEvent(performanceSnapshot, event, usageRecorder);
+  if (lifecycleSnapshot !== performanceSnapshot) {
     return lifecycleSnapshot;
   }
 
-  const workSnapshot = applyWorkLifecycleEvent(snapshot, event);
-  if (workSnapshot !== snapshot) {
+  const workSnapshot = applyWorkLifecycleEvent(performanceSnapshot, event);
+  if (workSnapshot !== performanceSnapshot) {
     return workSnapshot;
   }
 
-  return applyToolLifecycleEvent(snapshot, event);
+  return applyToolLifecycleEvent(performanceSnapshot, event);
+}
+
+function applyProviderPerformanceEvent(
+  snapshot: AgentConsoleSnapshot,
+  event: { readonly type: string },
+): AgentConsoleSnapshot {
+  if (
+    event.type !== "turn.started"
+    && event.type !== "assistant.delta"
+    && event.type !== "turn.completed"
+    && event.type !== "usage.recorded"
+  ) {
+    return snapshot;
+  }
+  const next = reduceProviderTurnPerformance(
+    snapshot.lastTurnPerformance,
+    event as ProviderPerformanceTraceEvent,
+    Date.now(),
+  );
+  if (next === snapshot.lastTurnPerformance) return snapshot;
+  return createAgentConsoleSnapshot({
+    ...snapshot,
+    ...(next ? { lastTurnPerformance: next } : {}),
+  });
 }
 
 function applyEvolutionProposalEvent(

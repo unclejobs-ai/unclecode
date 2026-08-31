@@ -392,6 +392,10 @@ export type UsageRecordedTraceEvent = {
   readonly cacheSavingsUsd?: number;
   readonly costUsd?: number;
   readonly startedAt: number;
+  /** First non-empty assistant delta observed by the runtime, when streamed. */
+  readonly firstTokenAt?: number;
+  /** Provider turn completion boundary; distinct from task/orchestrator time. */
+  readonly completedAt?: number;
 };
 
 export type QualityRouteKind = "direct" | "frontier" | "commodity" | "fallback";

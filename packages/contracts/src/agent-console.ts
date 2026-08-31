@@ -2,6 +2,7 @@ import type {
   ContextPacketSourceCategory,
   ContextPacketView,
 } from "./context-packet-view.js";
+import type { ProviderTurnPerformance } from "./performance.js";
 
 export const CONTEXT_PROFILE_IDS = ["build", "explore", "review"] as const;
 export type ContextProfileId = (typeof CONTEXT_PROFILE_IDS)[number];
@@ -539,6 +540,8 @@ export type AgentConsoleSnapshot = {
   readonly mainUsage?: AgentRunUsage;
   /** Owner-materialized lifetime session total; contains no replay identity. */
   readonly totalUsage?: AgentUsageTotals;
+  /** One bounded main-provider receipt; lifetime totals remain separate. */
+  readonly lastTurnPerformance?: ProviderTurnPerformance;
 };
 
 export type AgentConsoleJournalEvent =
@@ -616,6 +619,9 @@ export function createAgentConsoleSnapshot(
       .map(copyAsyncJob),
     ...(input.mainUsage ? { mainUsage: copyAgentRunUsage(input.mainUsage) } : {}),
     ...(input.totalUsage ? { totalUsage: copyAgentUsageTotals(input.totalUsage) } : {}),
+    ...(input.lastTurnPerformance
+      ? { lastTurnPerformance: copyProviderTurnPerformance(input.lastTurnPerformance) }
+      : {}),
   };
 }
 
@@ -1003,6 +1009,21 @@ function copyAgentRunUsage(usage: AgentRunUsage): AgentRunUsage {
   };
 }
 
+function copyProviderTurnPerformance(performance: ProviderTurnPerformance): ProviderTurnPerformance {
+  return {
+    provider: performance.provider,
+    model: performance.model,
+    startedAt: performance.startedAt,
+    ...(performance.firstTokenAt === undefined ? {} : { firstTokenAt: performance.firstTokenAt }),
+    ...(performance.completedAt === undefined ? {} : { completedAt: performance.completedAt }),
+    ...(performance.inputTokens === undefined ? {} : { inputTokens: performance.inputTokens }),
+    ...(performance.outputTokens === undefined ? {} : { outputTokens: performance.outputTokens }),
+    ...(performance.cacheReadTokens === undefined ? {} : { cacheReadTokens: performance.cacheReadTokens }),
+    ...(performance.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: performance.cacheWriteTokens }),
+    ...(performance.costUsd === undefined ? {} : { costUsd: performance.costUsd }),
+  };
+}
+
 function copyAgentUsageTotals(usage: AgentUsageTotals): AgentUsageTotals {
   return {
     ...(usage.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
@@ -1101,6 +1122,9 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
   const totalUsage = hasOwn(record, "totalUsage")
     ? parseAgentUsageTotals(record.totalUsage)
     : undefined;
+  const lastTurnPerformance = hasOwn(record, "lastTurnPerformance")
+    ? parseProviderTurnPerformance(record.lastTurnPerformance)
+    : undefined;
   const activityValue = record.activity;
 
   if (
@@ -1118,6 +1142,7 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
     || (hasOwn(record, "pluginDiagnostics") && !pluginDiagnostics)
     || (hasOwn(record, "mainUsage") && !mainUsage)
     || (hasOwn(record, "totalUsage") && !totalUsage)
+    || (hasOwn(record, "lastTurnPerformance") && !lastTurnPerformance)
     || !Array.isArray(activityValue)
   ) {
     return undefined;
@@ -1165,6 +1190,43 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
     jobs,
     ...(mainUsage ? { mainUsage } : {}),
     ...(totalUsage ? { totalUsage } : {}),
+    ...(lastTurnPerformance ? { lastTurnPerformance } : {}),
+  });
+}
+
+function parseProviderTurnPerformance(value: unknown): ProviderTurnPerformance | undefined {
+  const record = asRecord(value);
+  if (
+    !record
+    || !isNonEmptyString(record.provider)
+    || !isNonEmptyString(record.model)
+    || !isNonNegativeInteger(record.startedAt)
+    || (hasOwn(record, "firstTokenAt") && !isNonNegativeInteger(record.firstTokenAt))
+    || (hasOwn(record, "completedAt") && !isNonNegativeInteger(record.completedAt))
+    || (hasOwn(record, "inputTokens") && !isNonNegativeInteger(record.inputTokens))
+    || (hasOwn(record, "outputTokens") && !isNonNegativeInteger(record.outputTokens))
+    || (hasOwn(record, "cacheReadTokens") && !isNonNegativeInteger(record.cacheReadTokens))
+    || (hasOwn(record, "cacheWriteTokens") && !isNonNegativeInteger(record.cacheWriteTokens))
+    || (hasOwn(record, "costUsd") && !isNonNegativeFinite(record.costUsd))
+    || (typeof record.firstTokenAt === "number" && record.firstTokenAt < record.startedAt)
+    || (typeof record.completedAt === "number" && record.completedAt < record.startedAt)
+    || (typeof record.firstTokenAt === "number"
+      && typeof record.completedAt === "number"
+      && record.firstTokenAt > record.completedAt)
+  ) {
+    return undefined;
+  }
+  return copyProviderTurnPerformance({
+    provider: record.provider.trim(),
+    model: record.model.trim(),
+    startedAt: record.startedAt,
+    ...(typeof record.firstTokenAt === "number" ? { firstTokenAt: record.firstTokenAt } : {}),
+    ...(typeof record.completedAt === "number" ? { completedAt: record.completedAt } : {}),
+    ...(typeof record.inputTokens === "number" ? { inputTokens: record.inputTokens } : {}),
+    ...(typeof record.outputTokens === "number" ? { outputTokens: record.outputTokens } : {}),
+    ...(typeof record.cacheReadTokens === "number" ? { cacheReadTokens: record.cacheReadTokens } : {}),
+    ...(typeof record.cacheWriteTokens === "number" ? { cacheWriteTokens: record.cacheWriteTokens } : {}),
+    ...(typeof record.costUsd === "number" ? { costUsd: record.costUsd } : {}),
   });
 }
 

@@ -69,6 +69,7 @@ import {
   shouldShowOmpAuthPicker,
   type OmpAuthPickerCatalog,
 } from "./work-shell-auth-provider-picker-model.js";
+import { formatProviderPerformanceReceipt } from "./work-shell-performance-receipt.js";
 
 function readWorkShellMonotonicMilliseconds(): number {
   return typeof globalThis.performance?.now === "function"
@@ -1535,6 +1536,7 @@ export function resolveWorkShellComposerFrameLayout(input: {
   readonly isBusy?: boolean | undefined;
   readonly hasBackgroundWork?: boolean | undefined;
   readonly hasComposerHint?: boolean | undefined;
+  readonly hasPerformanceReceipt?: boolean | undefined;
   readonly liveTraceLineCount?: number | undefined;
 }): WorkShellComposerFrameLayout {
   const terminalRows = Math.max(1, Math.trunc(input.terminalRows ?? process.stdout.rows ?? 24));
@@ -1545,10 +1547,18 @@ export function resolveWorkShellComposerFrameLayout(input: {
   const traceRows = busy && !compactHeightDock
     ? Math.min(3, Math.max(0, Math.trunc(input.liveTraceLineCount ?? 0)))
     : 0;
-  const hintRows = input.hasComposerHint === true && !minimalHeightDock ? 1 : 0;
+  const showPerformanceReceipt = input.hasPerformanceReceipt === true
+    && !busy
+    && terminalRows >= 18;
+  const hintRows = input.hasComposerHint === true
+    && !minimalHeightDock
+    && !showPerformanceReceipt
+    ? 1
+    : 0;
+  const performanceReceiptRows = showPerformanceReceipt ? 1 : 0;
   // Divider + prompt wrapper + footer. The prompt wrapper is represented by
   // the Composer viewport's rows; reserve only the two fixed siblings here.
-  const dockOverheadRows = activityRows + traceRows + hintRows + 2;
+  const dockOverheadRows = activityRows + traceRows + hintRows + performanceReceiptRows + 2;
   const composerBudgetRows = Math.max(1, terminalRows - dockOverheadRows);
   // A long draft can need one marker above and one below the visible viewport.
   // Keep both markers inside the dock whenever possible, while retaining the
@@ -2974,6 +2984,7 @@ const WorkShellDecisionBar = React.memo(function WorkShellDecisionBar(props: {
 const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
   readonly composer: React.ReactNode;
   readonly composerHint?: string;
+  readonly performanceReceipt?: string;
   readonly inputValue: string;
   readonly cwd?: string;
   readonly model: string;
@@ -3057,6 +3068,9 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
   // Same liveness rule the status block owns — a main turn OR live delegated
   // work — reusing its counts so the dock never invents a second definition.
   const busy = props.isBusy === true || backgroundBusy;
+  const showPerformanceReceipt = props.performanceReceipt !== undefined
+    && !busy
+    && (props.terminalRows ?? process.stdout.rows ?? 24) >= 18;
   // The busy half of the old status row, relocated to sit directly above the
   // hint row: spinner + activity phrase + elapsed, with agent/job counts
   // first when delegated work is live. Idle frames render nothing here, which
@@ -3103,7 +3117,9 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
           </Text>
         ))
         : null}
-      {props.composerHint && !minimalHeightDock ? (
+      {showPerformanceReceipt ? (
+        <Text color={W.assistant}>{truncateForDisplayWidth(props.performanceReceipt!, dockWidth)}</Text>
+      ) : props.composerHint && !minimalHeightDock ? (
         <Text {...hintColorProps}>{truncateForDisplayWidth(props.composerHint, dockWidth)}</Text>
       ) : null}
       <Text {...readableTextColorProps(W.borderSoft)}>{formatWorkShellComposerDockDivider(dockWidth)}</Text>
@@ -3282,6 +3298,10 @@ export function WorkShellView(props: {
     props.queuePaused ?? false,
     props.uiLocale ?? "en",
   );
+  const performanceReceipt = formatProviderPerformanceReceipt(
+    props.agentConsole?.lastTurnPerformance,
+    getWorkShellDockWidth(props.terminalColumns),
+  );
   const agentConsoleOpen = props.agentConsole !== undefined && props.agentConsoleView?.open === true;
   const shouldRenderContextInspectorOverlay =
     props.activePanel.title === "Context expanded" && props.contextPacket !== undefined;
@@ -3302,6 +3322,7 @@ export function WorkShellView(props: {
     hasBackgroundWork: activeCounts !== undefined
       && (activeCounts.agents > 0 || activeCounts.jobs > 0),
     hasComposerHint: composerHint !== undefined,
+    hasPerformanceReceipt: performanceReceipt !== undefined,
     liveTraceLineCount: props.liveToolTraceLines?.length ?? 0,
   });
 
@@ -3351,6 +3372,7 @@ export function WorkShellView(props: {
       <WorkShellComposerDock
         composer={props.composer}
         {...(composerHint ? { composerHint } : {})}
+        {...(performanceReceipt ? { performanceReceipt } : {})}
         inputValue={props.inputValue}
         {...(props.cwd ? { cwd: props.cwd } : {})}
         model={props.model}
