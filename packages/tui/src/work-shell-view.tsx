@@ -785,7 +785,7 @@ function normalizeBusyDetail(value: string, uiLocale: "en" | "ko" = "en"): strin
   if (lower.includes("reviewer") || lower.includes("guardian")) {
     return messages.reviewing;
   }
-  if (lower.startsWith("read ") || lower.startsWith("write ") || lower.startsWith("search ")) {
+  if (lower.startsWith("read ") || lower.startsWith("search ")) {
     return messages.readingFiles;
   }
   if (lower.startsWith("calling ")) {
@@ -795,12 +795,22 @@ function normalizeBusyDetail(value: string, uiLocale: "en" | "ko" = "en"): strin
   if (lower.startsWith("model ")) {
     return `${uiLocale === "ko" ? "모델" : "Model"} ${stripped.slice(6).trim()}`;
   }
-  if (
-    lower === "thinking"
-    || lower === "thinking..."
-    || lower === "thinking…"
-    || lower === "reasoning"
-  ) {
+  if (lower.includes("queue")) {
+    return uiLocale === "ko" ? "대기 중" : "Queued";
+  }
+  if (lower.includes("stream") || lower.includes("receiving reply")) {
+    return uiLocale === "ko" ? "응답 수신 중" : "Receiving reply";
+  }
+  if (lower.includes("tool") || lower.startsWith("call ")) {
+    return uiLocale === "ko" ? "도구 실행 중" : "Running tools";
+  }
+  if (lower.includes("verify") || lower.includes("test") || lower.includes("checking result")) {
+    return uiLocale === "ko" ? "결과 확인 중" : "Checking result";
+  }
+  if (lower.startsWith("write ") || lower.includes("edit") || lower.includes("applying changes")) {
+    return uiLocale === "ko" ? "변경 적용 중" : "Applying changes";
+  }
+  if (lower.startsWith("thinking") || lower.startsWith("reasoning")) {
     return uiLocale === "ko" ? "생각 중" : "Thinking";
   }
   if (lower.startsWith("executor") || lower.includes(" parallel ") || lower.includes("task")) {

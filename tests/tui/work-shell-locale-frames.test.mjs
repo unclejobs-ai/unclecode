@@ -48,6 +48,30 @@ test("complete idle and busy frames use one EN/KO catalog", async () => {
   assert.doesNotMatch(koBusy, /Queue a follow-up|Reading context/);
 });
 
+test("Korean busy chrome normalizes reasoning and compact runtime phases without English leakage", async () => {
+  for (const [busyStatus, expected] of [
+    ["✦ thinking· inspect repo", "(?:생각 중|다음 단계 검토 중)"],
+    ["stream response", "응답 수신 중"],
+    ["tool call", "도구 실행 중"],
+    ["verify tests", "결과 확인 중"],
+    ["write file", "변경 적용 중"],
+    ["queue follow-up", "대기 중"],
+  ]) {
+    const koBusy = await frame({
+      uiLocale: "ko",
+      isBusy: true,
+      busyStatus,
+      currentTurnStartedAt: Date.now(),
+      terminalColumns: 60,
+    });
+    assert.match(koBusy, new RegExp(expected, "u"));
+    assert.doesNotMatch(
+      koBusy,
+      /thinking|reasoning|Receiving reply|Running tools|Checking result|Applying changes|Queued|Queue a follow-up/iu,
+    );
+  }
+});
+
 test("queue frame localizes chrome while preserving queued user text byte-for-byte", async () => {
   const userText = "src/한글/파일.ts please keep EXACT";
   const lines = [

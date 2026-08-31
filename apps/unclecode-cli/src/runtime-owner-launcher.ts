@@ -124,6 +124,13 @@ export async function spawnDetachedRuntimeOwner(input: {
     // and kill the otherwise healthy detached owner.
     stdio: ["ignore", "ignore", "ignore"],
   });
+  let exited: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+  let spawnFailure: Error | undefined;
+  // Attach lifecycle observers before any asynchronous identity lookup. A
+  // detached owner can fail immediately, and waiting to observe it until
+  // after that lookup loses the exit event and misreports a startup timeout.
+  child.once("error", (error) => { spawnFailure = error; });
+  child.once("exit", (code, signal) => { exited = { code, signal }; });
   child.unref();
 
   const resolveIdentity = input.resolveProcessStartIdentity ?? processStartIdentity;
@@ -133,10 +140,9 @@ export async function spawnDetachedRuntimeOwner(input: {
     : undefined;
 
   let handedOff = false;
-  let exited: { code: number | null; signal: NodeJS.Signals | null } | undefined;
-  let spawnFailure: Error | undefined;
-  child.once("error", (error) => { spawnFailure = error; });
-  child.once("exit", (code, signal) => { exited = { code, signal }; });
+  if (!exited && (child.exitCode !== null || child.signalCode !== null)) {
+    exited = { code: child.exitCode, signal: child.signalCode };
+  }
   try {
     const deadline = Date.now() + (input.timeoutMs ?? 60_000);
     while (Date.now() <= deadline) {

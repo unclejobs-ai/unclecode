@@ -3,6 +3,9 @@ import { writeFileSync } from "node:fs";
 import path from "node:path";
 
 import {
+  busySpinnerRowPattern,
+  englishBusyChromePattern,
+  koreanBusyStatusPattern,
   realUseFirstPromptText,
   realUseFirstResponseText,
   realUseQueuedPromptText,
@@ -15,7 +18,6 @@ import {
   calculatePaneWidth,
   capturePane,
   IDLE_COMPOSER_PATTERN,
-  lowerBusyActivityRowPattern,
   pressEnter,
   runTmux,
   submitLine,
@@ -91,13 +93,23 @@ export async function runRealUseTuiStress({ port, tmp, observations }) {
     await submitLine(session, realUseFirstPromptText, paneFile);
     const busyPane = await waitForPane(
       session,
-      /preparing context|thinking|Working|Enter queues follow-up/,
+      koreanBusyStatusPattern,
       busyPaneFile,
     );
+    const busyRows = busyPane.split(/\r?\n/u);
+    const spinnerRows = busyRows.filter((line) => busySpinnerRowPattern.test(line));
+    assert.equal(
+      spinnerRows.length,
+      1,
+      "real-use busy state must render exactly one spinner in the composer dock",
+    );
+    const spinnerIndex = busyRows.indexOf(spinnerRows[0]);
+    const hintIndex = busyRows.findIndex((line) => /후속 요청|대기열 추가/u.test(line));
+    assert.ok(hintIndex > spinnerIndex, "real-use follow-up hint must remain below the busy status row");
     assert.doesNotMatch(
       busyPane,
-      lowerBusyActivityRowPattern(),
-      "real-use busy state should rely on the status spinner instead of adding a duplicate lower activity row",
+      englishBusyChromePattern,
+      "Korean real-use turn must keep busy and composer guidance in Korean",
     );
     assert.doesNotMatch(
       busyPane,
@@ -109,8 +121,8 @@ export async function runRealUseTuiStress({ port, tmp, observations }) {
     await waitForPane(session, new RegExp(escapeRegExp(realUseQueuedPromptText)), queuePaneFile);
     const queuedSubmitStartedAt = Date.now();
     await pressEnter(session);
-    const queuePane = await waitForPane(session, /queued|follow-up|\/queue/i, queuePaneFile);
-    assert.match(queuePane, /queued|follow-up|\/queue/i);
+    const queuePane = await waitForPane(session, /queued|follow-up|대기열|후속 요청|\/queue/i, queuePaneFile);
+    assert.match(queuePane, /queued|follow-up|대기열|후속 요청|\/queue/i);
 
     await waitForPane(session, new RegExp(escapeRegExp(realUseFirstResponseText)), paneFile);
     const firstReplyMs = Date.now() - firstSubmitStartedAt;
@@ -213,5 +225,7 @@ export async function runRealUseTuiStress({ port, tmp, observations }) {
 }
 
 function normalizeIdlePane(pane) {
-  return pane.replace(/Ready · last(?: reply)? \d+(?:\.\d+)?s/g, "Ready · last <age>");
+  return pane
+    .replace(/Ready · last(?: reply)? \d+(?:\.\d+)?s/g, "Ready · last <age>")
+    .replace(/준비 완료 · 최근(?: 응답)? \d+(?:\.\d+)?s/g, "준비 완료 · 최근 <age>");
 }

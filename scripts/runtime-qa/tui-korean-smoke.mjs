@@ -3,6 +3,8 @@ import { writeFileSync } from "node:fs";
 import path from "node:path";
 
 import {
+  busySpinnerRowPattern,
+  englishBusyChromePattern,
   koreanBusyPromptText,
   koreanBusyResponseText,
   koreanBusyStatusPattern,
@@ -11,7 +13,6 @@ import {
 import { escapeRegExp, run, shellQuote } from "./cli-helpers.mjs";
 import {
   calculatePaneWidth,
-  lowerBusyActivityRowPattern,
   pressEnter,
   runTmux,
   typeKeys,
@@ -87,14 +88,19 @@ export async function runKoreanBusyTuiSmoke({ port, tmp, observations }) {
     assert.match(busyPane, koreanBusyStatusPattern);
     assert.doesNotMatch(
       busyPane,
-      /Preparing context|Thinking|Working|Enter queues follow-up/,
+      englishBusyChromePattern,
       "Korean work status must not leak English runtime guidance",
     );
-    assert.doesNotMatch(
-      busyPane,
-      lowerBusyActivityRowPattern("thinking"),
-      "Korean busy state should rely on the status spinner instead of adding a duplicate lower activity row",
+    const busyRows = busyPane.split(/\r?\n/u);
+    const spinnerRows = busyRows.filter((line) => busySpinnerRowPattern.test(line));
+    assert.equal(
+      spinnerRows.length,
+      1,
+      `Korean busy state must render exactly one spinner row, received:\n${busyPane}`,
     );
+    const spinnerIndex = busyRows.indexOf(spinnerRows[0]);
+    const hintIndex = busyRows.findIndex((line) => /후속 요청|대기열 추가/u.test(line));
+    assert.ok(hintIndex > spinnerIndex, "Korean follow-up hint must remain below the single busy status row");
     assert.doesNotMatch(
       busyPane,
       /Work context · session state|╭─|╰─/,

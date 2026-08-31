@@ -372,7 +372,10 @@ function fixtureOwnerOptions(root, extras = {}) {
   return {
     leasePath: join(root, "owner.json"),
     tokenPath: join(root, "owner.token"),
-    timeoutMs: 1_000,
+    // Starting the fixture Node process can exceed one second on a loaded CI
+    // runner. Keep this comfortably below the product's 60s startup budget
+    // while still testing that the observed exit wins over timeout.
+    timeoutMs: 5_000,
     resolveProcessStartIdentity: async () => "fixture-process-start",
     ...extras,
   };
@@ -382,16 +385,27 @@ test("early owner exit removes only its exact owner and process-start lease", as
   const root = await mkdtemp(join(tmpdir(), "unclecode-owner-early-exit-"));
   const leasePath = join(root, "owner.json");
   const seen = {};
+  let fixtureChild;
   await assert.rejects(
     spawnDetachedRuntimeOwner({
       leasePath,
       tokenPath: join(root, "owner.token"),
-      timeoutMs: 1_000,
-      resolveProcessStartIdentity: async () => "fixture-process-start",
+      timeoutMs: 5_000,
+      resolveProcessStartIdentity: async () => {
+        assert.ok(fixtureChild, "fixture child should exist before identity resolution");
+        if (fixtureChild.exitCode === null && fixtureChild.signalCode === null) {
+          await new Promise((resolve, reject) => {
+            fixtureChild.once("exit", resolve);
+            fixtureChild.once("error", reject);
+          });
+        }
+        return "fixture-process-start";
+      },
       spawnProcess: (_command, args, options) => {
         seen.ownerId = flagValue(args, "--owner-id");
         seen.bootId = flagValue(args, "--boot-id");
-        return spawnLeaseThenExit(args, options);
+        fixtureChild = spawnLeaseThenExit(args, options);
+        return fixtureChild;
       },
     }),
     /exited before publishing a healthy lease \(23\)/,

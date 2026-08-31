@@ -7965,7 +7965,7 @@ test("WorkShellEngine honors an explicitly configured locale lock across turns",
   assert.equal(calls.snapshots.at(-1)?.uiLocale, "ko");
 });
 
-test("WorkShellEngine keeps chrome locale stable while each provider turn follows user prose", async () => {
+test("WorkShellEngine switches unlocked chrome and provider locale together per user turn", async () => {
   const previousLcAll = process.env.LC_ALL;
   try {
     for (const fixture of [
@@ -8007,20 +8007,22 @@ test("WorkShellEngine keeps chrome locale stable while each provider turn follow
       assert.equal(engine.getState().uiLocaleLocked, false);
 
       await engine.handleSubmit(fixture.first);
-      assert.equal(engine.getState().uiLocale, fixture.initial);
+      assert.equal(engine.getState().uiLocale, fixture.firstLocale);
       assert.equal(engine.getState().uiLocaleLocked, false);
       assert.match(calls.turns[0], fixture.firstInstruction);
+      assert.equal(calls.snapshots.at(-1)?.uiLocale, fixture.firstLocale);
 
       await engine.handleSubmit(fixture.later);
-      assert.equal(engine.getState().uiLocale, fixture.initial);
+      assert.equal(engine.getState().uiLocale, fixture.laterLocale);
       assert.equal(engine.getState().uiLocaleLocked, false);
       assert.match(calls.turns[1], fixture.laterInstruction);
+      assert.equal(calls.snapshots.at(-1)?.uiLocale, fixture.laterLocale);
 
       await engine.handleSubmit("./fixtures/한국어.json");
-      assert.equal(engine.getState().uiLocale, fixture.initial);
+      assert.equal(engine.getState().uiLocale, fixture.laterLocale);
       assert.match(
         calls.turns[2],
-        fixture.initial === "ko"
+        fixture.laterLocale === "ko"
           ? /^이번 요청에는 한국어로 답변하세요/u
           : /^Respond in English for this turn/u,
       );
@@ -8071,7 +8073,7 @@ test("WorkShellEngine ignores local command prose until the first provider-bound
   }
 });
 
-test("WorkShellEngine detects provider-turn locale from prompt-command focus without relocalizing chrome", async () => {
+test("WorkShellEngine switches unlocked chrome and provider locale from prompt-command focus", async () => {
   const previousLcAll = process.env.LC_ALL;
   try {
     process.env.LC_ALL = "ko_KR.UTF-8";
@@ -8083,16 +8085,17 @@ test("WorkShellEngine detects provider-turn locale from prompt-command focus wit
     await engine.initialize();
 
     await engine.handleSubmit("/review Handle the authentication flow");
-    assert.equal(engine.getState().uiLocale, "ko");
+    assert.equal(engine.getState().uiLocale, "en");
     assert.equal(engine.getState().uiLocaleLocked, false);
     assert.match(calls.turns[0], /^Respond in English for this turn/u);
+    assert.equal(calls.snapshots.at(-1)?.uiLocale, "en");
   } finally {
     if (previousLcAll === undefined) delete process.env.LC_ALL;
     else process.env.LC_ALL = previousLcAll;
   }
 });
 
-test("WorkShellEngine keeps persisted chrome locale while an unlocked provider turn follows new prose", async () => {
+test("WorkShellEngine updates persisted unlocked locale when a resumed turn changes language", async () => {
   const { engine, calls } = createEngine({
     options: {
       provider: "openai",
@@ -8116,12 +8119,12 @@ test("WorkShellEngine keeps persisted chrome locale while an unlocked provider t
   assert.equal(engine.getState().uiLocaleLocked, false);
 
   await engine.handleSubmit("Explain the resumed work");
-  assert.equal(engine.getState().uiLocale, "ko");
+  assert.equal(engine.getState().uiLocale, "en");
   assert.match(calls.turns[0], /^Respond in English for this turn/u);
-  assert.equal(calls.snapshots.at(-1)?.uiLocale, "ko");
+  assert.equal(calls.snapshots.at(-1)?.uiLocale, "en");
 });
 
-test("WorkShellEngine keeps chrome stable while queued turns retain their own response locale", async () => {
+test("WorkShellEngine advances unlocked chrome locale as queued turns begin", async () => {
   let releaseFirst;
   const prompts = [];
   const { engine } = createEngine({
@@ -8146,10 +8149,10 @@ test("WorkShellEngine keeps chrome stable while queued turns retain their own re
   while (!engine.getState().isBusy || typeof releaseFirst !== "function") {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
-  assert.equal(engine.getState().uiLocale, "en");
+  assert.equal(engine.getState().uiLocale, "ko");
 
   await engine.handleSubmit("Explain the queued follow-up");
-  assert.equal(engine.getState().uiLocale, "en");
+  assert.equal(engine.getState().uiLocale, "ko");
   assert.equal(engine.getState().queuedCount, 1);
 
   releaseFirst();
@@ -8162,6 +8165,55 @@ test("WorkShellEngine keeps chrome stable while queued turns retain their own re
     "Explain the queued follow-up",
   ]);
   assert.equal(engine.getState().uiLocale, "en");
+});
+
+test("WorkShellEngine keeps bare review local and bare commit in the active unlocked UI language", async () => {
+  for (const fixture of [
+    {
+      locale: "ko",
+      instruction: /^이번 요청에는 한국어로 답변하세요/u,
+      opposite: /Respond in English for this turn/u,
+    },
+    {
+      locale: "en",
+      instruction: /^Respond in English for this turn/u,
+      opposite: /이번 요청에는 한국어로 답변하세요/u,
+    },
+  ]) {
+    const { engine, calls } = createEngine({
+      options: {
+        provider: "openai",
+        model: "gpt-5.4",
+        mode: "default",
+        authLabel: "api-key-env",
+        reasoning: supportedReasoning,
+        cwd: "/repo",
+        contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+        initialUiLocale: fixture.locale,
+        initialUiLocaleLocked: false,
+      },
+      resolveWorkShellSlashCommand(input) {
+        if (input === "/review") return ["prompt", "review"];
+        if (input === "/commit") return ["prompt", "commit"];
+        return undefined;
+      },
+    });
+    await engine.initialize();
+
+    await engine.handleSubmit("/review");
+    assert.equal(calls.turns.length, 0);
+    assert.equal(engine.getState().uiLocale, fixture.locale);
+    await engine.handleSubmit("/commit");
+
+    assert.equal(engine.getState().uiLocale, fixture.locale);
+    assert.equal(engine.getState().uiLocaleLocked, false);
+    assert.equal(calls.turns.length, 1);
+    for (const prompt of calls.turns) {
+      assert.match(prompt, fixture.instruction);
+      assert.doesNotMatch(prompt, fixture.opposite);
+    }
+    assert.equal(calls.snapshots.at(-1)?.uiLocale, fixture.locale);
+  }
 });
 
 test("WorkShellEngine keeps bridge bookkeeping and unproven memory out of the transcript", async () => {

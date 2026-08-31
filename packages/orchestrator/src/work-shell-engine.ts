@@ -2781,7 +2781,7 @@ export class WorkShellEngine<
               turnEpoch,
               prompt: contextPacket
                 ? this.composeProviderPrompt(contextPacket, prompt)
-                : this.decorateProviderPrompt(prompt, prompt),
+                : this.decorateProviderPrompt(prompt),
               classificationPrompt: prompt,
               attachments,
               signal: abortController.signal,
@@ -2912,7 +2912,7 @@ export class WorkShellEngine<
               turnEpoch,
               prompt: contextPacket
                 ? this.composeProviderPrompt(contextPacket, prompt)
-                : this.decorateProviderPrompt(prompt, prompt),
+                : this.decorateProviderPrompt(prompt),
               classificationPrompt: prompt,
               attachments,
               signal: abortController.signal,
@@ -3998,14 +3998,15 @@ export class WorkShellEngine<
     const providerPrompt = this.resolvePromptManifest
       ? this.resolvePromptManifest({ packet, userPrompt }).providerPrompt
       : composeWorkShellTurnPromptFromPacket({ packet, userPrompt });
-    return this.decorateProviderPrompt(providerPrompt, userPrompt);
+    return this.decorateProviderPrompt(providerPrompt);
   }
 
-  private decorateProviderPrompt(providerPrompt: string, userPrompt: string): string {
-    const turnLocale = this.state.uiLocaleLocked
-      ? this.state.uiLocale
-      : detectWorkShellUserLocale(userPrompt) ?? this.state.uiLocale;
-    return `${workShellLanguageInstruction(turnLocale)}\n\n${providerPrompt}`;
+  private decorateProviderPrompt(providerPrompt: string): string {
+    // `handleSubmit` resolves the locale from the operator's route before the
+    // shell becomes busy. Do not re-detect from generated prompt-command prose
+    // here: bare /review and /commit prompts are internally English even when
+    // the user's active UI and response language are Korean.
+    return `${workShellLanguageInstruction(this.state.uiLocale)}\n\n${providerPrompt}`;
   }
 
   private async refreshContextPacket(

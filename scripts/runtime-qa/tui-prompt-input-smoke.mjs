@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 
 import {
+  englishBusyChromePattern,
   koreanBusyPromptText,
   koreanBusyResponseText,
   koreanBusyStatusPattern,
@@ -91,7 +92,7 @@ export async function runPromptInputTuiSmoke({ port, tmp, observations }) {
     );
     assert.doesNotMatch(
       busyPane,
-      /Preparing context|Thinking|Working|Queue a follow-up|Enter queue/,
+      englishBusyChromePattern,
       "Korean prompt input must switch busy and composer guidance before the reply",
     );
     await typeKeys(session, realUseQueuedPromptText);
