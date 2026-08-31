@@ -35,6 +35,81 @@ export type WorkShellSubmitAction =
   | { readonly type: "submit"; readonly line: string; readonly clearInput: true }
   | { readonly type: "submit-suggestion"; readonly line: string; readonly clearInput: true };
 
+export type WorkShellTranscriptNavigationAction =
+  | { readonly type: "none" }
+  | { readonly type: "page"; readonly direction: -1 | 1 }
+  | { readonly type: "latest" };
+
+type WorkShellTranscriptNavigationKey = {
+  readonly pageUp?: boolean;
+  readonly pageDown?: boolean;
+  readonly end?: boolean;
+};
+
+const WORK_SHELL_TRANSCRIPT_NAVIGATION_NONE: WorkShellTranscriptNavigationAction = { type: "none" };
+const WORK_SHELL_KITTY_PAGE_UP_RE = /^\u001b\[57421(?:;\d+(?::\d+)?)?u$/u;
+const WORK_SHELL_KITTY_PAGE_DOWN_RE = /^\u001b\[57422(?:;\d+(?::\d+)?)?u$/u;
+const WORK_SHELL_KITTY_END_RE = /^\u001b\[57424(?:;\d+(?::\d+)?)?u$/u;
+
+/**
+ * Normalize the terminal key paths that Ink exposes to the work-shell
+ * controller. Ink's legacy parser maps the common VT/SS3/modified CSI paths
+ * to `pageUp`, `pageDown`, and `end`; the explicit flags are intentionally
+ * preferred because they are already de-duplicated by Ink's input parser.
+ */
+export function resolveWorkShellTranscriptNavigation(input: {
+  readonly value: string;
+  readonly key: WorkShellTranscriptNavigationKey;
+}): WorkShellTranscriptNavigationAction {
+  if (input.key.pageUp) return { type: "page", direction: -1 };
+  if (input.key.pageDown) return { type: "page", direction: 1 };
+  if (input.key.end) return { type: "latest" };
+
+  // A terminal with the Kitty keyboard protocol enabled can report keypad
+  // PgUp/PgDn/End as CSI-u private codepoints. Ink correctly recognizes these
+  // as `kppageup`, `kppagedown`, and `kpend`, but its public useInput key
+  // object intentionally only exposes the non-keypad flags. The controller's
+  // raw event fallback calls this function with the original sequence.
+  if (isWorkShellKittyKeypadSequence(input.value, 57421)) {
+    return { type: "page", direction: -1 };
+  }
+  if (isWorkShellKittyKeypadSequence(input.value, 57422)) {
+    return { type: "page", direction: 1 };
+  }
+  if (isWorkShellKittyKeypadSequence(input.value, 57424)) {
+    return { type: "latest" };
+  }
+  return WORK_SHELL_TRANSCRIPT_NAVIGATION_NONE;
+}
+
+/**
+ * Decode only the Kitty keypad fallback sequences that Ink cannot expose as
+ * page/end flags. Keeping this separate prevents a raw-event listener from
+ * dispatching the ordinary `[5~`/`[6~` events a second time after useInput has
+ * already handled them.
+ */
+export function resolveWorkShellRawTranscriptNavigation(
+  value: string,
+): WorkShellTranscriptNavigationAction {
+  if (isWorkShellKittyKeypadSequence(value, 57421)) {
+    return { type: "page", direction: -1 };
+  }
+  if (isWorkShellKittyKeypadSequence(value, 57422)) {
+    return { type: "page", direction: 1 };
+  }
+  if (isWorkShellKittyKeypadSequence(value, 57424)) {
+    return { type: "latest" };
+  }
+  return WORK_SHELL_TRANSCRIPT_NAVIGATION_NONE;
+}
+
+function isWorkShellKittyKeypadSequence(value: string, codepoint: number): boolean {
+  if (codepoint === 57421) return WORK_SHELL_KITTY_PAGE_UP_RE.test(value);
+  if (codepoint === 57422) return WORK_SHELL_KITTY_PAGE_DOWN_RE.test(value);
+  if (codepoint === 57424) return WORK_SHELL_KITTY_END_RE.test(value);
+  return false;
+}
+
 export function resolveWorkShellInputAction(input: {
   readonly value: string;
   readonly key: {

@@ -23,6 +23,13 @@ import {
 
 const KEY_PAGE_UP = "\u001b[5~";
 const KEY_PAGE_DOWN = "\u001b[6~";
+// Kitty's keypad page keys are emitted as CSI-u codepoints when Ink enables
+// the enhanced keyboard protocol. Ink parses these as `kppageup` /
+// `kppagedown`, which are not exposed through its pageUp/pageDown booleans.
+const KEY_KITTY_PAGE_UP = "\u001b[57421u";
+const KEY_KITTY_PAGE_DOWN = "\u001b[57422u";
+const KEY_END = "\u001b[4~";
+const KEY_KITTY_END = "\u001b[57424u";
 const KEY_ESCAPE = "\u001b";
 
 function padScrollbackIndex(index) {
@@ -148,6 +155,12 @@ function createWorkShellPaneEngine(overrides = {}) {
     submittedLines,
     emitEntries: (entries) => {
       state = { ...state, entries };
+      for (const listener of listeners) {
+        listener(state);
+      }
+    },
+    emitState: (patch) => {
+      state = { ...state, ...patch };
       for (const listener of listeners) {
         listener(state);
       }
@@ -692,6 +705,140 @@ test("PageUp works with text in the composer and keeps the draft", async () => {
     assert.match(scrolled, /↑ \d+ earlier rows · Fn\+Up\/PageUp · ↓ \d+ newer rows · Fn\+Down\/PageDown · Esc latest/);
     // Scrolling is not a print key: the draft survives it.
     assert.match(scrolled, /› hello/);
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
+test("Kitty CSI-u PageUp/PageDown scroll the transcript through the real input path", async () => {
+  const { engine } = createWorkShellPaneEngine();
+  const { stdin, instance, getOutput } = renderScrollbackPane(engine);
+
+  try {
+    assert.ok(await waitForNewestEntry(getOutput));
+    stdin.write(KEY_KITTY_PAGE_UP);
+    assert.ok(
+      await waitForCondition(() => getLastWorkFrame(getOutput()).includes("earlier rows")),
+      "Kitty keypad PageUp must move the transcript",
+    );
+    const scrolled = getLastWorkFrame(getOutput());
+    assert.ok(scrolled.includes(`sb-${String(TRANSCRIPT_ENTRY_COUNT - 2 * TRANSCRIPT_CAPACITY).padStart(4, "0")}`));
+    assert.ok(!scrolled.includes(`sb-${String(TRANSCRIPT_ENTRY_COUNT - 1).padStart(4, "0")}`));
+
+    stdin.write(KEY_KITTY_PAGE_DOWN);
+    assert.ok(await waitForNewestEntry(getOutput), "Kitty keypad PageDown must return to the newest entries");
+    assert.ok(!getLastWorkFrame(getOutput()).includes("earlier rows"));
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
+test("End and Kitty keypad End return a scrolled transcript to the latest entry", async () => {
+  const { engine } = createWorkShellPaneEngine();
+  const { stdin, instance, getOutput } = renderScrollbackPane(engine);
+
+  try {
+    assert.ok(await waitForNewestEntry(getOutput));
+    stdin.write(KEY_PAGE_UP);
+    assert.ok(await waitForCondition(() => getLastWorkFrame(getOutput()).includes("earlier rows")));
+
+    stdin.write(KEY_END);
+    assert.ok(
+      await waitForCondition(() => getLastWorkFrame(getOutput()).includes("sb-0059")),
+      "End must return to latest",
+    );
+    assert.ok(!getLastWorkFrame(getOutput()).includes("earlier rows"));
+
+    stdin.write(KEY_PAGE_UP);
+    assert.ok(await waitForCondition(() => getLastWorkFrame(getOutput()).includes("earlier rows")));
+    stdin.write(KEY_KITTY_END);
+    assert.ok(
+      await waitForCondition(() => getLastWorkFrame(getOutput()).includes("sb-0059")),
+      "Kitty keypad End must return to latest",
+    );
+    assert.ok(!getLastWorkFrame(getOutput()).includes("earlier rows"));
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
+test("Kitty PageUp keeps a non-empty draft and does not submit it", async () => {
+  const { engine, submittedLines } = createWorkShellPaneEngine();
+  const { stdin, instance, getOutput } = renderScrollbackPane(engine);
+
+  try {
+    assert.ok(await waitForNewestEntry(getOutput));
+    stdin.write("한글 draft");
+    assert.ok(await waitForCondition(() => getLastWorkFrame(getOutput()).includes("한글 draft")));
+
+    stdin.write(KEY_KITTY_PAGE_UP);
+    assert.ok(await waitForCondition(() => getLastWorkFrame(getOutput()).includes("earlier rows")));
+    assert.match(getLastWorkFrame(getOutput()), /› 한글 draft/);
+    assert.deepEqual(submittedLines, []);
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
+test("raw PageUp belongs to an open context overlay instead of scrolling behind it", async () => {
+  const contextPageCalls = [];
+  const harness = createWorkShellPaneEngine({
+    panel: { title: "Context expanded", lines: ["Context desk"] },
+    contextInspectorOpen: true,
+    contextInspectorPane: "sources",
+    contextInspectorCollection: "all",
+  });
+  harness.engine.moveContextInspectorPage = (direction) => {
+    contextPageCalls.push(direction);
+  };
+  const { stdin, instance, getOutput } = renderScrollbackPane(harness.engine);
+
+  try {
+    assert.ok(await waitForNewestEntry(getOutput));
+    stdin.write(KEY_KITTY_PAGE_UP);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    assert.deepEqual(contextPageCalls, [-1]);
+    assert.ok(!getLastWorkFrame(getOutput()).includes("earlier rows"));
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
+test("content-addressed transcript anchor survives streaming growth and appended entries", async () => {
+  const entries = createScrollbackEntries().map((entry, index) => ({
+    ...entry,
+    id: `entry-${index}`,
+  }));
+  const harness = createWorkShellPaneEngine({ entries });
+  const { stdin, instance, getOutput } = renderScrollbackPane(harness.engine);
+
+  try {
+    assert.ok(await waitForCondition(() => getLastWorkFrame(getOutput()).includes("sb-0059")));
+    stdin.write(KEY_PAGE_UP);
+    assert.ok(await waitForCondition(() => getLastWorkFrame(getOutput()).includes("earlier rows")));
+    const anchoredFrame = getLastWorkFrame(getOutput());
+    assert.ok(anchoredFrame.includes("sb-0040"));
+
+    harness.emitState({ streamingAssistantText: "새 답변이 스트리밍 중입니다" });
+    assert.ok(await waitForCondition(() => getLastWorkFrame(getOutput()).includes("earlier rows")));
+    const streamingFrame = getLastWorkFrame(getOutput());
+    assert.ok(streamingFrame.includes("sb-0040"));
+    assert.ok(!streamingFrame.includes("sb-0059"));
+
+    harness.emitState({
+      entries: [...entries, { id: "fresh", role: "user", text: "새 후속 요청" }],
+      streamingAssistantText: undefined,
+    });
+    assert.ok(await waitForCondition(() => getLastWorkFrame(getOutput()).includes("earlier rows")));
+    const appendedFrame = getLastWorkFrame(getOutput());
+    assert.ok(appendedFrame.includes("sb-0040"));
+    assert.ok(!appendedFrame.includes("새 후속 요청"));
+    assert.ok(!appendedFrame.includes("sb-0059"));
   } finally {
     instance.unmount();
     instance.cleanup();

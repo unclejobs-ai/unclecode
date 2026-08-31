@@ -1,4 +1,4 @@
-import { useInput } from "ink";
+import { useInput, useStdin } from "ink";
 import {
   type SetStateAction,
   useCallback,
@@ -49,6 +49,8 @@ import {
 import {
   resolveWorkShellContextInspectorAction,
   resolveWorkShellInputAction,
+  resolveWorkShellRawTranscriptNavigation,
+  resolveWorkShellTranscriptNavigation,
   resolveWorkShellSubmitAction,
 } from "./work-shell-input.js";
 import {
@@ -849,6 +851,79 @@ export function useWorkShellInputController(input: {
   readonly agentConsole?: WorkShellAgentConsoleKeyboard | undefined;
 }): { readonly submit: (value: string) => Promise<boolean> } {
   const escapeResetArmedAtRef = useRef<number | undefined>(undefined);
+  const { stdin } = useStdin();
+  const rawTranscriptNavigationRef = useRef<(value: unknown) => void>(() => undefined);
+
+  // Ink's public `useInput` flags cover the normal VT/SS3 PageUp/PageDown and
+  // End sequences, but Kitty's CSI-u keypad variants are delivered to the
+  // stdin stream as `kppageup`/`kppagedown`/`kpend` and then become an empty
+  // value with no public flag. Subscribe at the raw stream boundary so the
+  // fallback is part of the same ownership ladder as ordinary keys. The ref
+  // keeps this listener stable while giving it the latest overlay/draft state;
+  // re-subscribing on every render would race a partially delivered escape
+  // sequence and make key ownership flicker.
+  rawTranscriptNavigationRef.current = (rawValue: unknown): void => {
+    if (typeof rawValue !== "string") return;
+    const navigation = resolveWorkShellRawTranscriptNavigation(rawValue);
+    if (navigation.type === "none") return;
+
+    const telemetryPanelOpen =
+      input.activePanelTitle === "Cache Telemetry"
+      || input.activePanelTitle === "Agent History";
+    const contextDeskOwnsKeyboard = input.contextInspectorOpen
+      ?? input.activePanelTitle === "Context expanded";
+    const transcriptOverlayOpen = isShellActionKeyOverlayOpen({
+      hasOverlayOpen: input.hasOverlayOpen,
+      contextInspectorOpen: input.contextInspectorOpen,
+      telemetryPanelOpen,
+      agentConsoleOpen: input.agentConsoleOpen,
+      activeSlashInput: input.activeSlashInput,
+    });
+
+    // Queue, agent-console, telemetry, slash-picker, and generic overlays are
+    // authoritative owners. A raw page key must not leak through and move the
+    // transcript underneath an overlay that cannot render that movement.
+    if (input.queueOverlayOpen === true || transcriptOverlayOpen) {
+      if (
+        navigation.type === "page"
+        && input.hasOverlayOpen
+        && contextDeskOwnsKeyboard
+      ) {
+        input.moveContextInspectorPage?.(navigation.direction);
+      }
+      return;
+    }
+    if (contextDeskOwnsKeyboard) {
+      if (navigation.type === "page") {
+        input.moveContextInspectorPage?.(navigation.direction);
+      }
+      return;
+    }
+
+    if (navigation.type === "page") {
+      input.moveTranscriptPage?.(navigation.direction);
+      return;
+    }
+    if (
+      navigation.type === "latest"
+      && input.transcriptScrolledUp
+      && input.returnTranscriptToNewest
+      && !input.isBusy
+      && input.composerMode !== "api-key-entry"
+    ) {
+      input.returnTranscriptToNewest();
+    }
+  };
+
+  useEffect(() => {
+    const onInput = (value: unknown): void => {
+      rawTranscriptNavigationRef.current(value);
+    };
+    stdin.on("data", onInput);
+    return () => {
+      stdin.removeListener("data", onInput);
+    };
+  }, [stdin]);
 
   // The controller's own submit — the exact route Enter takes on a typed
   // line. Defined ahead of `useInput` so single-key dispatches (`?` → /help)
@@ -1193,14 +1268,15 @@ export function useWorkShellInputController(input: {
       // when a draft has already taken the desk branch out of play — the
       // transcript is not rendered there, so a scroll would be invisible.
       || contextDeskOwnsKeyboard;
+    const transcriptNavigation = resolveWorkShellTranscriptNavigation({ value, key });
     if (
       !key.ctrl
       && !transcriptScrollOverlayOpen
-      && (key.pageUp || key.pageDown)
+      && transcriptNavigation.type === "page"
       && input.moveTranscriptPage
     ) {
       escapeResetArmedAtRef.current = undefined;
-      input.moveTranscriptPage(key.pageUp ? -1 : 1);
+      input.moveTranscriptPage(transcriptNavigation.direction);
       return;
     }
     // Esc gains one meaning: while the transcript is scrolled, an Esc that no
@@ -1219,6 +1295,19 @@ export function useWorkShellInputController(input: {
       && !input.isBusy
       && input.composerMode !== "api-key-entry"
       && composerRawEmpty
+    ) {
+      escapeResetArmedAtRef.current = undefined;
+      input.returnTranscriptToNewest();
+      return;
+    }
+    if (
+      !key.ctrl
+      && !transcriptScrollOverlayOpen
+      && transcriptNavigation.type === "latest"
+      && input.transcriptScrolledUp
+      && input.returnTranscriptToNewest
+      && !input.isBusy
+      && input.composerMode !== "api-key-entry"
     ) {
       escapeResetArmedAtRef.current = undefined;
       input.returnTranscriptToNewest();
