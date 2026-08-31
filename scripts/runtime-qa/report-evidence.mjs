@@ -145,12 +145,13 @@ function buildProviderToolCallEvidence(smoke, functionResponseIdRequired = true)
 
 function buildContextEvidence(realUseTuiStress) {
   const contextPane = realUseTuiStress?.contextPaneExcerpt ?? "";
-  const includedHeader = /Sources · \d+ included|Included in next answer/.test(contextPane);
-  const heldBackHeader = /\d+ held back|Held back locally/.test(contextPane);
-  const warningsHeader = /Warnings · (?:none|\d+)|✓ none|\d+ warnings?/i.test(contextPane);
+  const panelHeader = /Context Desk|컨텍스트 작업대/u.test(contextPane);
+  const includedHeader = /Sources · \d+ (?:sent|included)|Included in next answer|소스 · \d+개 전송/u.test(contextPane);
+  const heldBackHeader = /\d+ (?:held|held back)|Held back locally|\d+개 보류/u.test(contextPane);
+  const warningsHeader = /Warnings · (?:none|\d+)|✓ none|\d+ warnings?|경고 \d+개|Context packet looks ready|컨텍스트 패킷이 .*준비/u.test(contextPane);
   const packetTransparency = realUseTuiStress?.contextPacketTransparency === true;
   return {
-    contextPanelVisible: /UncleCode Context Desk/.test(contextPane) && includedHeader,
+    contextPanelVisible: panelHeader && includedHeader,
     modelBoundPackets: packetTransparency,
     includedExcludedWarnings:
       packetTransparency &&

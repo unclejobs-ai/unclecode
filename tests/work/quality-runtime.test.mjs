@@ -2215,6 +2215,39 @@ test("tampering with the immutable packet during critic blocks instead of crashi
   }
 });
 
+test("an invalid immutable review packet is blocked before run evidence is persisted", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-invalid-packet-order-"));
+  const traces = [];
+  const originalPersistReviewPacket = orchestrator.QualityArtifactStore.prototype.persistReviewPacket;
+  orchestrator.QualityArtifactStore.prototype.persistReviewPacket = () => {
+    throw new Error("simulated immutable packet persistence failure");
+  };
+
+  try {
+    const agent = createDirectoryQualityAgent({ workspace, traces });
+    const result = await agent.runTurn("refactor src/runtime.ts and src/nested/tests.ts");
+
+    assert.equal(result.qualityStatus, "block");
+    const criticGate = traces.find((event) =>
+      event.type === "quality.gate_evaluated" && event.stage === "critic"
+    );
+    assert.ok(criticGate?.failures.includes("IMMUTABLE_REVIEW_PACKET_ARTIFACT_INVALID"));
+
+    const persistedPaths = readdirSync(
+      path.join(workspace, ".unclecode", "artifacts"),
+      { recursive: true },
+    ).map(String);
+    assert.equal(
+      persistedPaths.some((artifactPath) => /^run(?:-iteration-\d+)?\.json$/u.test(path.basename(artifactPath))),
+      false,
+      "invalid review packets must not produce trusted run evidence",
+    );
+  } finally {
+    orchestrator.QualityArtifactStore.prototype.persistReviewPacket = originalPersistReviewPacket;
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("directory ownership detects a file created during critic", async () => {
   const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-dir-critic-"));
   try {

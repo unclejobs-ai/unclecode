@@ -31,6 +31,12 @@ packages/*/src/*.d.ts
 packages/*/src/*.d.ts.map
 packages/*/src/*.js
 packages/*/src/*.js.map
+# Orchestrator source is TypeScript-only; direct tsc invocations must not spill
+# nested compiler output into the source tree.
+packages/orchestrator/src/**/*.d.ts
+packages/orchestrator/src/**/*.d.ts.map
+packages/orchestrator/src/**/*.js
+packages/orchestrator/src/**/*.js.map
 apps/*/dist/
 .worktrees/
 .factory/

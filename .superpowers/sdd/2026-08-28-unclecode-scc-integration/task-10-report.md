@@ -2,7 +2,7 @@
 
 - Date: 2026-08-30
 - Implementation snapshot: `5d91eafd`
-- Status: implemented; one original scale target remains an explicit final-matrix item
+- Status: complete; the 100,000-event production-shaped scale target passed
 
 ## Outcome
 
@@ -64,7 +64,13 @@ The committed tests cover:
 - 10,000-operation LRU churn and oversized-entry rejection for retained-byte telemetry;
 - repo-map cache churn, in-flight coalescing, different-head ordering and large-map byte estimation.
 
-The Task 10 brief also requested one production-shaped path with at least 100,000 exact event publications. The current committed evidence does not contain a single 100k end-to-end publication run. The figures above are independent tests and are not added together to manufacture that claim. The exact 100k run remains a final-matrix evidence item or, if not run, a stated limitation.
+The Task 10 brief also requested one production-shaped path with at least 100,000 exact event publications. The final run used the same runtime-owner/cache/plugin/SSE soak and raised only `usageEvents` to `100000`:
+
+```text
+node --expose-gc --disable-warning=ExperimentalWarning --conditions=source --import tsx --input-type=module --eval 'import("./scripts/runtime-qa/runtime-memory-soak.mjs").then(async ({runRuntimeMemorySoak}) => { const report = await runRuntimeMemorySoak({ usageEvents: 100000 }); process.stdout.write(JSON.stringify(report) + "\n"); })'
+```
+
+It completed in 17.7 seconds with 100,000 exact recorded identities, 300,000 input tokens, 64 agent aggregates, one route aggregate and a 12,439,552-byte SQLite database. The duplicate sentinel remained a duplicate and the materialized totals matched exactly.
 
 ## Runtime memory and cleanup soak
 
@@ -74,13 +80,13 @@ Command shape:
 node --expose-gc --disable-warning=ExperimentalWarning --conditions=source --import tsx scripts/runtime-qa/runtime-memory-soak.mjs
 ```
 
-The production-shaped soak uses 768 owner sessions, 128 SSE reconnects, 1,500 cache writes, 2,500 usage events and 512 plugin reloads. Recorded forced-GC evidence:
+The final production-shaped scale soak uses 768 owner sessions, 128 SSE reconnects, 1,500 cache writes, 100,000 exact usage events and 512 plugin reloads. Recorded forced-GC evidence:
 
 | Measurement | Result | Bound/result |
 | --- | ---: | --- |
-| Heap delta | +2,536,296 bytes | under 32 MiB forced-GC bound |
+| Heap delta | +2,511,800 bytes | under 32 MiB forced-GC bound |
 | Active handles | 2 -> 2 | delta 0 |
-| File descriptors | 18 -> 18 | delta 0 |
+| File descriptors | 13 -> 13 | delta 0 |
 | Retained owner sessions before stop | 256 / 768 created | at configured cap |
 | Retained owner sessions after stop | 0 | pass |
 | Active SSE subscribers after reconnect cycle | 0 | pass |
@@ -97,6 +103,5 @@ Cleanup confirmed owner stop, closed endpoint, removed lease, removed temporary 
 
 ## Limitations carried to final matrix
 
-1. Run or explicitly waive with rationale the brief's single 100k end-to-end exact-publication workload.
-2. The forced-GC figures are one recorded local run, not a cross-platform performance guarantee.
-3. Final immutable-archive full-suite and independent-review evidence is recorded in Task 11, not inferred from the focused scale tests here.
+1. The forced-GC figures are one recorded local run, not a cross-platform performance guarantee.
+2. Final immutable-archive full-suite and independent-review evidence is recorded in Task 11, not inferred from the focused scale tests here.

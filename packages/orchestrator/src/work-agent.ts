@@ -2327,16 +2327,6 @@ export class WorkAgent<
         let criticRoute: BalancedPrewalkRoute | undefined;
         if (quality) {
           completionProducerId = `graph:${quality.graphId}:iteration-${quality.iteration}`;
-          const workspaceManifest = quality.artifacts.captureWorkspaceManifest(qualityWritePaths(quality));
-          completionManifestHash = workspaceManifest.artifactHash;
-          completionArtifact = quality.artifacts.persistRun({
-            graphId: quality.graphId,
-            iteration: quality.iteration,
-            producerId: completionProducerId,
-            artifacts: currentWorkerArtifacts(quality),
-            completedAt: new Date().toISOString(),
-            workspaceManifest,
-          });
           if (!quality.reviewBaseline) {
             criticGateStatus = "block";
             this.recordQualityDecision(quality, "critic", {
@@ -2349,8 +2339,6 @@ export class WorkAgent<
               }],
               failures: ["QUALITY_REVIEW_BASELINE_MISSING"],
             }, {
-              artifactHash: completionArtifact.artifactHash,
-              evidenceRefs: [completionArtifact.path],
               independentVerification: false,
             });
             return { summary: "Quality review blocked: workspace baseline unavailable." };
@@ -2387,12 +2375,20 @@ export class WorkAgent<
               }],
               failures: ["IMMUTABLE_REVIEW_PACKET_ARTIFACT_INVALID"],
             }, {
-              artifactHash: completionArtifact.artifactHash,
-              evidenceRefs: [completionArtifact.path],
               independentVerification: false,
             });
             return { summary: "Quality review blocked: immutable review packet artifact is invalid." };
           }
+          const workspaceManifest = completionReviewPacket.workspaceManifest;
+          completionManifestHash = workspaceManifest.artifactHash;
+          completionArtifact = quality.artifacts.persistRun({
+            graphId: quality.graphId,
+            iteration: quality.iteration,
+            producerId: completionProducerId,
+            artifacts: currentWorkerArtifacts(quality),
+            completedAt: new Date().toISOString(),
+            workspaceManifest,
+          });
           completionEvidence = [{
             kind: "artifact",
             artifactHash: completionReviewPacket.artifactHash,

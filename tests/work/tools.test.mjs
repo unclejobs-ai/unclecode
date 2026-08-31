@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -18,14 +18,23 @@ function runtime({ shell = false, interactionBridge } = {}) {
 }
 
 test("run_shell executes a simple command once execution policy grants shell", async () => {
+  // Path-agnostic + symlink-safe: the cloud checkout is /workspace, local
+  // could be a symlinked path (bash `pwd` returns logical, Node's
+  // process.cwd() returns real on macOS). realpathSync both sides so the
+  // contract holds in any checkout layout.
+  const expectedCwd = realpathSync(process.cwd());
   const result = await runtime({ shell: true }).executor.execute({
     toolName: "run_shell",
     input: { command: "pwd" },
-    cwd: process.cwd(),
+    cwd: expectedCwd,
   });
 
   assert.equal(result.isError ?? false, false);
-  assert.match(result.content, /unclecode/);
+  assert.equal(
+    realpathSync(result.content.trim().split(/\r?\n/)[0]),
+    expectedCwd,
+    "run_shell should return the cwd passed to the executor",
+  );
 });
 
 test("run_shell aborts long-running Rust shell tools promptly", async () => {
@@ -71,7 +80,11 @@ test("run_shell fails closed by default without ever reading process.env at call
 
     assert.equal(result.isError, true);
     assert.match(result.content, /UNCLECODE_ALLOW_RUN_SHELL=1/);
-    assert.doesNotMatch(result.content, /^\/.*unclecode/);
+    assert.notEqual(
+      result.content.trim(),
+      realpathSync(process.cwd()),
+      "run_shell must not return the cwd when policy denies shell",
+    );
   } finally {
     if (previous === undefined) {
       delete process.env.UNCLECODE_ALLOW_RUN_SHELL;

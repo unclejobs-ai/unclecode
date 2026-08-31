@@ -88,6 +88,26 @@ test("Gemini 2.x protocol pairing accepts the required function name without an 
   assert.equal(evidence.providerToolCalls.gemini.protocolPaired, true);
 });
 
+test("runtime evidence recognizes the shipped compact Context Desk inventory", () => {
+  const evidence = buildRuntimeEvidence({
+    realUseTuiStress: {
+      contextPacketTransparency: true,
+      contextPaneExcerpt: [
+        "Context Desk · what reaches the next answer",
+        "Sources · 10 sent · 0 held · ~201t / 200k",
+        "Ready · Context packet looks ready for the next answer.",
+      ].join("\n"),
+    },
+  });
+
+  assert.deepEqual(evidence.context, {
+    contextPanelVisible: true,
+    modelBoundPackets: true,
+    includedExcludedWarnings: true,
+    rawArtifactsHeldBack: true,
+  });
+});
+
 test("runtime evidence summary fails closed when provider evidence is missing", () => {
   assert.equal(summarizeRuntimeEvidence({ evidence: { providerToolCalls: {} } }).toolFinalGate, false);
   assert.equal(summarizeRuntimeEvidence({ evidence: { providerToolCalls: { gemini: providerEvidence() } } }).toolFinalGate, false);

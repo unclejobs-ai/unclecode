@@ -1,0 +1,4 @@
+nodejs 22.22.0
+# Keep this exact version aligned with rust-toolchain.toml so asdf and
+# rustup users compile the lockfile with the same toolchain.
+rust 1.96.1

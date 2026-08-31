@@ -67,7 +67,7 @@ Security approvals, SCC quality gates and user/product decisions are different t
 - Runtime/context/provider/TUI/extension/LSP caches expose bounded hit/miss/eviction/invalidation/entry/retained-byte telemetry. Later hardening added byte budgets and oversized bypass for work-shell text and markdown React-tree caches (`a7ae07b0`, `f2c5296a`).
 - Forced-GC runtime soak evidence: heap delta `+2,536,296` bytes; active handles `2 -> 2`; file descriptors `18 -> 18`; owner retained at most `256` of `768` created sessions and retained `0` after stop; cleanup flags were all true.
 - Exact scale evidence includes 10k usage identities across restart with a projection below 4 KiB, 10.5k durable receipts, 20k durable SSE events with a 64-entry hot view, 50k hot-journal overwrites, 100 reconnects and the production-shaped owner/cache/plugin soak.
-- The original brief's single end-to-end 100k publication target is not substituted by adding these smaller tests together. The final matrix must either record that exact run or carry it as an explicit limitation.
+- The final production-shaped soak recorded 100,000 exact usage publications in one run: 17.7 seconds, 12,439,552-byte SQLite database, heap `+2,511,800`, handles `2 -> 2`, file descriptors `13 -> 13`, 768/768 sessions disposed, 128 SSE reconnects with zero subscribers, and 512/512 plugin registrations disposed.
 
 ### Task 11 — offline differentiation implemented; final integrated proof awaiting
 

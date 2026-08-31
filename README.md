@@ -268,7 +268,7 @@ rust/unclecode-core ← rust-command로 호출 (guidance, mode, intent, token bu
 ## 요구사항
 
 - **Node.js** 22.18.0 이상, 26 미만(`.nvmrc`는 `22.22.0`). `npm run node:check`로 확인.
-- **Rust 툴체인** 안정적인 최신 Cargo 권장(워크스페이스는 `edition = "2021"` 사용). `cargo build --workspace`로 빌드.
+- **Rust 툴체인** 1.96.1(CI, `rust-toolchain.toml`, `.tool-versions`, devcontainer에 고정). 현재 lockfile의 최소 요구 버전은 1.86이다. `cargo build --workspace`로 빌드.
 - **셸** — macOS 터미널/iTerm2, `bash`/`zsh`, Linux 터미널, Windows PowerShell/Git for Windows.
 - **제공자 키** 중 하나 — `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY`.
 

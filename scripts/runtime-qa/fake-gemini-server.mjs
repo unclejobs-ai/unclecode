@@ -20,6 +20,10 @@ import {
   parallelModeKoreanLeakyResponseText,
 } from "./constants.mjs";
 
+// Keep the synthetic turn busy long enough for a loaded CI runner to resume
+// the tmux observer and capture the transient composer state deterministically.
+const OBSERVABLE_BUSY_DELAY_MS = 3_000;
+
 export function startGeminiServer(onRequest) {
   let count = 0;
   const server = http.createServer((req, res) => {
@@ -112,7 +116,7 @@ export function startGeminiServer(onRequest) {
         matchesRuntimeQaUserRequest(currentUserRequest, koreanBusyPromptText)
         || matchesRuntimeQaUserRequest(currentUserRequest, realUseFirstPromptText)
       ) {
-        setTimeout(respond, 1200);
+        setTimeout(respond, OBSERVABLE_BUSY_DELAY_MS);
         return;
       }
       respond();

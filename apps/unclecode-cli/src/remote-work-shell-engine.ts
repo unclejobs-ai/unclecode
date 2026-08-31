@@ -279,9 +279,15 @@ export async function createRemoteWorkShellEngine(
     // the Composer restores the rejected draft.
     const busySubmit = method === "handleSubmit"
       && (activeSubmitInvocations > 0 || ownerState.isBusy === true);
+    const invocationArgs = method === "submitAgentSteer"
+      ? [
+          args[0],
+          (ownerState.agentSteerTarget as { readonly agentRunId?: unknown } | undefined)?.agentRunId,
+        ]
+      : args;
     const scheduled = busySubmit || PREEMPTIVE_CONTROL_METHODS.has(method)
-      ? invokeWithSubmitLifecycle(method, args)
-      : invocationTail.then(() => invokeWithSubmitLifecycle(method, args));
+      ? invokeWithSubmitLifecycle(method, invocationArgs)
+      : invocationTail.then(() => invokeWithSubmitLifecycle(method, invocationArgs));
     if (!busySubmit && !PREEMPTIVE_CONTROL_METHODS.has(method)) {
       invocationTail = scheduled.then(() => undefined, () => undefined);
     }

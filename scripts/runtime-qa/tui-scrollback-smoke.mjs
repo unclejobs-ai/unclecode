@@ -22,7 +22,7 @@ import {
  * pass status — a swallowed failure would silently pass the gate.
  */
 const SCROLLBACK_TURN_COUNT = 12;
-const SCROLLBACK_INDICATOR_PATTERN = /↑ (\d+) earlier rows · Fn\+Up\/PageUp · ↓ \d+ newer rows · Fn\+Down\/PageDown · Esc latest/u;
+const SCROLLBACK_INDICATOR_PATTERN = /↑ (\d+) earlier rows · PgUp\/Fn\+↑ · ↓ \d+ newer rows · PgDn\/Fn\+↓ · Esc/u;
 const REQUEST_WAIT_TIMEOUT_MS = 30_000;
 const PANE_POLL_INTERVAL_MS = 100;
 /**

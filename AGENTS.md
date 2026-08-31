@@ -35,16 +35,16 @@ Keep project automation local to UncleCode or generic Codex capabilities.
 
 ## Cursor Cloud specific instructions
 
-This is a Node.js + Rust monorepo. Two toolchains must be correct or many commands fail:
+This is a Node.js + Rust monorepo. Two toolchains must be correct or many commands fail. Root toolchain files pin both, so a clean checkout should "just work" without manual PATH surgery:
 
-- **Node**: `engines.node` requires `>=22.18.0 <26` and `.nvmrc` pins `22.22.0`. The default VM `node` (`/exec-daemon/node`) is 22.14.0, which FAILS `npm run node:check`. The agent's `~/.bashrc` is configured to source nvm and prepend the nvm-managed `v22.22.2` bin so interactive/dev shells use a satisfying Node. If a command hits an engines/version error, run `export PATH="$HOME/.nvm/versions/node/v22.22.2/bin:$PATH"`.
-- **Rust**: several transitive deps require edition2024, so Cargo must be `>=1.85`. The stable toolchain (currently 1.96.1) is installed via rustup and set as the global default (`rustup default stable`), which persists in the snapshot. The preinstalled 1.83.0 fails `cargo build` with a `feature 'edition2024' is required` error.
+- **Node**: `engines.node` requires `>=22.18.0 <26` and `.nvmrc` pins `22.22.0`. The default VM `node` (`/exec-daemon/node`) is 22.14.0, which FAILS `npm run node:check`. The repo also ships `.tool-versions` (asdf) and `.devcontainer/devcontainer.json` (Codespaces / Cursor Cloud), so prefer those over hand-rolling nvm shims. If a command still hits an engines/version error after switching to the pinned toolchain, the lock files are out of date — bump them rather than patching PATH.
+- **Rust**: the locked dependency graph requires Rust `>=1.86`. CI, `rust-toolchain.toml`, `.tool-versions`, and the devcontainer pin the verified `1.96.1` release so every environment agrees. The preinstalled 1.83.0 fails `cargo build` with an edition/MSRV error; rustup installs the pinned toolchain automatically when it honors `rust-toolchain.toml`.
 
 Key workflow notes (standard commands live in `package.json` scripts and `README.md`):
 
 - `npm run check` (tsc) depends on build output: the `@unclecode/*` subpath exports (e.g. `@unclecode/providers/openai-status`) resolve to `dist/`. Run `npm run build` before `npm run check`, otherwise you get `TS2307 Cannot find module` errors. Building `packages/*` is a prerequisite for the check to pass.
 - Build the Rust CLI (`cargo build --workspace`) before `npm run unclecode` / `./target/debug/unclecode`; the npm script points at `target/debug/unclecode`.
 - The interactive shell (`./target/debug/unclecode`, `unclecode work`) needs a real provider key (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY`) for LLM turns; placeholder values in `.env.example` are treated as unset. Offline core surfaces still work without keys: built-in slash commands, `unclecode rust orchestrator ...`, `unclecode rust model catalog <provider>`, and `unclecode rust aci read|write` (sandboxed to cwd; rejects absolute paths — use repo-relative paths under gitignored dirs like `.data/`).
-- Known pre-existing test issues (not environment problems, do not "fix" as setup):
-  - `tests/contracts/orchestrator-multi-agent.contract.test.mjs` — contract name still says ultrawork→complex; Rust classifier intentionally routes short informational ultrawork prompts to `simple` (T12-E1). Rename/split the contract when touching that file.
-  - `tests/work/tools.test.mjs` — `run_shell executes a simple command` asserts `pwd` output matches `/unclecode/`, which fails because the cloud checkout path is `/workspace`, not a dir named `unclecode`.
+- Known test conventions (already aligned as of this change):
+  - The work-intent classifier contract lives in `tests/contracts/work-intent-classifier.contract.test.mjs`; multi-agent runtime isolation (bounded executor + file ownership) lives in `tests/contracts/agent-runtime-isolation.contract.test.mjs`. The old `orchestrator-multi-agent.contract.test.mjs` filename was stale after T12-E1 (ultrawork now routes informational prompts to `simple`) and was split on touch.
+  - `tests/work/tools.test.mjs` asserts `pwd` returns `process.cwd()` rather than matching a hardcoded path, so it runs in both `/workspace` (cloud) and any local checkout.
