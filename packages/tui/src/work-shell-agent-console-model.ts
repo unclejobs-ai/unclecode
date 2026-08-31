@@ -52,6 +52,8 @@ const ACTIVE_AGENT_HUD_ROWS = 4;
 const INSPECTOR_TIMELINE_ROWS = 6;
 /** Inspector budget: a 400-character summary is evidence, not a paragraph. */
 const INSPECTOR_OUTCOME_ROWS = 3;
+/** A quality summary names the first few findings and counts the rest. */
+const QUALITY_FINDING_ROWS = 3;
 /** Columns between an inspector fact's label and its value. */
 const FACT_LABEL_GAP = 2;
 
@@ -210,7 +212,18 @@ export function selectQualityReviewLines(
   const m = getWorkShellMessages(uiLocale);
   const graph = snapshot.workGraph;
   const review = snapshot.qualityReview;
-  if (!graph && !review) return [uiLocale === "ko" ? "품질 검토 사용 불가 · 활성 품질 실행 없음" : "Quality review unavailable · no active quality run"];
+  if (!graph && !review) {
+    const bound = boundWidth(width);
+    return [
+      boundRow(uiLocale === "ko" ? "SCC 품질 엔진 · 준비됨" : "SCC Quality Engine · ready", bound),
+      boundRow(uiLocale === "ko"
+        ? "이 세션에 기록된 품질 실행이 없습니다."
+        : "No quality run recorded for this session.", bound),
+      boundRow(uiLocale === "ko"
+        ? "작업을 시작하거나 /scc review <대상> 으로 명시적 검토를 실행하세요."
+        : "Start a task, or /scc review <target> for an explicit review.", bound),
+    ];
+  }
   const bound = boundWidth(width);
   const profile = graph?.qualityProfile ?? review?.profile;
   const stage = graph?.currentStage ?? review?.currentStage;
@@ -223,6 +236,12 @@ export function selectQualityReviewLines(
   const findings = criticNodes.filter((node) => node.status === "failed" || node.status === "blocked");
   const latest = review?.history.at(-1);
   const evidenceReview = selectLastEvidenceBearingReview(review?.history) ?? latest;
+  const hasHistory = (review?.history.length ?? 0) > 0;
+  const boundedFindings = findings.slice(0, QUALITY_FINDING_ROWS);
+  const hiddenFindingCount = Math.max(0, findings.length - boundedFindings.length);
+  const boundedFailures = evidenceReview?.failures.slice(0, QUALITY_FINDING_ROWS) ?? [];
+  const hiddenFailureCount = Math.max(0, (evidenceReview?.failures.length ?? 0) - boundedFailures.length);
+  const qualityFailureLabel = uiLocale === "ko" ? "실패" : "Critic finding";
   const evolution = (snapshot.evolutionProposals ?? [])
     .filter(proposal => review?.runId === undefined || proposal.runId === review.runId)
     .at(-1);
@@ -233,6 +252,9 @@ export function selectQualityReviewLines(
       bound,
     ),
     boundRow(`${m.gate} · ${localizedGateDecision(gate, uiLocale)}`, bound),
+    ...(review && !hasHistory
+      ? [boundRow(uiLocale === "ko" ? "아직 검토 기록이 없습니다." : "No review history recorded yet.", bound)]
+      : []),
     ...(latest?.event === "completed"
       ? [boundRow(`${uiLocale === "ko" ? "완료" : "Completion"} · ${localizedQualityStage(latest.stage, uiLocale)} · ${localizedGateDecision(latest.decision, uiLocale)}`, bound)]
       : []),
@@ -240,7 +262,13 @@ export function selectQualityReviewLines(
       ? [boundRow(uiLocale === "ko" ? "미입증 · 독립 검토 증거가 없거나 만료됨" : "Unproven · independent review evidence is missing or stale", bound)]
       : []),
     ...(findings.length > 0
-      ? findings.map((node) => boundRow(`${uiLocale === "ko" ? "발견" : "Finding"} · ${node.title || node.id} · ${localizedWorkNodeStatus(node.status, uiLocale)}`, bound))
+      ? [
+          boundRow(`${uiLocale === "ko" ? "비평 발견" : "Critic findings"} · ${findings.length} ${uiLocale === "ko" ? "개" : "total"}`, bound),
+          ...boundedFindings.map((node) => boundRow(`${uiLocale === "ko" ? "발견" : "Finding"} · ${node.title || node.id} · ${localizedWorkNodeStatus(node.status, uiLocale)}`, bound)),
+          ...(hiddenFindingCount > 0
+            ? [boundRow(uiLocale === "ko" ? `  … ${hiddenFindingCount}개 더 있음` : `  … +${hiddenFindingCount} more findings`, bound)]
+            : []),
+        ]
       : [boundRow(
           profile === "minimal"
             ? (uiLocale === "ko" ? "비평 · 최소 프로필에서는 필요 없음" : "Critic · not required by minimal profile")
@@ -250,8 +278,13 @@ export function selectQualityReviewLines(
           bound,
         )]),
     ...(evidenceReview?.reason ? [boundRow(`${m.reason} · ${evidenceReview.reason}`, bound)] : []),
-    ...((evidenceReview?.failures.length ?? 0) > 0
-      ? evidenceReview!.failures.map((failure) => boundRow(`${m.failure} · ${failure}`, bound))
+    ...(boundedFailures.length > 0
+      ? [
+          ...boundedFailures.map((failure) => boundRow(`${qualityFailureLabel} · ${failure}`, bound)),
+          ...(hiddenFailureCount > 0
+            ? [boundRow(uiLocale === "ko" ? `  … ${hiddenFailureCount}개 실패 더 있음` : `  … +${hiddenFailureCount} more failures`, bound)]
+            : []),
+        ]
       : []),
     ...(evidenceReview?.reviewerId
       ? [boundRow(`${m.reviewer} · ${evidenceReview.reviewerId} · ${evidenceReview.independentVerification ? m.independent : m.notIndependent}`, bound)]
@@ -283,8 +316,19 @@ export function selectQualityReviewLines(
     ...(review ? [boundRow(uiLocale === "ko"
       ? `기록 · 개선 ${review.refineCount} · 전환 ${review.pivotCount}`
       : `History · ${review.refineCount} refine · ${review.pivotCount} pivot`, bound)] : []),
+    ...(review && !hasHistory
+      ? [boundRow(uiLocale === "ko"
+        ? (findings.length > 0
+          ? "다음 · 계획에서 비평 발견을 확인한 뒤 /scc review <대상> 실행"
+          : "다음 · 비평 증거를 기다리거나 /scc review <대상> 실행")
+        : (findings.length > 0
+          ? "Next · inspect Plan findings, then run /scc review <target>"
+          : "Next · wait for critic evidence or run /scc review <target>"), bound)]
+      : []),
     ...selectRecordedEvolutionProposalLines(evolution, bound),
-    boundRow(uiLocale === "ko" ? "정리 · 인계/종합 전용" : "Promote · handoff/synthesis only", bound),
+    ...(graph !== undefined || hasHistory
+      ? [boundRow(uiLocale === "ko" ? "정리 · 인계/종합 전용" : "Promote · handoff/synthesis only", bound)]
+      : []),
   ];
 }
 
@@ -421,7 +465,7 @@ export function selectAgentConsoleRows(
         tone: STATUS_TONES[node.status],
       }));
     case "quality":
-      return (snapshot.qualityReview?.history ?? []).map((entry, index) => ({
+      return [...(snapshot.qualityReview?.history ?? [])].reverse().map((entry, index) => ({
         id: `${entry.startedAt}:${entry.iteration}:${entry.event}:${index}`,
         glyph: agentConsoleStatusGlyph(qualityDecisionTone(entry.decision)),
         label: flattenRowText(

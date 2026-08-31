@@ -281,7 +281,11 @@ export function resolveAgentConsoleSelection(
       return node ? { tab: "plan", node } : undefined;
     }
     case "quality": {
-      const review = snapshot.qualityReview?.history[view.cursor];
+      // Quality history is append-only. Keeping the newest event at cursor 0
+      // means opening `/scc` immediately shows the current gate and keeps that
+      // selection stable as later events are appended to the projection.
+      const history = snapshot.qualityReview?.history ?? [];
+      const review = history[history.length - 1 - view.cursor];
       return review ? { tab: "quality", review } : undefined;
     }
   }

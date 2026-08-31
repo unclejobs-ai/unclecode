@@ -278,7 +278,7 @@ test("quality completed resume keeps completion status and the last evidence-bea
   const review = selectQualityReviewLines(resumed, 120).join("\n");
   assert.match(review, /Completion · promote · proceed/);
   assert.match(review, /Reason · Independent critic verified the final artifact/);
-  assert.match(review, /Failure · critic finding retained/);
+  assert.match(review, /Critic finding · critic finding retained/);
   assert.match(review, /Evidence · evidence:held-out-tests/);
   assert.match(review, /Reviewed hash · sha256:reviewed-final/);
   assert.match(review, /Route · frontier · anthropic · claude-review/);

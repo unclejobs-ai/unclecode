@@ -32,7 +32,7 @@ import {
  */
 
 /** Two panes need this much room before the roster stops being a column. */
-const CONSOLE_TWO_PANE_MIN_WIDTH = 84;
+const CONSOLE_TWO_PANE_MIN_WIDTH = 100;
 /** Fraction of the console body the roster takes when both panes fit. */
 const CONSOLE_ROSTER_FRACTION = 0.38;
 /** Visible roster window; a long session scrolls rather than growing the frame. */
@@ -84,6 +84,20 @@ export function WorkShellAgentConsoleOverlay(props: {
   const now = props.now ?? Date.now();
   const body = Math.max(24, props.width - 4);
   const rows = selectAgentConsoleRows(props.snapshot, props.view.tab, uiLocale);
+  const qualityReview = props.view.tab === "quality"
+    ? selectQualityReviewLines(props.snapshot, body, uiLocale)
+    : [];
+  // Quality has no row-level inspector until the engine records a review
+  // event. Keep the idle/active-no-history state focused on the SCC action
+  // instead of showing a dead roster and a generic "Select a row" pane.
+  if (props.view.tab === "quality" && rows.length === 0) {
+    return renderEmptyQualityCockpit({
+      lines: qualityReview,
+      width: props.width,
+      palette: props.palette,
+      uiLocale,
+    });
+  }
   // The breakpoint is a promise about the operator's terminal. Measuring the
   // console's own inner width instead silently moved it four columns out.
   const twoPane = props.terminalColumns >= CONSOLE_TWO_PANE_MIN_WIDTH;
@@ -144,9 +158,6 @@ export function WorkShellAgentConsoleOverlay(props: {
   );
 
   const totalCost = formatAgentConsoleTotalCost(props.snapshot);
-  const qualityReview = props.view.tab === "quality"
-    ? selectQualityReviewLines(props.snapshot, body, uiLocale)
-    : [];
   const recordedEvolution = qualityReview.length === 0
     ? selectRecordedEvolutionProposalLines(props.snapshot.evolutionProposals?.at(-1), body)
     : [];
@@ -220,6 +231,29 @@ export function WorkShellAgentConsoleOverlay(props: {
             : (uiLocale === "ko" ? "j/k 이동 · Tab 창 · s 조정 · x 취소 · r 계속 · Esc 닫기" : CONSOLE_KEY_HINTS),
           body,
         )}</Text>
+      </Box>
+    </Box>
+  );
+}
+
+function renderEmptyQualityCockpit(props: {
+  readonly lines: readonly string[];
+  readonly width: number;
+  readonly palette: ContextInspectorPalette;
+  readonly uiLocale: "en" | "ko";
+}): React.ReactNode {
+  const hint = props.uiLocale === "ko"
+    ? "Esc 닫기 · 작업을 시작하거나 /scc review <대상> 실행"
+    : "Esc close · start a task or run /scc review <target>";
+  return (
+    <Box marginTop={1} flexDirection="column" width={props.width}>
+      {props.lines.map((line, index) => (
+        <Text key={`${index}:${line}`} color={index === 0 ? props.palette.assistant : props.palette.textMuted}>
+          {line}
+        </Text>
+      ))}
+      <Box marginTop={1}>
+        <Text color={props.palette.textDim}>{truncateForDisplayWidth(hint, Math.max(20, props.width))}</Text>
       </Box>
     </Box>
   );

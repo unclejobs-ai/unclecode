@@ -150,8 +150,8 @@ test("the Agent Console shows roster and inspector side by side at 100 columns",
   assert.doesNotMatch(frame, new RegExp(RAW_OUTPUT_SENTINEL));
 });
 
-test("the Agent Console renders only the inspector pane at 80 columns", async () => {
-  const frame = await renderFrame({ agentConsoleView: consoleView() }, 80);
+test("the Agent Console renders only the inspector pane below 100 columns", async () => {
+  const frame = await renderFrame({ agentConsoleView: consoleView() }, 84);
 
   assert.match(frame, /Elapsed/, "the selected pane is the inspector while it is visible");
   assert.doesNotMatch(frame, /DocsMap/, "the roster pane must not share a narrow terminal");
@@ -208,7 +208,7 @@ test("the Korean quiet HUD keeps agent payloads in the explicit roster", async (
     uiLocale: "ko",
     agentConsole: snapshot,
     agentConsoleView: consoleView({ inspectorVisible: false }),
-  }, 80);
+  }, 84);
   assert.match(roster, /RuntimeMap · 실행 중/);
   assert.match(roster, /화면 밖 2개 더 있음/);
   assert.doesNotMatch(roster, /running|more off screen/);
@@ -386,8 +386,8 @@ test("the Quality tab presents the projected SCC gate, critic evidence, and iter
   assert.match(frame, /Finding · Task 1 · failed/);
   assert.match(frame, /Critic finding · Session expiry remains untested/);
   assert.match(frame, /Evidence · evidence\/auth-review\.json/);
-  assert.match(frame, /Reviewed hash\s+sha256:reviewed-auth/);
-  assert.match(frame, /Current hash\s+sha256:current-auth · stale/);
+  assert.match(frame, /Reviewed hash · sha256:reviewed-auth/);
+  assert.match(frame, /Current hash · sha256:current-auth · stale/);
   assert.match(frame, /iteration 2 · work · refine/);
   assert.match(frame, /iteration 3 · plan · pivot/);
   assert.match(frame, /iteration 4 · promote · completed/);
@@ -407,6 +407,130 @@ test("the Quality tab presents the projected SCC gate, critic evidence, and iter
   assert.match(korean, /반복 4 · 정리 · 완료/);
   assert.doesNotMatch(korean, /· (gate|refine|pivot|completed)/);
   assert.match(korean, /읽기 전용/);
+});
+
+test("an empty SCC cockpit is actionable without a dead roster or inspector", async () => {
+  const frame = await renderFrame({
+    agentConsole: {
+      profileId: "build",
+      activity: [],
+      agents: [],
+      jobs: [],
+    },
+    agentConsoleView: consoleView({ tab: "quality", cursor: 0 }),
+  }, 100);
+
+  assert.match(frame, /SCC Quality Engine · ready/);
+  assert.match(frame, /No quality run recorded for this session\./);
+  assert.match(frame, /Start a task, or \/scc review <target> for an explicit review\./);
+  assert.doesNotMatch(frame, /No Quality Engine review history yet\./);
+  assert.doesNotMatch(frame, /Select a row to inspect\./);
+  assert.doesNotMatch(frame, /Enter detail/);
+});
+
+test("an active SCC run without history stays actionable and bounds thirty-two findings", async () => {
+  const base = runningSnapshot();
+  const failedCritics = Array.from({ length: 32 }, (_, index) => ({
+    ...base.workGraph.nodes[0],
+    id: `critic-${index + 1}`,
+    title: `Critic finding ${index + 1}`,
+    status: "failed",
+    stage: "critic",
+    role: "critic",
+  }));
+  const frame = await renderFrame({
+    agentConsole: {
+      profileId: "build",
+      activity: [],
+      agents: [],
+      jobs: [],
+      workGraph: {
+        ...base.workGraph,
+        qualityProfile: "deep",
+        currentStage: "critic",
+        gateStatus: "refine",
+        iteration: 2,
+        nodes: failedCritics,
+      },
+      qualityReview: {
+        runId: "quality-active-no-history",
+        graphId: "goal-1",
+        profile: "deep",
+        currentStage: "critic",
+        iteration: 2,
+        refineCount: 0,
+        pivotCount: 0,
+        latestDecision: "refine",
+        history: [],
+      },
+    },
+    agentConsoleView: consoleView({ tab: "quality", cursor: 0 }),
+  }, 100);
+
+  assert.match(frame, /Quality Engine \(SCC\) · deep · critic · PDCA check · iteration 2/);
+  assert.match(frame, /No review history recorded yet\./);
+  assert.match(frame, /Critic findings · 32 total/);
+  assert.match(frame, /… \+29 more findings/);
+  assert.match(frame, /Next · /);
+  assert.doesNotMatch(frame, /No Quality Engine review history yet\./);
+  assert.doesNotMatch(frame, /Select a row to inspect\./);
+  assert.doesNotMatch(frame, /Enter detail/);
+  assert.ok(
+    frame.split("\n").filter((line) => /Finding · Critic finding/.test(line)).length <= 3,
+    "the quality summary must not turn thirty-two findings into thirty-two layout rows",
+  );
+});
+
+test("the SCC cockpit selects the latest history event by default", async () => {
+  const base = runningSnapshot();
+  const history = [
+    {
+      event: "gate",
+      stage: "critic",
+      decision: "refine",
+      iteration: 1,
+      failures: ["old finding"],
+      evidenceRefs: [],
+      artifactRefs: [],
+      independentVerification: false,
+      stale: false,
+      startedAt: 10,
+    },
+    {
+      event: "completed",
+      stage: "promote",
+      decision: "proceed",
+      iteration: 2,
+      failures: [],
+      evidenceRefs: ["evidence:latest"],
+      artifactRefs: [],
+      independentVerification: true,
+      stale: false,
+      startedAt: 20,
+    },
+  ];
+  const frame = await renderFrame({
+    agentConsole: {
+      ...base,
+      qualityReview: {
+        runId: "quality-latest",
+        graphId: "goal-1",
+        profile: "deep",
+        currentStage: "promote",
+        iteration: 2,
+        refineCount: 1,
+        pivotCount: 0,
+        latestDecision: "proceed",
+        history,
+      },
+    },
+    agentConsoleView: consoleView({ tab: "quality", cursor: 0 }),
+  }, 100);
+
+  assert.match(frame, /› .*iteration 2 · promote · comp/);
+  assert.doesNotMatch(frame, /› .*iteration 1 · critic · gate/);
+  assert.match(frame, /Iteration 2 · completed/);
+  assert.match(frame, /evidence:latest/);
 });
 
 /**
@@ -456,13 +580,13 @@ function hostileSnapshot() {
 }
 
 test("the Agent Console breakpoint follows the terminal, not the inner layout width", async () => {
-  const narrow = await renderFrame({ agentConsoleView: consoleView() }, 83);
-  assert.match(narrow, /Elapsed/, "83 columns is one pane: the visible inspector");
-  assert.doesNotMatch(narrow, /DocsMap/, "83 columns must not open a second pane");
+  const narrow = await renderFrame({ agentConsoleView: consoleView() }, 99);
+  assert.match(narrow, /Elapsed/, "99 columns is one pane: the visible inspector");
+  assert.doesNotMatch(narrow, /DocsMap/, "99 columns must not open a second pane");
 
   // The console breakpoint is a terminal-width contract. Charging the chrome's
-  // own four columns against it moved the real breakpoint to 88.
-  for (const columns of [84, 87]) {
+  // own four columns against it must not move the real breakpoint above 100.
+  for (const columns of [100, 120]) {
     const wide = await renderFrame({ agentConsoleView: consoleView() }, columns);
     assert.match(wide, /DocsMap/, `${columns} columns must show the roster pane`);
     assert.match(wide, /Elapsed/, `${columns} columns must show the inspector pane`);
