@@ -753,3 +753,28 @@ test("remote Agent Console surfaces a bounded exact-target rejection", async () 
   assert.doesNotMatch(projected.agentConsoleView.receipt.message, /RAW_OWNER_DETAIL/);
   engine.dispose();
 });
+
+test("remote steer submission carries the run identity captured by the owner", async () => {
+  const invocations = [];
+  const state = {
+    isBusy: true,
+    composerMode: "agent-steer",
+    agentSteerTarget: { kind: "agent-steer", agentRunId: "run-alpha" },
+    agentConsoleView: { open: true, tab: "agents", cursor: 0, control: { kind: "browse" } },
+    agentConsole: { agents: [{ id: "run-alpha" }, { id: "run-beta" }] },
+  };
+  const engine = await createRemoteWorkShellEngine({
+    async readEngineState() {
+      return { ok: true, revision: 7, state, result: null };
+    },
+    async invokeEngineMethod(input) {
+      invocations.push(input);
+      return { ok: true, revision: 8, state: { ...state, composerMode: "default" }, result: undefined };
+    },
+  }, "bound-agent-steer");
+
+  await engine.submitAgentSteer("narrow the diff");
+
+  assert.deepEqual(invocations[0].args, ["narrow the diff", "run-alpha"]);
+  engine.dispose();
+});

@@ -99,6 +99,29 @@ function fakeDecisionEngine(label) {
   };
 }
 
+function fakeAgentSteerEngine(label) {
+  let steerCalls = 0;
+  let lastMessage;
+  const state = {
+    label,
+    isBusy: true,
+    composerMode: "agent-steer",
+    agentSteerTarget: { kind: "agent-steer", agentRunId: "run-alpha" },
+    agentConsoleView: { open: true, tab: "agents", cursor: 0 },
+    agentConsole: { agents: [{ id: "run-alpha", status: "running" }] },
+  };
+  return {
+    get steerCalls() { return steerCalls; },
+    get lastMessage() { return lastMessage; },
+    getState: () => state,
+    subscribe: () => () => {},
+    async submitAgentSteer(message) {
+      steerCalls += 1;
+      lastMessage = message;
+    },
+  };
+}
+
 test("production owner lease publishes its verifiable process-start identity", async () => {
   const rootDir = await mkdtemp(join(tmpdir(), "unclecode-owner-process-start-"));
   const leasePath = join(rootDir, "owner.json");
@@ -921,6 +944,76 @@ test("decision RPC schema and identity reject delayed A controls after B replace
   assert.equal(accepted.revision, 1);
   assert.equal(engine.pendingDecisionId, undefined);
   assert.equal(engine.answerCalls, 1);
+  await engines.disposeAll();
+});
+
+test("steer submit rebases across autonomous revisions only for its bound run identity", async () => {
+  const clock = { value: 4 };
+  const engines = new LiveRuntimeEngineRegistry();
+  const engine = fakeAgentSteerEngine("steer-revision-race");
+  engines.attach("steer-revision-race", engine, {
+    projectPath: "/work/steer-revision-race",
+    revisionClock: clock,
+  });
+
+  clock.value = 5;
+  const accepted = await engines.invoke({
+    sessionId: "steer-revision-race",
+    method: "submitAgentSteer",
+    args: ["narrow the diff", "run-alpha"],
+    expectedRevision: 4,
+    idempotencyKey: "steer-run-alpha",
+  });
+
+  assert.equal(accepted.ok, true);
+  assert.equal(engine.steerCalls, 1);
+  assert.equal(engine.lastMessage, "narrow the diff");
+  await engines.disposeAll();
+});
+
+test("steer submit rejects a replaced run identity without reporting false success", async () => {
+  const clock = { value: 5 };
+  const engines = new LiveRuntimeEngineRegistry();
+  const engine = fakeAgentSteerEngine("steer-replaced-target");
+  engines.attach("steer-replaced-target", engine, {
+    projectPath: "/work/steer-replaced-target",
+    revisionClock: clock,
+  });
+
+  const rejected = await engines.invoke({
+    sessionId: "steer-replaced-target",
+    method: "submitAgentSteer",
+    args: ["do not retarget", "run-beta"],
+    expectedRevision: 5,
+    idempotencyKey: "steer-stale-run-beta",
+  });
+
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.code, "invalid_action");
+  assert.equal(engine.steerCalls, 0);
+  await engines.disposeAll();
+});
+
+test("legacy one-argument steer remains valid only at its exact owner revision", async () => {
+  const clock = { value: 6 };
+  const engines = new LiveRuntimeEngineRegistry();
+  const engine = fakeAgentSteerEngine("legacy-steer");
+  engines.attach("legacy-steer", engine, {
+    projectPath: "/work/legacy-steer",
+    revisionClock: clock,
+  });
+
+  const accepted = await engines.invoke({
+    sessionId: "legacy-steer",
+    method: "submitAgentSteer",
+    args: ["legacy exact steer"],
+    expectedRevision: 6,
+    idempotencyKey: "legacy-steer-exact-revision",
+  });
+
+  assert.equal(accepted.ok, true);
+  assert.equal(engine.steerCalls, 1);
+  assert.equal(engine.lastMessage, "legacy exact steer");
   await engines.disposeAll();
 });
 
@@ -1876,7 +1969,11 @@ test("Agent Console view controls preempt an active submitted turn", async () =>
   let releaseTurn;
   const controls = [];
   const engine = {
-    getState: () => ({ isBusy: true, agentConsoleView: { open: controls.includes("open") } }),
+    getState: () => ({
+      isBusy: true,
+      agentSteerTarget: { kind: "agent-steer", agentRunId: "run-alpha" },
+      agentConsoleView: { open: controls.includes("open") },
+    }),
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     async handleSubmit() { await new Promise(resolve => { releaseTurn = resolve; }); },
     openAgentConsole() { controls.push("open"); for (const listener of listeners) listener(); },
@@ -1921,7 +2018,7 @@ test("Agent Console view controls preempt an active submitted turn", async () =>
     ["selectAgentConsoleTab", ["jobs"], "console-tab"],
     ["moveAgentConsoleCursor", [1], "console-move"],
     ["toggleAgentConsoleInspector", [], "console-toggle"],
-    ["submitAgentSteer", ["keep the evidence bounded"], "console-steer"],
+    ["submitAgentSteer", ["keep the evidence bounded", "run-alpha"], "console-steer"],
     ["closeAgentConsole", [], "console-close"],
   ]) {
     const controlled = await invokeControl(method, args, key);

@@ -273,6 +273,31 @@ function canBeginExactAgentSteer(attached: Attached, agentRunId: string): boolea
   return state?.agentConsole?.agents?.[view.cursor as number]?.id === agentRunId;
 }
 
+type ExactAgentSteerSubmission = {
+  readonly message: string;
+  readonly agentRunId?: string;
+};
+
+function exactAgentSteerSubmission(args: readonly unknown[]): ExactAgentSteerSubmission | undefined {
+  const [message, agentRunId] = args;
+  if (typeof message !== "string" || message.trim().length === 0) return undefined;
+  if (args.length === 1) return { message };
+  return args.length === 2 && validRuntimeDecisionId(agentRunId)
+    ? { message, agentRunId }
+    : undefined;
+}
+
+function canSubmitExactAgentSteer(attached: Attached, agentRunId: string): boolean {
+  const state = attached.engine.getState() as {
+    readonly agentSteerTarget?: {
+      readonly kind?: unknown;
+      readonly agentRunId?: unknown;
+    } | undefined;
+  } | null;
+  return state?.agentSteerTarget?.kind === "agent-steer"
+    && state.agentSteerTarget.agentRunId === agentRunId;
+}
+
 export type RuntimeEngineRpcResponse =
   | { readonly ok: true; readonly revision: number; readonly state?: unknown; readonly result?: unknown }
   | { readonly ok: false; readonly code: "not_attached" | "revision_conflict" | "invalid_method" | "invalid_action"; readonly message: string; readonly revision?: number };
@@ -875,6 +900,10 @@ export class LiveRuntimeEngineRegistry {
     const agentSteerTarget = input.method === "beginAgentSteer"
       ? exactAgentSteerTarget(input.args)
       : undefined;
+    const agentSteerSubmission = input.method === "submitAgentSteer"
+      ? exactAgentSteerSubmission(input.args)
+      : undefined;
+    const exactAgentSteerRunId = agentSteerSubmission?.agentRunId;
     if (input.method === "beginAgentSteer" && input.args.length > 0 && !agentSteerTarget) {
       return {
         ok: false,
@@ -883,7 +912,16 @@ export class LiveRuntimeEngineRegistry {
         revision: attached.clock.value,
       };
     }
-    const invocationArgs = exactDecision?.args ?? input.args;
+    if (input.method === "submitAgentSteer" && !agentSteerSubmission) {
+      return {
+        ok: false,
+        code: "invalid_action",
+        message: "submitAgentSteer requires [nonEmptyText] or [nonEmptyText, agentRunId].",
+        revision: attached.clock.value,
+      };
+    }
+    const invocationArgs = exactDecision?.args
+      ?? (agentSteerSubmission ? [agentSteerSubmission.message] : input.args);
     // A follow-up submitted while provider/post-turn work is active must reach
     // WorkShellEngine immediately so it can enter the durable queue. The first
     // submit remains on the normal lane and retains cancel-generation fencing.
@@ -904,6 +942,8 @@ export class LiveRuntimeEngineRegistry {
         : {}),
       ...(agentSteerTarget
         ? { acceptLatestRevisionWhen: () => canBeginExactAgentSteer(attached, agentSteerTarget) }
+        : exactAgentSteerRunId
+          ? { acceptLatestRevisionWhen: () => canSubmitExactAgentSteer(attached, exactAgentSteerRunId) }
         : {}),
       ...(input.method === "interruptTurn"
         ? { lane: "cancel" as const }
@@ -938,6 +978,11 @@ export class LiveRuntimeEngineRegistry {
               precondition: () => canBeginExactAgentSteer(attached, agentSteerTarget) ? undefined : false,
               didMutate: (result: unknown) => result !== false,
             }
+        : exactAgentSteerRunId
+          ? {
+              precondition: () => canSubmitExactAgentSteer(attached, exactAgentSteerRunId) ? undefined : false,
+              didMutate: (result: unknown) => result !== false,
+            }
         : {}),
       execute: () => Reflect.apply(method, attached.engine, invocationArgs),
       complete: (result, revision) => input.method === "interruptTurn" && result === false
@@ -948,6 +993,8 @@ export class LiveRuntimeEngineRegistry {
           ? { ok: false, code: "invalid_action", message: "The pending decision changed or is no longer actionable.", revision }
         : agentSteerTarget && result === false
           ? { ok: false, code: "invalid_action", message: "The selected agent changed or is no longer actionable.", revision }
+        : agentSteerSubmission && result === false
+          ? { ok: false, code: "invalid_action", message: "The bound agent changed or is no longer actionable.", revision }
         : {
             ok: true,
             revision,
