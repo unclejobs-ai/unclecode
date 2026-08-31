@@ -38,7 +38,7 @@ Keep project automation local to UncleCode or generic Codex capabilities.
 This is a Node.js + Rust monorepo. Two toolchains must be correct or many commands fail. Root toolchain files pin both, so a clean checkout should "just work" without manual PATH surgery:
 
 - **Node**: `engines.node` requires `>=22.18.0 <26` and `.nvmrc` pins `22.22.0`. The default VM `node` (`/exec-daemon/node`) is 22.14.0, which FAILS `npm run node:check`. The repo also ships `.tool-versions` (asdf) and `.devcontainer/devcontainer.json` (Codespaces / Cursor Cloud), so prefer those over hand-rolling nvm shims. If a command still hits an engines/version error after switching to the pinned toolchain, the lock files are out of date — bump them rather than patching PATH.
-- **Rust**: the locked dependency graph requires Rust `>=1.86`. Both `rust-toolchain.toml` and `.tool-versions` pin the verified `1.98.0` release so rustup, asdf, and the devcontainer agree. The preinstalled 1.83.0 fails `cargo build` with an edition/MSRV error; rustup installs the pinned toolchain automatically when it honors `rust-toolchain.toml`.
+- **Rust**: the locked dependency graph requires Rust `>=1.86`. CI, `rust-toolchain.toml`, `.tool-versions`, and the devcontainer pin the verified `1.96.1` release so every environment agrees. The preinstalled 1.83.0 fails `cargo build` with an edition/MSRV error; rustup installs the pinned toolchain automatically when it honors `rust-toolchain.toml`.
 
 Key workflow notes (standard commands live in `package.json` scripts and `README.md`):
 

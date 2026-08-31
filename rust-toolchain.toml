@@ -2,6 +2,6 @@
 # The lockfile currently includes dependencies requiring Rust 1.86+.
 # Pin an exact verified release so local, asdf, and container builds agree.
 # Update the AGENTS.md note when bumping this.
-channel = "1.98.0"
+channel = "1.96.1"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

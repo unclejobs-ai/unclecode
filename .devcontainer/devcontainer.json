@@ -6,7 +6,7 @@
       "version": "22.22.0"
     },
     "ghcr.io/devcontainers/features/rust:1": {
-      "version": "1.98.0"
+      "version": "1.96.1"
     }
   },
   "postCreateCommand": "bash -lc 'set -euo pipefail; npm ci && npm run build && cargo check --workspace'",
