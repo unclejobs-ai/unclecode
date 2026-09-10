@@ -1263,11 +1263,15 @@ fn normalize_status_detail(value: &str) -> String {
     if lower.starts_with("read ") || lower.starts_with("write ") || lower.starts_with("search ") {
         return "Reading files".to_string();
     }
-    if lower.starts_with("calling ") || lower.starts_with("model ") {
-        return stripped
-            .replacen("calling ", "Model ", 1)
-            .replacen("model ", "Model ", 1)
-            .to_string();
+    if lower.starts_with("calling ") {
+        return match parse_work_shell_live_tool_call(stripped) {
+            Some((verb, arg)) if arg.is_empty() => verb,
+            Some((verb, arg)) => format!("{verb} {arg}"),
+            None => "Thinking".to_string(),
+        };
+    }
+    if lower.starts_with("model ") {
+        return "Thinking".to_string();
     }
     if lower == "thinking" || lower == "thinking..." || lower == "reasoning" {
         return "Thinking".to_string();
@@ -1279,6 +1283,94 @@ fn normalize_status_detail(value: &str) -> String {
         return "Reading files".to_string();
     }
     stripped.to_string()
+}
+
+fn parse_work_shell_live_tool_call(text: &str) -> Option<(String, String)> {
+    let body = text
+        .trim()
+        .trim_start_matches(|ch: char| matches!(ch, '→' | '●' | '✓' | '✖' | '·' | '★'))
+        .trim_start();
+    if body.is_empty() {
+        return None;
+    }
+    let (raw_name, rest) = match parse_calling_tool_name(body) {
+        Some(parts) => parts,
+        None => match body.split_once(char::is_whitespace) {
+            Some((name, arg)) => (name, arg.trim()),
+            None => (body, ""),
+        },
+    };
+    if raw_name.is_empty() {
+        return None;
+    }
+    let verb = live_tool_verb(raw_name);
+    if verb.is_empty() || is_live_route_word(verb) {
+        return None;
+    }
+    Some((verb.to_string(), unwrap_fully_quoted_work_shell_arg(rest)))
+}
+
+fn parse_calling_tool_name(body: &str) -> Option<(&str, &str)> {
+    let prefix = body.get(..7)?;
+    if !prefix.eq_ignore_ascii_case("calling") {
+        return None;
+    }
+    let after = body.get(7..)?;
+    if !after.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let rest = after.trim_start();
+    if rest.is_empty() {
+        return None;
+    }
+    match rest.split_once(char::is_whitespace) {
+        Some((name, arg)) => Some((name, arg.trim())),
+        None => Some((rest, "")),
+    }
+}
+
+fn live_tool_verb(raw_name: &str) -> &str {
+    match raw_name {
+        "read_file" | "list_files" => "read",
+        "write_file" => "write",
+        "run_shell" | "$" => "bash",
+        "search_text" | "grep" => "search",
+        "apply_patch" => "patch",
+        "delete_file" => "delete",
+        other => other,
+    }
+}
+
+fn is_live_route_word(verb: &str) -> bool {
+    matches!(
+        verb.to_ascii_lowercase().as_str(),
+        "openai"
+            | "anthropic"
+            | "gemini"
+            | "google"
+            | "xai"
+            | "grok"
+            | "mistral"
+            | "openrouter"
+            | "model"
+            | "planner"
+            | "action"
+            | "turn"
+            | "route"
+            | "response"
+    )
+}
+
+fn unwrap_fully_quoted_work_shell_arg(value: &str) -> String {
+    let trimmed = value.trim();
+    let mut chars = trimmed.chars();
+    let Some(quote) = chars.next() else {
+        return String::new();
+    };
+    if !matches!(quote, '"' | '\'' | '`') || !trimmed.ends_with(quote) || trimmed.len() < 2 {
+        return trimmed.to_string();
+    }
+    trimmed[quote.len_utf8()..trimmed.len() - quote.len_utf8()].to_string()
 }
 
 fn looks_like_internal_file_path(value: &str) -> bool {
@@ -1532,6 +1624,60 @@ mod tests {
             "thinking inspect repo"
         );
         assert_eq!(normalize_busy_status(Some("   ")), "Thinking...");
+    }
+
+    #[test]
+    fn maps_calling_status_detail_like_live_tool_parser() {
+        assert_eq!(
+            normalize_status_detail("calling openai gpt-5.4"),
+            "Thinking"
+        );
+        assert_eq!(normalize_status_detail("calling openai"), "Thinking");
+        assert_eq!(normalize_status_detail("model openai gpt-5.4"), "Thinking");
+        assert_eq!(
+            normalize_status_detail("calling read_file src/app.ts"),
+            "read src/app.ts"
+        );
+        assert_eq!(normalize_status_detail("calling read_file"), "read");
+        assert_eq!(
+            normalize_status_detail(r#"calling search_text "traceLines" in packages/tui/src"#),
+            r#"search "traceLines" in packages/tui/src"#
+        );
+        assert_eq!(
+            normalize_status_detail(r#"calling search_text "query""#),
+            "search query"
+        );
+        assert_eq!(
+            normalize_status_detail("calling write_file notes.txt"),
+            "write notes.txt"
+        );
+        assert_eq!(
+            format_work_shell_usage_line(
+                true,
+                Some("calling openai gpt-5.4"),
+                Some(1000),
+                None,
+                Some(1000),
+            ),
+            "Working now · elapsed 0ms · Thinking"
+        );
+        assert_eq!(
+            format_trace_line_json(
+                r#"{"type":"tool.started","toolName":"read_file","input":{"path":"README.md"}}"#
+            )
+            .unwrap(),
+            "→ read README.md"
+        );
+        assert_eq!(
+            format_work_shell_usage_line(
+                true,
+                Some("· thinking inspect repo"),
+                Some(1000),
+                Some(1480),
+                Some(2480),
+            ),
+            "Working now · elapsed 1.5s · thinking inspect repo"
+        );
     }
 
     #[test]

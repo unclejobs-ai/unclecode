@@ -111,7 +111,7 @@ Terminal spacing is row/column based. Map spacing to a 4px mental model for cros
 - Scope note: the pure formatter `formatWorkShellUsageLine` (`Ready · last reply 1.5s`, frozen by contract tests) is a separate usage-summary format, not the status-line assembly above.
 - Accessibility: spinner is supplementary; text must carry the state.
 - Motion: none here; the spinner lives in the dock's activity row.
-- Busy detail: humanize file paths and raw tool names; keep specific progress phrases like `thinking inspect repo` when they add signal.
+- Busy detail: one short verb (`Thinking`, `read path.ts`). Do not pad idle thinking into a sentence. Provider `calling openai` is Thinking, not `Model openai`; a tool `calling read_file path` is `read path`.
 
 ### Work shell footer
 
@@ -162,9 +162,10 @@ Terminal spacing is row/column based. Map spacing to a 4px mental model for cros
 
 ### Composer dock
 
-- Structure: live activity row (busy only), dim live trace feed (busy only), hint row (accent follows state: user slash, assistant busy, warning queue), unlabeled soft divider (pure `─` rule above the input area, no label text), `›` input prefix, footer context row (cwd + one chip).
+- Structure: live activity row (busy only), dim live trace feed (busy only), hint row (muted by default; user slash / warning queue only), unlabeled soft divider (pure `─` rule above the input area, no label text), `›` input prefix, footer context row (cwd + one chip).
+- Hierarchy: the spinner glyph is the only bold busy accent. The activity phrase and tool rows recede (primary text / dim). The hint does not share the spinner color.
 - Live activity row: while a main turn or background agents/jobs are live, the row directly above the hint carries `⠙ <activity phrase> · <elapsed>` plus `N agents · M jobs` when delegated work is meaningful — the busy display the top status row used to own. Idle frames render no activity row (and no spinner glyph anywhere).
-- Live trace feed: while busy, up to three dim `→ …` progress lines (dock-width truncated) sit between the activity row and the hint row, sourced from the always-on `liveTraceLines` state — the feed renders in every trace mode, default and `/minimal` included; idle frames render no feed. Deep trace expansion stays with the context overlay.
+- Live trace feed: while busy, up to three dim `→ verb arg` progress lines (dock-width truncated) sit between the activity row and the hint row, sourced from the always-on `liveTraceLines` state — the feed renders in every trace mode, default and `/minimal` included; idle frames render no feed. Routing chatter (`calling openai`, `→ model`, `thinking …`, turn start) is dropped before the 3-row cap; `calling read_file path` maps to `→ read path`. Deep trace expansion stays with the context overlay.
 - Placeholder: empty input renders a dim ghost placeholder (`Describe a task · / for commands`) that disappears as soon as typing starts.
 - Variants: default, slash command accent, secure entry, attachment count, queue paused hint, parallel busy accent, busy live activity row, busy live trace feed.
 - Spacing: one activity row and up to three trace feed rows (busy only) above one hint row, one prompt row, one footer row; no double border above/below input.

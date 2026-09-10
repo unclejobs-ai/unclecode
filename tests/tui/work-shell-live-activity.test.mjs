@@ -15,9 +15,11 @@ process.env.UNCLECODE_TERMINAL_BACKGROUND = "light";
 
 import {
   formatWorkShellLiveActivityLine,
+  formatWorkShellLiveToolTraceLine,
   formatWorkShellPanelEmptyLines,
   formatWorkShellStatusActivityFacts,
   resolveWorkShellActivityNow,
+  selectWorkShellLiveToolTraceLines,
   WorkShellView,
   resolveReadableWorkShellTextColor,
   shouldSuppressWorkShellPassivePanel,
@@ -34,6 +36,44 @@ function getLastWorkShellFrame(output) {
   return stripVTControlCharacters(frameStart >= 0 ? output.slice(frameStart) : output);
 }
 
+test("live tool trace lines drop routing noise and keep Pi-style verb rows", () => {
+  assert.equal(formatWorkShellLiveToolTraceLine("Turn started"), null);
+  assert.equal(formatWorkShellLiveToolTraceLine("calling openai gpt-5.4"), null);
+  assert.equal(formatWorkShellLiveToolTraceLine("→ model openai gpt-5.4"), null);
+  assert.equal(formatWorkShellLiveToolTraceLine("↔ context saved summary"), null);
+  assert.equal(formatWorkShellLiveToolTraceLine("★ project memory saved"), null);
+  assert.equal(formatWorkShellLiveToolTraceLine("calling read_file"), "→ read");
+  assert.equal(
+    formatWorkShellLiveToolTraceLine("calling read_file src/app.ts"),
+    "→ read src/app.ts",
+  );
+  assert.equal(
+    formatWorkShellLiveToolTraceLine("→ read packages/tui/src/work-shell-view.tsx"),
+    "→ read packages/tui/src/work-shell-view.tsx",
+  );
+  assert.equal(
+    formatWorkShellLiveToolTraceLine("→ search \"traceLines\" in packages/tui/src"),
+    "→ search \"traceLines\" in packages/tui/src",
+  );
+  assert.equal(
+    formatWorkShellLiveToolTraceLine("✓ edit packages/tui/src/work-shell-pane.tsx"),
+    "✓ edit packages/tui/src/work-shell-pane.tsx",
+  );
+  assert.deepEqual(
+    selectWorkShellLiveToolTraceLines([
+      "Turn started",
+      "calling openai gpt-5.4",
+      "calling read_file src/app.ts",
+      "→ search \"traceLines\" in packages/tui/src",
+      "thinking inspect repo",
+    ]),
+    [
+      "→ read src/app.ts",
+      "→ search \"traceLines\" in packages/tui/src",
+    ],
+  );
+});
+
 test("formatWorkShellLiveActivityLine shows nothing while idle", () => {
   assert.equal(formatWorkShellLiveActivityLine({ isBusy: false }), null);
   assert.equal(
@@ -45,7 +85,7 @@ test("formatWorkShellLiveActivityLine shows nothing while idle", () => {
 test("formatWorkShellLiveActivityLine surfaces a live progress line while busy", () => {
   const fallback = formatWorkShellLiveActivityLine({ isBusy: true, spinnerFrame: 0 });
   assert.ok(typeof fallback === "string" && fallback.length > 0);
-  assert.match(fallback, /Thinking through the next step/);
+  assert.match(fallback, /Thinking/);
 
   const withStatus = formatWorkShellLiveActivityLine({
     isBusy: true,
@@ -54,7 +94,30 @@ test("formatWorkShellLiveActivityLine surfaces a live progress line while busy",
   });
   assert.ok(typeof withStatus === "string" && withStatus.length > 0);
   // a concrete status replaces the generic fallback
-  assert.match(withStatus, /Reading context/);
+  assert.match(withStatus, /Reading/);
+
+  const providerCalling = formatWorkShellLiveActivityLine({
+    isBusy: true,
+    busyStatus: "calling openai gpt-5.4",
+    spinnerFrame: 0,
+  });
+  assert.match(providerCalling ?? "", /Thinking/);
+  assert.doesNotMatch(providerCalling ?? "", /Model |calling openai/u);
+
+  const toolCalling = formatWorkShellLiveActivityLine({
+    isBusy: true,
+    busyStatus: "calling read_file src/app.ts",
+    spinnerFrame: 0,
+  });
+  assert.match(toolCalling ?? "", /read src\/app\.ts/);
+
+  const inspectThinking = formatWorkShellLiveActivityLine({
+    isBusy: true,
+    busyStatus: "thinking inspect repo",
+    spinnerFrame: 0,
+  });
+  assert.match(inspectThinking ?? "", /Thinking/);
+  assert.doesNotMatch(inspectThinking ?? "", /inspect repo/);
 });
 
 test("busy WorkShellView renders one inline activity in the composer dock", async () => {
@@ -87,7 +150,7 @@ test("busy WorkShellView renders one inline activity in the composer dock", asyn
   const rows = frame.split("\n");
   const spinnerLines = rows.filter((line) => /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/u.test(line));
   assert.equal(spinnerLines.length, 1, `expected one motion surface, received:\n${frame}`);
-  assert.match(spinnerLines[0], /Thinking through the next step · \d+(?:\.\d+)?(?:ms|s)/u);
+  assert.match(spinnerLines[0], /Thinking.*\d+(?:\.\d+)?(?:ms|s)/u);
   // The activity row is pinned directly above the dock's hint row — the busy
   // display rides with the input, and the top status row is idle-only.
   const activityIndex = rows.indexOf(spinnerLines[0]);
@@ -577,7 +640,7 @@ test("the busy status row states live agent and job counts before activity and e
   assert.equal(lines.length, 1, `expected exactly one motion surface, received:\n${frame}`);
   assert.match(
     lines[0],
-    /4 agents · 4 jobs · Reading context · \d+s\s*$/u,
+    /4 agents · 4 jobs · read src\/app\.ts · \d+s\s*$/u,
   );
   assert.doesNotMatch(lines[0], /gpt-5\.4|Work mode/u, "identity belongs to the header, not the busy row");
 });
@@ -609,7 +672,7 @@ test("the status row omits agent and job counts once nothing is live", async () 
 
   const lines = spinnerLines(frame);
   assert.equal(lines.length, 1, `expected exactly one motion surface, received:\n${frame}`);
-  assert.match(lines[0], /Reading context · 3\.\ds\s*$/u);
+  assert.match(lines[0], /read src\/app\.ts · 3\.\ds\s*$/u);
   assert.doesNotMatch(lines[0], /agent|job/u);
 });
 
@@ -641,7 +704,7 @@ test("an auth warning rides the header while the busy row counts live work", asy
   assert.equal(lines.length, 1, `expected exactly one motion surface, received:\n${frame}`);
   assert.match(
     lines[0],
-    /1 agent · Reading context · \d\.\ds\s*$/u,
+    /1 agent · read src\/app\.ts · \d\.\ds\s*$/u,
   );
   assert.doesNotMatch(lines[0], /needs API key/u, "the warning chip belongs to the header now");
   const headerLine = frame.split("\n").find((line) => line.includes("UncleCode"));
@@ -667,7 +730,7 @@ test("a formatted auth warning remains visible in the narrow header while the bu
   assert.equal(lines.length, 1, `expected exactly one motion surface, received:\n${frame}`);
   // Task 9: the narrow busy row moved to the dock and no longer repeats the
   // model or auth; the header keeps carrying the warning chip.
-  assert.match(lines[0], /1 agent · Reading context/u);
+  assert.match(lines[0], /1 agent · read src\/app\.ts/u);
   assert.doesNotMatch(lines[0], /gpt-5\.4|OAuth/u);
   assert.match(frame, /OAuth · needs API key/u, "the header chip keeps the warning visible");
 });
@@ -899,6 +962,35 @@ test("busy pane keeps liveTraceLines out of the dock in minimal trace mode", asy
   const promptIndex = rows.findIndex((row) => row.trimStart().startsWith("›"));
   assert.ok(promptIndex > activityIndex, `the prompt row should sit below the activity row, received:\n${frame}`);
   for (const line of liveTraceLines) assert.ok(!frame.includes(line));
+});
+
+test("busy pane keeps tool rows when the newest liveTraceLines are routing noise", async () => {
+  const liveTraceLines = [
+    "→ read src/step-01.ts",
+    "→ read src/step-02.ts",
+    "→ read src/step-03.ts",
+    "calling openai gpt-5.4",
+    "thinking inspect repo",
+  ];
+  const { instance, getOutput } = renderLiveFeedPane(createLiveFeedPaneEngine({
+    isBusy: true,
+    busyStatus: "calling openai gpt-5.4",
+    currentTurnStartedAt: Date.now() - 1_000,
+    liveTraceLines,
+    traceMode: "verbose",
+  }).engine);
+
+  await waitForSettledFrame(getOutput);
+  const frame = getLastWorkShellFrame(getOutput());
+  instance.unmount();
+  instance.cleanup();
+
+  assert.match(frame, /→ read src\/step-03\.ts/);
+  assert.doesNotMatch(frame, /calling openai/);
+  assert.doesNotMatch(frame, /thinking inspect repo/);
+  const spinnerLine = spinnerLines(frame)[0] ?? "";
+  assert.match(spinnerLine, /Thinking/);
+  assert.doesNotMatch(spinnerLine, /Model openai|calling openai/u);
 });
 
 test("idle pane renders no liveTraceLines feed even with a filled buffer", async () => {

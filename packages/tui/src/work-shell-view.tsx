@@ -70,6 +70,15 @@ import {
   type OmpAuthPickerCatalog,
 } from "./work-shell-auth-provider-picker-model.js";
 import { formatProviderPerformanceStatus } from "./work-shell-performance-receipt.js";
+import {
+  formatWorkShellLiveToolTraceLine,
+  selectWorkShellLiveToolTraceLines,
+} from "./work-shell-live-activity.js";
+
+export {
+  formatWorkShellLiveToolTraceLine,
+  selectWorkShellLiveToolTraceLines,
+};
 
 function readWorkShellMonotonicMilliseconds(): number {
   return typeof globalThis.performance?.now === "function"
@@ -785,12 +794,22 @@ function normalizeBusyDetail(value: string, uiLocale: "en" | "ko" = "en"): strin
   if (lower.includes("reviewer") || lower.includes("guardian")) {
     return messages.reviewing;
   }
-  if (lower.startsWith("read ") || lower.startsWith("search ")) {
-    return messages.readingFiles;
+  if (
+    lower.startsWith("read ")
+    || lower.startsWith("search ")
+    || lower.startsWith("write ")
+    || lower.startsWith("edit ")
+    || lower.startsWith("patch ")
+    || lower.startsWith("bash ")
+  ) {
+    return stripped;
   }
   if (lower.startsWith("calling ")) {
-    const target = stripped.replace(/^calling /i, "").trim();
-    return uiLocale === "ko" ? `모델 ${target} 호출 중` : `Model ${target}`;
+    const formatted = formatWorkShellLiveToolTraceLine(stripped);
+    if (formatted) {
+      return formatted.replace(/^[→●✓✖]\s+/u, "");
+    }
+    return uiLocale === "ko" ? "생각 중" : "Thinking";
   }
   if (lower.startsWith("model ")) {
     return `${uiLocale === "ko" ? "모델" : "Model"} ${stripped.slice(6).trim()}`;
@@ -3357,7 +3376,7 @@ export function WorkShellView(props: {
         getWorkShellDockWidth(props.terminalColumns),
       );
   const visibleLiveToolTraceLines = props.traceMode === "verbose"
-    ? selectWorkShellLiveTraceLines(props.liveToolTraceLines)
+    ? selectWorkShellLiveToolTraceLines(props.liveToolTraceLines, 1)
     : [];
   const agentConsoleOpen = props.agentConsole !== undefined && props.agentConsoleView?.open === true;
   const shouldRenderContextInspectorOverlay =

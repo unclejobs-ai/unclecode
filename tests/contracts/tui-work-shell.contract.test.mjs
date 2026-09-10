@@ -104,6 +104,10 @@ test("work-shell hotspot re-exports extracted helper owner seams instead of regr
     path.join(workspaceRoot, "packages/tui/src/work-shell-view.tsx"),
     "utf8",
   );
+  const liveActivitySource = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/work-shell-live-activity.ts"),
+    "utf8",
+  );
   const inputSource = readFileSync(
     path.join(workspaceRoot, "packages/tui/src/work-shell-input.ts"),
     "utf8",
@@ -122,6 +126,10 @@ test("work-shell hotspot re-exports extracted helper owner seams instead of regr
   assert.match(viewSource, /export function formatWorkShellProviderTitle\(/);
   assert.match(viewSource, /export function getWorkShellEntryPresentation\(/);
   assert.match(viewSource, /function WorkShellSectionDivider\(/);
+  assert.match(viewSource, /from "\.\/work-shell-live-activity\.js"/);
+  assert.match(liveActivitySource, /export function formatWorkShellLiveToolTraceLine\(/);
+  assert.match(liveActivitySource, /export function formatWorkShellLiveActivityLine\(/);
+  assert.doesNotMatch(viewSource, /export function formatWorkShellLiveToolTraceLine\(/);
   assert.doesNotMatch(viewSource, /Ctrl\+O context/);
   assert.doesNotMatch(viewSource, /Ctrl\+O sessions/);
   assert.doesNotMatch(
@@ -1716,7 +1724,7 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       nowMs: 2480,
       lastTurnDurationMs: 1480,
     }),
-    "⠋ 1.5s · thinking inspect repo · Ctrl+C/Esc · Enter queues",
+    "⠋ 1.5s · Thinking · Ctrl+C/Esc · Enter queues",
   );
   assert.equal(
     normalizeMarkdownDisplayText("## Heading\n- `npm run check`\n- **Done**"),

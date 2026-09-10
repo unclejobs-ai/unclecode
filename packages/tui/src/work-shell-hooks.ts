@@ -1282,7 +1282,7 @@ export function useWorkShellInputController(input: {
       return;
     }
 
-    // Task 11 transcript scrollback (PageUp/PageDown). Every owner above —
+    // Task 11 transcript scrollback (PageUp/PageDown/wheel). Every owner above —
     // the console, the telemetry hotkeys, the context desk (its pagination
     // outranks this branch), the shell action keys — has passed on the
     // keystroke, and the Rust resolver maps neither key in the main view, so

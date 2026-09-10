@@ -33,6 +33,8 @@ const KEY_KITTY_END = "\u001b[57424u";
 const KEY_ESCAPE = "\u001b";
 const MOUSE_WHEEL_UP = "\u001b[<64;40;12M";
 const MOUSE_WHEEL_DOWN = "\u001b[<65;40;12M";
+const KEY_WHEEL_UP = "\u001b[<64;1;1M";
+const KEY_WHEEL_DOWN = "\u001b[<65;1;1M";
 
 function padScrollbackIndex(index) {
   return String(index).padStart(4, "0");
@@ -663,7 +665,7 @@ test("PageUp scrolls older entries into view with the indicator row", async () =
     const atRest = getLastWorkFrame(getOutput());
     assert.ok(atRest.includes(`sb-${padScrollbackIndex(TRANSCRIPT_ENTRY_COUNT - TRANSCRIPT_CAPACITY)}`));
     assert.ok(!atRest.includes("sb-0010"));
-    assert.ok(!atRest.includes("entries above"));
+    assert.ok(!atRest.includes("earlier rows"));
 
     stdin.write(KEY_PAGE_UP);
     assert.ok(
@@ -889,6 +891,59 @@ test("a newly arrived entry preserves the user\'s transcript position", async ()
 
     stdin.write(KEY_ESCAPE);
     assert.ok(await waitForCondition(() => getLastWorkFrame(getOutput()).includes("sb-fresh")));
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
+test("wheel-up CSI pages older entries the same way PageUp does", async () => {
+  const { engine } = createWorkShellPaneEngine();
+  const { stdin, instance, getOutput } = renderScrollbackPane(engine);
+
+  try {
+    assert.ok(await waitForNewestEntry(getOutput));
+    stdin.write(KEY_WHEEL_UP);
+    assert.ok(
+      await waitForCondition(() =>
+        getLastWorkFrame(getOutput()).includes("earlier rows")
+      ),
+    );
+    const scrolled = getLastWorkFrame(getOutput());
+    assert.ok(
+      scrolled.includes(`sb-${String(TRANSCRIPT_ENTRY_COUNT - 2 * TRANSCRIPT_CAPACITY).padStart(4, "0")}`),
+    );
+    assert.ok(!scrolled.includes(`sb-${String(TRANSCRIPT_ENTRY_COUNT - 1).padStart(4, "0")}`));
+    assert.ok(!scrolled.includes("[<64"));
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
+test("wheel-up CSI works with text in the composer and keeps the draft", async () => {
+  const { engine } = createWorkShellPaneEngine();
+  const { stdin, instance, getOutput } = renderScrollbackPane(engine);
+
+  try {
+    assert.ok(await waitForNewestEntry(getOutput));
+    stdin.write("hello");
+    assert.ok(
+      await waitForCondition(() => /› hello/.test(getLastWorkFrame(getOutput()))),
+    );
+
+    stdin.write(KEY_WHEEL_UP);
+    assert.ok(
+      await waitForCondition(() => getLastWorkFrame(getOutput()).includes("earlier rows")),
+    );
+    const scrolled = getLastWorkFrame(getOutput());
+    assert.match(scrolled, /› hello/);
+    assert.ok(!scrolled.includes("[<64"));
+
+    stdin.write(KEY_WHEEL_DOWN);
+    assert.ok(await waitForNewestEntry(getOutput));
+    assert.ok(!getLastWorkFrame(getOutput()).includes("earlier rows"));
+    assert.match(getLastWorkFrame(getOutput()), /› hello/);
   } finally {
     instance.unmount();
     instance.cleanup();

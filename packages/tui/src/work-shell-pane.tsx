@@ -14,6 +14,7 @@ import {
   isRawComposerEmpty,
 } from "./composer.js";
 import { enterMouseTracking } from "./alt-screen.js";
+import { enableWorkShellMouseWheel } from "./mouse-wheel.js";
 import {
   buildAttachmentPreviewLines,
   formatAttachmentErrorLine,
@@ -185,6 +186,9 @@ export function WorkShellPane<
       stdout.off("resize", updateTerminalSize);
     };
   }, [stdout]);
+  // Terminal SGR mouse tracking: Ink has no wheel key, so the pane enables
+  // X10+SGR while mounted and parses wheel CSI in the input controller.
+  React.useEffect(() => enableWorkShellMouseWheel(stdout), [stdout]);
   const {
     inputValue,
     setInputValue,
@@ -319,11 +323,10 @@ export function WorkShellPane<
     () => props.getReasoningLabel(reasoning),
     [props.getReasoningLabel, reasoning],
   );
-  // Ctrl+O is the sole tool-history disclosure control. The pane retains only
-  // the newest live state for verbose mode; the default minimal frame carries
-  // the current activity row without replaying start/completion trace pairs.
+  // Pass the full liveTraceLines buffer so the view can drop routing chatter
+  // and keep the newest tool rows. Slicing to 1 here first hides real tools.
   const liveToolTraceLines = liveTraceLines !== undefined && liveTraceLines.length > 0
-    ? liveTraceLines.slice(-1)
+    ? liveTraceLines
     : undefined;
   const reasoningSupported = React.useMemo(
     () => props.isReasoningSupported(reasoning),

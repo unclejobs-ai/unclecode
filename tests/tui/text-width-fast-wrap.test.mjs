@@ -30,6 +30,13 @@ test("wrapDisplayTextFast preserves explicit newlines", () => {
   assert.deepEqual(wrapDisplayTextFast("one\n\ntwo", 6), ["one", "", "two"]);
 });
 
+test("getDisplayWidth counts Hangul compatibility jamo as two cells", () => {
+  assert.equal(getDisplayWidth("ㄱ"), 2);
+  assert.equal(getDisplayWidth("ㄴ"), 2);
+  assert.equal(getDisplayWidth("ㅏ"), 2);
+  assert.equal(getDisplayWidth("안녕ㄱ"), 6);
+});
+
 test("truncateForDisplayWidth avoids splitting Hangul and emoji graphemes", () => {
   assert.equal(truncateForDisplayWidth("한글", 4), "한글");
   assert.equal(truncateForDisplayWidth("한글응답", 4), "한글");

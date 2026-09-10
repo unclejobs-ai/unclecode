@@ -6,6 +6,7 @@ import {
 import { Box, Text, useCursor, useInput, type DOMElement } from "ink";
 import React, { useContext, useEffect, useRef, useState } from "react";
 
+import { isSgrMouseInput } from "./mouse-wheel.js";
 import { getDisplayWidth, segmentDisplayGraphemes, truncateForDisplayWidth } from "./text-width.js";
 import type { AgentConsoleKeyState } from "./work-shell-agent-console-input.js";
 
@@ -43,6 +44,11 @@ export function isRawComposerEmpty(value: string, pendingValue?: string): boolea
   return (pendingValue ?? value).length === 0;
 }
 
+/** Slash-picker owns ↑/↓ while the draft is a command; otherwise the caret moves. */
+export function shouldComposerDeferVerticalArrows(value: string): boolean {
+  return value.startsWith("/");
+}
+
 export function sanitizeComposerInput(value: string): string {
   return value
     .replace(BRACKETED_PASTE_ARTIFACT_PATTERN, "")
@@ -73,12 +79,17 @@ export function applyComposerEdit(input: {
   readonly key: {
     readonly leftArrow?: boolean;
     readonly rightArrow?: boolean;
+    readonly upArrow?: boolean;
+    readonly downArrow?: boolean;
+    readonly home?: boolean;
+    readonly end?: boolean;
     readonly backspace?: boolean;
     readonly delete?: boolean;
     readonly return?: boolean;
     readonly shift?: boolean;
   };
   readonly allowLineBreaks: boolean;
+  readonly width?: number | undefined;
 }): {
   readonly nextValue: string;
   readonly nextCursorOffset: number;
@@ -114,6 +125,20 @@ export function applyComposerEdit(input: {
     return {
       nextValue: input.value,
       nextCursorOffset: nextComposerCursorOffset(input.value, cursorOffset),
+      submitted: false,
+    };
+  }
+
+  const visualMotion = resolveComposerVisualMotion(input.key);
+  if (visualMotion !== undefined) {
+    return {
+      nextValue: input.value,
+      nextCursorOffset: moveComposerVisualCaret({
+        value: input.value,
+        cursorOffset,
+        width: resolveComposerVisualWidth(input.width),
+        motion: visualMotion,
+      }),
       submitted: false,
     };
   }
@@ -215,6 +240,158 @@ function nextComposerCursorOffset(value: string, cursorOffset: number): number {
   return value.length;
 }
 
+type ComposerVisualMotion = "home" | "end" | "up" | "down";
+
+type ComposerVisualRow = {
+  readonly text: string;
+  readonly startOffset: number;
+  readonly endOffset: number;
+};
+
+function resolveComposerVisualMotion(key: {
+  readonly upArrow?: boolean;
+  readonly downArrow?: boolean;
+  readonly home?: boolean;
+  readonly end?: boolean;
+}): ComposerVisualMotion | undefined {
+  if (key.home) {
+    return "home";
+  }
+  if (key.end) {
+    return "end";
+  }
+  if (key.upArrow) {
+    return "up";
+  }
+  if (key.downArrow) {
+    return "down";
+  }
+  return undefined;
+}
+
+function resolveComposerVisualWidth(width: number | undefined): number {
+  if (width === undefined || !Number.isFinite(width)) {
+    return Number.MAX_SAFE_INTEGER;
+  }
+  return Math.max(1, Math.trunc(width));
+}
+
+function layoutComposerVisualRows(input: {
+  readonly value: string;
+  readonly cursorOffset: number;
+  readonly width: number;
+}): {
+  readonly rows: readonly ComposerVisualRow[];
+  readonly cursor: { readonly row: number; readonly column: number };
+} {
+  const width = Math.max(1, Math.trunc(input.width));
+  const cursorOffset = normalizeComposerCursorOffset(input.value, input.cursorOffset);
+  const rows: Array<{ parts: string[]; startOffset: number; endOffset: number }> = [
+    { parts: [], startOffset: 0, endOffset: 0 },
+  ];
+  let row = 0;
+  let column = 0;
+  let offset = 0;
+  let cursor = { row: 0, column: 0 };
+  let cursorResolved = false;
+
+  const startNewRow = (nextOffset: number): void => {
+    rows.push({ parts: [], startOffset: nextOffset, endOffset: nextOffset });
+    row += 1;
+    column = 0;
+  };
+
+  for (const grapheme of segmentDisplayGraphemes(input.value)) {
+    if (grapheme !== "\n") {
+      const graphemeWidth = Math.max(1, getDisplayWidth(grapheme));
+      if (column === width || column + graphemeWidth > width) {
+        startNewRow(offset);
+      }
+    }
+
+    if (offset === cursorOffset) {
+      cursor = { row, column };
+      cursorResolved = true;
+    }
+
+    if (grapheme === "\n") {
+      startNewRow(offset + grapheme.length);
+    } else {
+      const current = rows[row];
+      if (current) {
+        current.parts.push(grapheme);
+        current.endOffset = offset + grapheme.length;
+      }
+      column += Math.max(1, getDisplayWidth(grapheme));
+    }
+    offset += grapheme.length;
+  }
+
+  if (!cursorResolved) {
+    if (column === width) {
+      startNewRow(offset);
+    }
+    cursor = { row, column };
+  }
+
+  return {
+    rows: rows.map((item) => ({
+      text: item.parts.join(""),
+      startOffset: item.startOffset,
+      endOffset: item.endOffset,
+    })),
+    cursor,
+  };
+}
+
+function offsetOnComposerVisualRow(
+  row: ComposerVisualRow,
+  desiredColumn: number,
+): number {
+  let column = 0;
+  let offset = row.startOffset;
+  for (const grapheme of segmentDisplayGraphemes(row.text)) {
+    const graphemeWidth = Math.max(1, getDisplayWidth(grapheme));
+    if (column + graphemeWidth > desiredColumn) {
+      break;
+    }
+    column += graphemeWidth;
+    offset += grapheme.length;
+  }
+  return offset;
+}
+
+function moveComposerVisualCaret(input: {
+  readonly value: string;
+  readonly cursorOffset: number;
+  readonly width: number;
+  readonly motion: ComposerVisualMotion;
+}): number {
+  const visual = layoutComposerVisualRows({
+    value: input.value,
+    cursorOffset: input.cursorOffset,
+    width: input.width,
+  });
+  const currentRow = visual.rows[visual.cursor.row];
+  if (!currentRow) {
+    return input.cursorOffset;
+  }
+  if (input.motion === "home") {
+    return currentRow.startOffset;
+  }
+  if (input.motion === "end") {
+    return currentRow.endOffset;
+  }
+  const targetRowIndex = input.motion === "up"
+    ? visual.cursor.row - 1
+    : visual.cursor.row + 1;
+  const targetRow = visual.rows[targetRowIndex];
+  if (!targetRow) {
+    return input.cursorOffset;
+  }
+  return offsetOnComposerVisualRow(targetRow, visual.cursor.column);
+}
+
 export function resolveComposerCursorOffsetAfterValueChange(input: {
   readonly nextValue: string;
   readonly currentCursorOffset: number;
@@ -256,62 +433,24 @@ export function layoutComposerViewport(input: {
 }): ComposerViewportLayout {
   const width = Math.max(1, Math.trunc(input.width));
   const maxRows = Math.max(1, Math.trunc(input.maxRows));
-  const cursorOffset = normalizeComposerCursorOffset(input.value, input.cursorOffset);
-  const rows: string[][] = [[]];
-  let row = 0;
-  let column = 0;
-  let offset = 0;
-  let cursor = { row: 0, column: 0 };
-  let cursorResolved = false;
-
-  for (const grapheme of segmentDisplayGraphemes(input.value)) {
-    if (grapheme !== "\n") {
-      const graphemeWidth = Math.max(1, getDisplayWidth(grapheme));
-      if (column === width || column + graphemeWidth > width) {
-        rows.push([]);
-        row += 1;
-        column = 0;
-      }
-    }
-
-    if (offset === cursorOffset) {
-      cursor = { row, column };
-      cursorResolved = true;
-    }
-
-    if (grapheme === "\n") {
-      rows.push([]);
-      row += 1;
-      column = 0;
-    } else {
-      rows[row]?.push(grapheme);
-      column += Math.max(1, getDisplayWidth(grapheme));
-    }
-    offset += grapheme.length;
-  }
-
-  if (!cursorResolved) {
-    if (column === width) {
-      rows.push([]);
-      row += 1;
-      column = 0;
-    }
-    cursor = { row, column };
-  }
-
+  const visual = layoutComposerVisualRows({
+    value: input.value,
+    cursorOffset: input.cursorOffset,
+    width,
+  });
   const firstVisibleRow = Math.min(
-    Math.max(0, rows.length - maxRows),
-    Math.max(0, cursor.row - Math.floor(maxRows / 2)),
+    Math.max(0, visual.rows.length - maxRows),
+    Math.max(0, visual.cursor.row - Math.floor(maxRows / 2)),
   );
-  const lines = rows.slice(firstVisibleRow, firstVisibleRow + maxRows).map((parts) => parts.join(""));
+  const lines = visual.rows.slice(firstVisibleRow, firstVisibleRow + maxRows).map((item) => item.text);
   return {
     lines,
     cursor: {
-      row: cursor.row - firstVisibleRow,
-      column: cursor.column,
+      row: visual.cursor.row - firstVisibleRow,
+      column: visual.cursor.column,
     },
     hiddenAbove: firstVisibleRow,
-    hiddenBelow: Math.max(0, rows.length - firstVisibleRow - lines.length),
+    hiddenBelow: Math.max(0, visual.rows.length - firstVisibleRow - lines.length),
   };
 }
 
@@ -689,13 +828,17 @@ export function Composer(props: {
     ) {
       return;
     }
+    if (isSgrMouseInput(input)) {
+      return;
+    }
+
+    const currentDraft = pendingLocalValueRef.current ?? latestProps.value;
     if (
-      key.upArrow ||
-      key.downArrow ||
-      key.tab ||
-      (key.shift && key.tab) ||
-      key.escape ||
-      (key.ctrl && input === "c")
+      ((key.upArrow || key.downArrow) && shouldComposerDeferVerticalArrows(currentDraft))
+      || key.tab
+      || (key.shift && key.tab)
+      || key.escape
+      || (key.ctrl && input === "c")
     ) {
       return;
     }
@@ -801,6 +944,7 @@ export function Composer(props: {
       input,
       key,
       allowLineBreaks: latestProps.mask === undefined,
+      width: resolveComposerVisibleWidth(latestProps.terminalColumns),
     });
 
     cursorOffsetRef.current = result.nextCursorOffset;

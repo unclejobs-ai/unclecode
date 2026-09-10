@@ -12,6 +12,7 @@ function isWideCodePoint(codePoint: number): boolean {
   return (
     codePoint >= 0x1100 && (
       codePoint <= 0x115f ||
+      (codePoint >= 0x3131 && codePoint <= 0x318e) ||
       codePoint === 0x2329 ||
       codePoint === 0x232a ||
       (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f) ||

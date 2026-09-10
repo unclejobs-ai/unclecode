@@ -4,6 +4,10 @@ import test from "node:test";
 import * as composer from "../../packages/tui/src/composer.tsx";
 import { getDisplayWidth } from "../../packages/tui/src/text-width.ts";
 
+function edit(input) {
+  return composer.applyComposerEdit(input);
+}
+
 function layout(input) {
   return typeof composer.layoutComposerViewport === "function"
     ? composer.layoutComposerViewport(input)
@@ -159,5 +163,65 @@ test("composer forward Delete removes the committed grapheme to the right of the
       nextCursorOffset: cursorOffset,
       submitted: false,
     },
+  );
+});
+
+test("composer Home/End use Hangul visual wrap, not the whole buffer", () => {
+  const value = "가나다라마바사";
+  assert.deepEqual(
+    edit({
+      value,
+      cursorOffset: 5,
+      input: "",
+      key: { home: true },
+      allowLineBreaks: true,
+      width: 6,
+    }),
+    {
+      nextValue: value,
+      nextCursorOffset: 3,
+      submitted: false,
+    },
+  );
+  assert.deepEqual(
+    edit({
+      value,
+      cursorOffset: 3,
+      input: "",
+      key: { end: true },
+      allowLineBreaks: true,
+      width: 6,
+    }),
+    {
+      nextValue: value,
+      nextCursorOffset: 6,
+      submitted: false,
+    },
+  );
+});
+
+test("composer Up/Down walk Hangul visual rows with CJK column preservation", () => {
+  const value = "가나다라마바사";
+  assert.equal(
+    edit({
+      value,
+      cursorOffset: 5,
+      input: "",
+      key: { upArrow: true },
+      allowLineBreaks: true,
+      width: 6,
+    }).nextCursorOffset,
+    2,
+  );
+  assert.equal(
+    edit({
+      value,
+      cursorOffset: 2,
+      input: "",
+      key: { downArrow: true },
+      allowLineBreaks: true,
+      width: 6,
+    }).nextCursorOffset,
+    5,
   );
 });
