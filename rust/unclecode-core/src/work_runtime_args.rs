@@ -123,6 +123,7 @@ fn parse_work_runtime_args(argv: &[String], cwd: &str) -> Value {
                     Some("gemini") => provider = Some("gemini"),
                     Some("openai") => provider = Some("openai"),
                     Some("deepseek") => provider = Some("deepseek"),
+                    Some("xai") => provider = Some("xai"),
                     _ => {}
                 }
                 index += 1;
@@ -312,6 +313,19 @@ mod tests {
         assert_eq!(parsed["provider"], "deepseek");
         assert_eq!(parsed["model"], "deepseek-reasoner");
         assert_eq!(parsed["prompt"], "review");
+    }
+
+    #[test]
+    fn parses_xai_as_a_runtime_provider() {
+        let parsed = serde_json::from_str::<Value>(
+            &parse_work_runtime_args_json(
+                r#"{"cwd":"/repo","argv":["--provider","xai","--model","grok-4.3"]}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(parsed["provider"], "xai");
+        assert_eq!(parsed["model"], "grok-4.3");
     }
 
     #[test]

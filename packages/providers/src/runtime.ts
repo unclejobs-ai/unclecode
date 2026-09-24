@@ -107,7 +107,7 @@ export type ProviderTurnOptions = {
   readonly signal?: AbortSignal | undefined;
 };
 
-export type ProviderName = "anthropic" | "gemini" | "openai" | "deepseek";
+export type ProviderName = "anthropic" | "gemini" | "openai" | "deepseek" | "xai";
 type RuntimeProviderName = ProviderName;
 type RuntimeProviderKind = RuntimeProviderName | "unsupported";
 
@@ -1502,6 +1502,10 @@ export function createRuntimeProvider(args: CreateRuntimeProviderArgs): LlmProvi
       ...(args.toolRuntime ? { toolRuntime: args.toolRuntime } : {}),
       ...(args.systemPrompt ? { systemPrompt: args.systemPrompt } : {}),
     });
+  }
+
+  if (decision.runtimeKind === "xai") {
+    throw new Error("xAI runs on the pi engine only. Drop --engine native.");
   }
 
   throw new Error(decision.error ?? `Unsupported runtime provider: ${decision.providerId}`);
@@ -3555,6 +3559,7 @@ function isRuntimeProviderKind(value: string): value is RuntimeProviderKind {
     || value === "gemini"
     || value === "openai"
     || value === "deepseek"
+    || value === "xai"
     || value === "unsupported";
 }
 

@@ -1,9 +1,6 @@
-import { randomUUID } from "node:crypto";
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { open as openFile, unlink as unlinkFile, type FileHandle } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
 
 import type {
   AuthOperationOptions,
@@ -14,10 +11,9 @@ import type {
 } from "@earendil-works/pi-ai";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 
+import { withCredentialFileLock, writeCredentialFileAtomically } from "./credential-file.js";
+
 export const CODEX_PI_PROVIDER_ID = "openai-codex";
-const LOCK_RETRY_MS = 50;
-const LOCK_WAIT_MS = 60_000;
-const LOCK_STALE_MS = 5 * 60_000;
 
 
 type CodexAuthFile = {
@@ -50,126 +46,15 @@ function decodeJwtExpiryMs(token: string): number {
   }
   return 0;
 }
-function errorCode(error: unknown): string | undefined {
-  if (typeof error !== "object" || error === null || !("code" in error)) return undefined;
-  return typeof error.code === "string" ? error.code : undefined;
-}
-
-function processIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return errorCode(error) === "EPERM";
-  }
-}
-
 
 export class CodexCredentialStore implements CredentialStore {
   constructor(private readonly authPath: string) {}
-  private get lockPath(): string {
-    return `${this.authPath}.lock`;
-  }
-
-  private lockIsStale(): boolean {
-    try {
-      const parsed: unknown = JSON.parse(readFileSync(this.lockPath, "utf8"));
-      const pid = typeof parsed === "object" && parsed !== null && "pid" in parsed ? parsed.pid : undefined;
-      if (typeof pid === "number" && Number.isInteger(pid) && pid > 0) {
-        if (!processIsAlive(pid)) return true;
-      }
-      return Date.now() - statSync(this.lockPath).mtimeMs > LOCK_STALE_MS;
-    } catch (error) {
-      if (errorCode(error) === "ENOENT") return false;
-      try {
-        return Date.now() - statSync(this.lockPath).mtimeMs > LOCK_STALE_MS;
-      } catch {
-        return false;
-      }
-    }
-  }
-
-  private async acquireLock(): Promise<FileHandle> {
-    mkdirSync(path.dirname(this.authPath), { recursive: true });
-    const deadline = Date.now() + LOCK_WAIT_MS;
-    while (true) {
-      let handle: FileHandle;
-      try {
-        handle = await openFile(this.lockPath, "wx", 0o600);
-      } catch (error) {
-        if (errorCode(error) !== "EEXIST") throw error;
-        if (this.lockIsStale()) {
-          throw new Error(
-            `The Codex credential lock is stale: ${this.lockPath}. Remove it after confirming no Codex process is refreshing credentials.`,
-          );
-        }
-        if (Date.now() >= deadline) {
-          throw new Error(`Timed out waiting for the Codex credential lock: ${this.lockPath}`);
-        }
-        await sleep(LOCK_RETRY_MS);
-        continue;
-      }
-      try {
-        await handle.writeFile(JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString() }));
-        return handle;
-      } catch (error) {
-        await handle.close();
-        try {
-          await unlinkFile(this.lockPath);
-        } catch (unlinkError) {
-          if (errorCode(unlinkError) !== "ENOENT") {
-            throw new AggregateError([error, unlinkError], "Failed to initialize the Codex credential lock");
-          }
-        }
-        throw error;
-      }
-    }
-  }
-
-  private async withLock<T>(fn: () => Promise<T>): Promise<T> {
-    const handle = await this.acquireLock();
-    try {
-      return await fn();
-    } finally {
-      await handle.close();
-      try {
-        await unlinkFile(this.lockPath);
-      } catch (error) {
-        if (errorCode(error) !== "ENOENT") throw error;
-      }
-    }
-  }
-
-
   private readFile(): CodexAuthFile | undefined {
     try {
       const parsed = JSON.parse(readFileSync(this.authPath, "utf8")) as unknown;
       return typeof parsed === "object" && parsed !== null ? (parsed as CodexAuthFile) : undefined;
     } catch {
       return undefined;
-    }
-  }
-
-  private writeFileAtomically(next: CodexAuthFile): void {
-    mkdirSync(path.dirname(this.authPath), { recursive: true });
-    const temporaryPath = `${this.authPath}.${process.pid}.${randomUUID()}.tmp`;
-    let descriptor: number | undefined;
-    try {
-      descriptor = openSync(temporaryPath, "wx", 0o600);
-      writeFileSync(descriptor, `${JSON.stringify(next, null, 2)}\n`, { encoding: "utf8" });
-      closeSync(descriptor);
-      descriptor = undefined;
-      renameSync(temporaryPath, this.authPath);
-    } catch (error) {
-      if (descriptor !== undefined) {
-        closeSync(descriptor);
-      }
-      try {
-        unlinkSync(temporaryPath);
-      } catch {
-        // The temp file may not have been created or may already have been renamed.
-      }
-      throw error;
     }
   }
 
@@ -201,13 +86,13 @@ export class CodexCredentialStore implements CredentialStore {
     if (providerId !== CODEX_PI_PROVIDER_ID) {
       return fn(await this.read(providerId, options));
     }
-    return this.withLock(async () => {
+    return withCredentialFileLock(this.authPath, "Codex", async () => {
       const current = await this.read(providerId, options);
       const next = await fn(current);
       if (!next || next.type !== "oauth") return next;
       const file = this.readFile() ?? {};
       const accountId = typeof next.accountId === "string" ? next.accountId : undefined;
-      this.writeFileAtomically({
+      writeCredentialFileAtomically(this.authPath, {
         ...file,
         tokens: {
           ...file.tokens,

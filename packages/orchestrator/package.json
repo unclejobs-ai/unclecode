@@ -9,6 +9,7 @@
     "@unclecode/config-core": "file:../config-core",
     "@unclecode/context-broker": "file:../context-broker",
     "@unclecode/contracts": "file:../contracts",
+    "@unclecode/pi-bridge": "file:../pi-bridge",
     "@unclecode/policy-engine": "file:../policy-engine",
     "@unclecode/plugin-host": "file:../plugin-host",
     "@unclecode/providers": "file:../providers",

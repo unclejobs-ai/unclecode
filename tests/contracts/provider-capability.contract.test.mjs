@@ -9,6 +9,7 @@ test("provider-capability fixtures expose canonical provider metadata", () => {
     "gemini",
     "openai",
     "deepseek",
+    "xai",
     "groq",
     "ollama",
     "copilot",

@@ -11,6 +11,7 @@
     { "path": "../config-core" },
     { "path": "../context-broker" },
     { "path": "../contracts" },
+    { "path": "../pi-bridge" },
     { "path": "../policy-engine" },
     { "path": "../plugin-host" },
     { "path": "../providers" },

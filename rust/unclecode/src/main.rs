@@ -321,6 +321,9 @@ fn run_with_start(args: Vec<OsString>, started_at: Instant) -> Result<u8, String
     if args.first().and_then(|arg| arg.to_str()) == Some("rust") {
         return run_native_rust_command(&args[1..], started_at);
     }
+    if let Some(auth_args) = cli_auth::provider_auth_args(&args) {
+        return launch_typescript_command_bridge("auth", &auth_args);
+    }
     if let Some(auth_args) = cli_auth::top_level_auth_args(&args) {
         return cli_auth::run_top_level_auth_command(&auth_args);
     }
@@ -5952,6 +5955,22 @@ mod tests {
             OsString::from("--device")
         ])
         .is_some());
+    }
+
+    #[test]
+    fn provider_auth_routes_to_typescript_except_openai() {
+        let routed = |argv: &[&str]| {
+            cli_auth::provider_auth_args(&argv.iter().map(OsString::from).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            routed(&["auth", "login", "xai"]),
+            Some(vec![OsString::from("login"), OsString::from("xai")])
+        );
+        assert!(routed(&["auth", "status", "xai"]).is_some());
+        assert!(routed(&["auth", "logout", "xai"]).is_some());
+        assert!(routed(&["auth", "login", "openai"]).is_none());
+        assert!(routed(&["auth", "login", "--device"]).is_none());
+        assert!(routed(&["auth", "status"]).is_none());
     }
 
     #[test]

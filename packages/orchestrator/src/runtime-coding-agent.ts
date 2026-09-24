@@ -113,7 +113,7 @@ export class RuntimeCodingAgent
           policyProfile: () => profileRef.current,
           runtimeMode: () => modeRef.current,
           permissionRuleStore,
-          ...(args.provider === "deepseek"
+          ...(args.provider === "deepseek" || args.provider === "xai"
             ? {}
             : {
                 webSearch: {

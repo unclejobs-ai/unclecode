@@ -7,6 +7,7 @@
     "unclecode": "./dist/index.js"
   },
   "dependencies": {
+    "@earendil-works/pi-ai": "^0.84.1",
     "@unclecode/agentops-db": "file:../../packages/agentops-db",
     "@unclecode/config-core": "file:../../packages/config-core",
     "@unclecode/context-broker": "file:../../packages/context-broker",

@@ -63,6 +63,7 @@ import { createRuntimeCodingAgent } from "./runtime-coding-agent.js";
 import { resolveDefaultWorkEngine, resolveWorkShellAuthLabel } from "./work-engine-auth.js";
 import {
   createPiBridgeProvider,
+  getUncleCodeCredentialModels,
   resolveCodexOAuthBridgeArgs,
   resolvePiProviderBaseUrl,
 } from "@unclecode/pi-bridge";
@@ -103,7 +104,7 @@ import {
 const WORK_PI_TURN_STEP_LIMIT = 16;
 const WORK_PI_TURN_COST_LIMIT_USD = 2;
 
-type QualityReviewProvider = "openai" | "anthropic" | "gemini" | "deepseek";
+type QualityReviewProvider = "openai" | "anthropic" | "gemini" | "deepseek" | "xai";
 
 export type QualityReviewSelection = {
   readonly provider: QualityReviewProvider;
@@ -116,6 +117,7 @@ const QUALITY_REVIEW_PROVIDER_ORDER: readonly QualityReviewProvider[] = [
   "gemini",
   "deepseek",
   "openai",
+  "xai",
 ];
 
 const QUALITY_REVIEW_PROVIDER_ENV = {
@@ -123,10 +125,11 @@ const QUALITY_REVIEW_PROVIDER_ENV = {
   anthropic: { key: "ANTHROPIC_API_KEY", model: "ANTHROPIC_MODEL", fallback: "claude-sonnet-4-20250514" },
   gemini: { key: "GEMINI_API_KEY", model: "GEMINI_MODEL", fallback: "gemini-2.5-flash" },
   deepseek: { key: "DEEPSEEK_API_KEY", model: "DEEPSEEK_MODEL", fallback: "deepseek-chat" },
+  xai: { key: "XAI_API_KEY", model: "XAI_MODEL", fallback: "grok-4.3" },
 } as const;
 
 function isQualityReviewProvider(value: string | undefined): value is QualityReviewProvider {
-  return value === "openai" || value === "anthropic" || value === "gemini" || value === "deepseek";
+  return value === "openai" || value === "anthropic" || value === "gemini" || value === "deepseek" || value === "xai";
 }
 
 /** Picks a real configured alternate route; otherwise a separate no-tools agent uses the direct route. */
@@ -647,6 +650,36 @@ export async function loadWorkCliBootstrap(
     apiKey: config.apiKey,
     openAIRuntime: config.openAIRuntime,
   }));
+  const createPiProviderOverride = (input: {
+    readonly provider: ReturnType<typeof resolveRuntimeProvider>;
+    readonly apiKey: string;
+    readonly model: string;
+    readonly reasoning: typeof config.reasoning;
+    readonly openAIRuntime: "api" | "codex" | undefined;
+    readonly toolRuntime: ToolRuntime;
+  }) => {
+    const codexOAuth = resolveCodexOAuthBridgeArgs({
+      provider: input.provider,
+      apiKey: input.apiKey,
+      openAIRuntime: input.openAIRuntime,
+    });
+    const baseUrl = resolvePiProviderBaseUrl(input.provider, env);
+    return createPiBridgeProvider({
+      provider: input.provider,
+      apiKey: input.apiKey,
+      model: input.model,
+      cwd,
+      reasoning: input.reasoning,
+      ...(systemPromptAppendix ? { systemPrompt: systemPromptAppendix } : {}),
+      toolRuntime: input.toolRuntime,
+      toolLoopMax: WORK_PI_TURN_STEP_LIMIT,
+      costLimitUsd: WORK_PI_TURN_COST_LIMIT_USD,
+      // xAI credentials live in UncleCode's own store (`unclecode auth login xai`).
+      ...(input.provider === "xai" ? { models: getUncleCodeCredentialModels(env) } : {}),
+      ...(codexOAuth ?? {}),
+      ...(baseUrl ? { baseUrl } : {}),
+    });
+  };
   const createConfiguredCodingAgent = (
     apiKey: string,
     model: string,
@@ -670,28 +703,15 @@ export async function loadWorkCliBootstrap(
       : {}),
     ...(activeEngine === "pi"
       ? {
-          providerOverrideFactory: ({ toolRuntime }: { toolRuntime: ToolRuntime }) => {
-            const runtimeProviderName = resolveRuntimeProvider(config.provider);
-            const codexOAuth = resolveCodexOAuthBridgeArgs({
-              provider: runtimeProviderName,
-              apiKey,
-              openAIRuntime: config.openAIRuntime,
-            });
-            const baseUrl = resolvePiProviderBaseUrl(runtimeProviderName, env);
-            return createPiBridgeProvider({
-              provider: runtimeProviderName,
+          providerOverrideFactory: ({ toolRuntime }: { toolRuntime: ToolRuntime }) =>
+            createPiProviderOverride({
+              provider: resolveRuntimeProvider(config.provider),
               apiKey,
               model,
-              cwd,
               reasoning,
-              ...(systemPromptAppendix ? { systemPrompt: systemPromptAppendix } : {}),
+              openAIRuntime: config.openAIRuntime,
               toolRuntime,
-              toolLoopMax: WORK_PI_TURN_STEP_LIMIT,
-              costLimitUsd: WORK_PI_TURN_COST_LIMIT_USD,
-              ...(codexOAuth ?? {}),
-              ...(baseUrl ? { baseUrl } : {}),
-            });
-          },
+            }),
         }
       : {}),
   });
@@ -728,6 +748,20 @@ export async function loadWorkCliBootstrap(
         reasoning: reviewConfig.reasoning,
         mode: reviewConfig.mode,
         toolAccess: "none",
+        // The native runtime has no xAI transport; an xAI-only machine reviews on pi too.
+        ...(reviewConfig.provider === "xai"
+          ? {
+              providerOverrideFactory: ({ toolRuntime }: { toolRuntime: ToolRuntime }) =>
+                createPiProviderOverride({
+                  provider: "xai",
+                  apiKey: reviewConfig.apiKey,
+                  model: reviewConfig.model,
+                  reasoning: reviewConfig.reasoning,
+                  openAIRuntime: undefined,
+                  toolRuntime,
+                }),
+            }
+          : {}),
         ...(reviewConfig.baseUrl ? { baseUrl: reviewConfig.baseUrl } : {}),
         ...(systemPromptAppendix ? { systemPrompt: systemPromptAppendix } : {}),
         ...(reviewConfig.openAIRuntime ? { openAIRuntime: reviewConfig.openAIRuntime } : {}),

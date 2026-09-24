@@ -80,12 +80,13 @@ const COMPAT_COPILOT_MODELS: &[&str] = &[
     "openai/o4-mini",
 ];
 const COMPAT_ZAI_MODELS: &[&str] = &["glm-5", "glm-4.5", "glm-4.5-air"];
+const XAI_MODELS: &[&str] = &["grok-4.3", "grok-4.5"];
 /// OMP is the delegated work/executor route: it is pinned to a single selector
 /// because UncleCode never picks the upstream model for a delegated turn.
 const OMP_MODELS: &[&str] = &["kimi-code/k3"];
 /// Providers UncleCode can drive as its own interactive runtime. `omp` is
 /// absent on purpose: it is executor-only and hands the whole turn to OMP.
-const RUNTIME_SUPPORTED_PROVIDERS: &[&str] = &["anthropic", "gemini", "openai", "deepseek"];
+const RUNTIME_SUPPORTED_PROVIDERS: &[&str] = &["anthropic", "gemini", "openai", "deepseek", "xai"];
 
 pub fn openai_reasoning_support(model_id: &str) -> ReasoningSupport {
     let normalized = model_id.trim().to_ascii_lowercase();
@@ -348,6 +349,7 @@ pub fn provider_label(provider_id: &str) -> String {
         "ollama" => "Ollama",
         "copilot" => "GitHub Copilot",
         "zai" => "z.ai",
+        "xai" => "xAI",
         "omp" => "OMP",
         other => other,
     }
@@ -365,6 +367,7 @@ fn is_known_provider(provider_id: &str) -> bool {
             | "ollama"
             | "copilot"
             | "zai"
+            | "xai"
             | "omp"
     )
 }
@@ -398,6 +401,7 @@ fn provider_env_keys(provider_id: &str) -> &'static [&'static str] {
         "ollama" => &["OLLAMA_BASE_URL", "OLLAMA_MODEL", "OLLAMA_API_KEY"],
         "copilot" => &["COPILOT_TOKEN", "COPILOT_MODEL"],
         "zai" => &["ZAI_API_KEY", "ZAI_MODEL"],
+        "xai" => &["XAI_API_KEY", "XAI_MODEL"],
         // OMP resolves its own credentials from its own profile; UncleCode reads
         // no environment for this route and holds no bearer token for it.
         "omp" => &[],
@@ -415,6 +419,7 @@ fn provider_endpoint_url(provider_id: &str) -> &'static str {
         "ollama" => "http://localhost:11434/api/chat",
         "copilot" => "https://api.githubcopilot.com/chat/completions",
         "zai" => "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        "xai" => "https://api.x.ai/v1/chat/completions",
         // OMP has no endpoint: the executor turn runs in a local subprocess.
         "omp" => "",
         _ => "",
@@ -474,6 +479,7 @@ fn provider_default_models(provider_id: &str) -> &'static [&'static str] {
         "ollama" => COMPAT_OLLAMA_MODELS,
         "copilot" => COMPAT_COPILOT_MODELS,
         "zai" => COMPAT_ZAI_MODELS,
+        "xai" => XAI_MODELS,
         "omp" => OMP_MODELS,
         _ => &[],
     }
@@ -555,6 +561,19 @@ mod tests {
         assert_eq!(policy.thinking_format, "deepseek");
         assert!(!policy.supports_tool_choice);
         assert!(policy.requires_reasoning_content_for_tool_calls);
+    }
+
+    #[test]
+    fn resolves_xai_runtime_route() {
+        let route = resolve_provider_route("xai", None).unwrap();
+        assert_eq!(route.label, "xAI");
+        assert_eq!(route.transport, "compat");
+        assert!(route.runtime_supported);
+        assert_eq!(route.default_model, "grok-4.3");
+        assert_eq!(route.env_keys, ["XAI_API_KEY", "XAI_MODEL"]);
+        let decision: serde_json::Value =
+            serde_json::from_str(&provider_runtime_decision_json(&route).unwrap()).unwrap();
+        assert_eq!(decision["runtimeKind"], "xai");
     }
 
     #[test]

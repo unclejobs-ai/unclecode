@@ -545,35 +545,35 @@ test("startup router keeps interactive boot behind dynamic imports without nativ
   );
   assert.match(
     programSource,
-    /\.action\(async \(options: AuthLoginCommandOptions\)[\s\S]*const\s+credentialsPath\s*=\s*resolveOpenAICredentialsPath\(\)/,
+    /\.action\(async \(provider: string \| undefined, options: AuthLoginCommandOptions\)[\s\S]*const\s+credentialsPath\s*=\s*resolveOpenAICredentialsPath\(\)/,
   );
   assert.match(
     programSource,
-    /\.action\(async \(options: AuthLoginCommandOptions\)[\s\S]*await\s+handleApiKeyStdinLogin\(/,
+    /\.action\(async \(provider: string \| undefined, options: AuthLoginCommandOptions\)[\s\S]*await\s+handleApiKeyStdinLogin\(/,
   );
   assert.match(
     programSource,
-    /\.action\(async \(options: AuthLoginCommandOptions\)[\s\S]*const\s+runtimeContext\s*=\s*await\s+resolveAuthLoginRuntimeContext\(options\)/,
+    /\.action\(async \(provider: string \| undefined, options: AuthLoginCommandOptions\)[\s\S]*const\s+runtimeContext\s*=\s*await\s+resolveAuthLoginRuntimeContext\(options\)/,
   );
   assert.match(
     programSource,
-    /\.action\(async \(options: AuthLoginCommandOptions\)[\s\S]*if\s*\(await\s+handleSavedAuthLogin\(\)\)\s*\{/,
+    /\.action\(async \(provider: string \| undefined, options: AuthLoginCommandOptions\)[\s\S]*if\s*\(await\s+handleSavedAuthLogin\(\)\)\s*\{/,
   );
   assert.match(
     programSource,
-    /\.action\(async \(options: AuthLoginCommandOptions\)[\s\S]*const\s+methodSelection\s*=\s*selectAuthLoginMethod\(options, runtimeContext\)/,
+    /\.action\(async \(provider: string \| undefined, options: AuthLoginCommandOptions\)[\s\S]*const\s+methodSelection\s*=\s*selectAuthLoginMethod\(options, runtimeContext\)/,
   );
   assert.match(
     programSource,
-    /\.action\(async \(options: AuthLoginCommandOptions\)[\s\S]*if\s*\(methodSelection\.method === "device"\)\s*\{/,
+    /\.action\(async \(provider: string \| undefined, options: AuthLoginCommandOptions\)[\s\S]*if\s*\(methodSelection\.method === "device"\)\s*\{/,
   );
   assert.match(
     programSource,
-    /\.action\(async \(options: AuthLoginCommandOptions\)[\s\S]*await\s+runDeviceAuthLogin\(/,
+    /\.action\(async \(provider: string \| undefined, options: AuthLoginCommandOptions\)[\s\S]*await\s+runDeviceAuthLogin\(/,
   );
   assert.match(
     programSource,
-    /\.action\(async \(options: AuthLoginCommandOptions\)[\s\S]*await\s+runBrowserAuthLogin\(/,
+    /\.action\(async \(provider: string \| undefined, options: AuthLoginCommandOptions\)[\s\S]*await\s+runBrowserAuthLogin\(/,
   );
   assert.match(
     programSource,
@@ -623,11 +623,11 @@ test("startup router keeps interactive boot behind dynamic imports without nativ
   assert.match(programSource, /function\s+handleMcpListCommand\(\):\s*void/);
   assert.match(
     programSource,
-    /auth[\s\S]*\.command\("status"\)[\s\S]*\.action\(async \(\) => \{[\s\S]*await\s+handleAuthStatusCommand\(\)/,
+    /auth[\s\S]*\.command\("status"\)[\s\S]*\.action\(async \(provider: string \| undefined\) => \{[\s\S]*await\s+handleAuthStatusCommand\(\)/,
   );
   assert.match(
     programSource,
-    /auth[\s\S]*\.command\("logout"\)[\s\S]*\.action\(async \(\) => \{[\s\S]*await\s+handleAuthLogoutCommand\(\)/,
+    /auth[\s\S]*\.command\("logout"\)[\s\S]*\.action\(async \(provider: string \| undefined\) => \{[\s\S]*await\s+handleAuthLogoutCommand\(\)/,
   );
   assert.match(
     programSource,

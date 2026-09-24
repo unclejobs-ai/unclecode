@@ -11,6 +11,10 @@ import {
   type ReasoningSupport,
   type ResolvedOpenAIAuth,
 } from "@unclecode/providers";
+import {
+  resolveProviderCredentialsPath,
+  UncleCodeCredentialStore,
+} from "@unclecode/pi-bridge";
 import { config as loadEnv } from "dotenv";
 import { z } from "zod";
 
@@ -19,7 +23,7 @@ import { runRustCommand, runRustCommandSync } from "./rust-command.js";
 
 loadEnv({ quiet: true });
 
-const providerSchema = z.enum(["anthropic", "gemini", "openai", "deepseek"]);
+const providerSchema = z.enum(["anthropic", "gemini", "openai", "deepseek", "xai"]);
 
 const DEEPSEEK_DEFAULT_ENDPOINT = "https://api.deepseek.com/chat/completions";
 
@@ -34,6 +38,8 @@ const envSchema = z.object({
   ANTHROPIC_MODEL: z.string().min(1).default("claude-sonnet-4-20250514"),
   GEMINI_API_KEY: z.string().optional(),
   GEMINI_MODEL: z.string().min(1).default("gemini-2.5-flash"),
+  XAI_API_KEY: z.string().optional(),
+  XAI_MODEL: z.string().min(1).default("grok-4.3"),
 });
 
 const APP_REASONING_CACHE_MAX_ENTRIES = 64;
@@ -348,6 +354,30 @@ export async function loadConfig(
       authLabel: "env-key",
       baseUrl: resolveDeepSeekEndpoint(parsed.data.DEEPSEEK_BASE_URL),
       reasoning: resolveReasoningConfig({ provider, model, mode, env }),
+    };
+  }
+
+  if (provider === "xai") {
+    const model = overrides?.model ?? parsed.data.XAI_MODEL;
+    const reasoning = resolveReasoningConfig({ provider, model, mode, env });
+    const envKey = parsed.data.XAI_API_KEY?.trim();
+    if (envKey) {
+      return { provider, apiKey: envKey, model, mode, authLabel: "env-key", reasoning };
+    }
+    // pi-ai resolves (and refreshes) the stored credential per request; no key is copied here.
+    const stored = await new UncleCodeCredentialStore(resolveProviderCredentialsPath(env)).read("xai");
+    if (!stored) {
+      throw new Error(
+        "xAI is not signed in. Run `unclecode auth login xai` (SuperGrok / X Premium) or set XAI_API_KEY.",
+      );
+    }
+    return {
+      provider,
+      apiKey: "",
+      model,
+      mode,
+      authLabel: stored.type === "oauth" ? "oauth-pi" : "api-key-file",
+      reasoning,
     };
   }
 

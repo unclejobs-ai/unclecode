@@ -17,3 +17,8 @@ export {
   resolvePiProviderBaseUrl,
   toPiThinkingLevel,
 } from "./pi-model.js";
+export {
+  getUncleCodeCredentialModels,
+  resolveProviderCredentialsPath,
+  UncleCodeCredentialStore,
+} from "./unclecode-credential-store.js";

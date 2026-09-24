@@ -53,6 +53,24 @@ pub fn top_level_auth_args(args: &[OsString]) -> Option<Vec<OsString>> {
     }
 }
 
+/// `auth <login|status|logout> <provider>` for a provider other than OpenAI.
+/// Those flows are pi-ai's and run in the TypeScript CLI.
+pub fn provider_auth_args(args: &[OsString]) -> Option<Vec<OsString>> {
+    if args.first().and_then(|arg| arg.to_str()) != Some("auth") {
+        return None;
+    }
+    let rest = &args[1..];
+    let subcommand = rest.first().and_then(|arg| arg.to_str())?;
+    if !matches!(subcommand, "login" | "status" | "logout") {
+        return None;
+    }
+    let provider = rest.get(1).and_then(|arg| arg.to_str())?;
+    if provider.starts_with('-') || provider == "openai" {
+        return None;
+    }
+    Some(rest.to_vec())
+}
+
 pub fn run_top_level_auth_command(args: &[OsString]) -> Result<u8, String> {
     match args.first().and_then(|arg| arg.to_str()) {
         None | Some("--help") | Some("-h") | Some("help") => {

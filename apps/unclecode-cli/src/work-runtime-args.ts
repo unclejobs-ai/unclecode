@@ -5,7 +5,7 @@ export type WorkEngine = "native" | "pi";
 
 export type ParsedArgs = {
   cwd: string;
-  provider?: "anthropic" | "gemini" | "openai" | "deepseek";
+  provider?: "anthropic" | "gemini" | "openai" | "deepseek" | "xai";
   model?: string;
   reasoning?: ModeReasoningEffort;
   sessionId?: string;
@@ -41,14 +41,14 @@ export function printTools(): void {
 
 export function resolveRuntimeProvider(
   provider: string,
-): "anthropic" | "gemini" | "openai" | "deepseek" {
+): "anthropic" | "gemini" | "openai" | "deepseek" | "xai" {
   const parsed = JSON.parse(
     runRustCommandSync(["rust", "model", "provider-runtime-json", provider], process.cwd()).trim(),
   ) as unknown;
   const decision = isRecord(parsed) ? parsed : {};
   const routed = typeof decision.runtimeKind === "string" ? decision.runtimeKind : undefined;
   if (
-    (routed === "anthropic" || routed === "gemini" || routed === "openai" || routed === "deepseek")
+    (routed === "anthropic" || routed === "gemini" || routed === "openai" || routed === "deepseek" || routed === "xai")
     && decision.runtimeSupported === true
   ) {
     return routed;
@@ -90,6 +90,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     || parsed.provider === "gemini"
     || parsed.provider === "openai"
     || parsed.provider === "deepseek"
+    || parsed.provider === "xai"
   ) {
     result.provider = parsed.provider;
   }

@@ -53,6 +53,7 @@ import {
 } from "./operational.js";
 import { shouldLaunchDefaultWorkSession } from "./startup-paths.js";
 import { buildWorkCommandArgs, launchWorkEntrypoint } from "./work-bootstrap.js";
+import { printProviderAuthStatus, runProviderLogout, runProviderOAuthLogin } from "./provider-auth.js";
 
 const UNCLECODE_CLI_VERSION = "0.1.0";
 
@@ -729,7 +730,8 @@ function registerAuthCommands(program: Command): void {
 
   authCommand
     .command("login")
-    .description("Sign in with OpenAI OAuth or save an OpenAI API key")
+    .description("Sign in with OpenAI OAuth or save an OpenAI API key; `login <provider>` signs in to another provider (e.g. xai)")
+    .argument("[provider]", "Provider to sign in to with its own OAuth flow (e.g. xai)")
     .option("--browser", "Generate a browser-based login URL")
     .option("--device", "Use device-code login")
     .option("--api-key-stdin", "Read an OpenAI API key from stdin and store it as local UncleCode auth")
@@ -737,7 +739,11 @@ function registerAuthCommands(program: Command): void {
     .option("--org <org>", "Store default OpenAI organization context with an API key login")
     .option("--project <project>", "Store default OpenAI project context with an API key login")
     .option("--print", "Print the login URL explicitly (default browser behavior today)")
-    .action(async (options: AuthLoginCommandOptions) => {
+    .action(async (provider: string | undefined, options: AuthLoginCommandOptions) => {
+      if (provider && provider !== "openai") {
+        await runProviderOAuthLogin(provider);
+        return;
+      }
       const credentialsPath = resolveOpenAICredentialsPath();
       if (await handleApiKeyStdinLogin({ options })) {
         return;
@@ -777,15 +783,25 @@ function registerAuthCommands(program: Command): void {
 
   authCommand
     .command("status")
-    .description("Show OpenAI auth source, org/project context, and expiry state")
-    .action(async () => {
+    .description("Show OpenAI auth source, org/project context, and expiry state; `status <provider>` checks another provider")
+    .argument("[provider]", "Provider to check (e.g. xai)")
+    .action(async (provider: string | undefined) => {
+      if (provider && provider !== "openai") {
+        await printProviderAuthStatus(provider);
+        return;
+      }
       await handleAuthStatusCommand();
     });
 
   authCommand
     .command("logout")
-    .description("Clear locally stored UncleCode auth credentials")
-    .action(async () => {
+    .description("Clear locally stored UncleCode auth credentials; `logout <provider>` clears one provider")
+    .argument("[provider]", "Provider to sign out of (e.g. xai)")
+    .action(async (provider: string | undefined) => {
+      if (provider && provider !== "openai") {
+        await runProviderLogout(provider);
+        return;
+      }
       await handleAuthLogoutCommand();
     });
 }

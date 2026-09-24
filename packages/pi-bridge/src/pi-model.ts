@@ -14,6 +14,7 @@ export const PI_BRIDGE_PROVIDER_IDS: Readonly<Record<ProviderName, string>> = {
   deepseek: "deepseek",
   anthropic: "anthropic",
   gemini: "google",
+  xai: "xai",
 };
 const PI_BRIDGE_BUILTIN_PROVIDER_IDS = new Set(Object.values(PI_BRIDGE_PROVIDER_IDS));
 
@@ -32,6 +33,7 @@ const PI_PROVIDER_DEFAULT_APIS: Readonly<Record<ProviderName, string>> = {
   deepseek: "openai-completions",
   anthropic: "anthropic-messages",
   gemini: "google-generative-ai",
+  xai: "openai-completions",
 };
 
 const PI_PROVIDER_DEFAULT_BASE_URLS: Readonly<Record<ProviderName, string>> = {
@@ -39,6 +41,7 @@ const PI_PROVIDER_DEFAULT_BASE_URLS: Readonly<Record<ProviderName, string>> = {
   deepseek: "https://api.deepseek.com",
   anthropic: "https://api.anthropic.com",
   gemini: "https://generativelanguage.googleapis.com/v1beta",
+  xai: "https://api.x.ai/v1",
 };
 
 const PI_PROVIDER_BASE_URL_ENV_KEYS: Readonly<Record<ProviderName, readonly string[]>> = {
@@ -46,6 +49,7 @@ const PI_PROVIDER_BASE_URL_ENV_KEYS: Readonly<Record<ProviderName, readonly stri
   deepseek: ["DEEPSEEK_BASE_URL"],
   anthropic: ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_BASE_URL"],
   gemini: ["GEMINI_BASE_URL", "GEMINI_API_BASE_URL"],
+  xai: ["XAI_BASE_URL"],
 };
 
 export function resolvePiProviderBaseUrl(
