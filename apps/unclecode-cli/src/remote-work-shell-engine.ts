@@ -78,6 +78,7 @@ export async function createRemoteWorkShellEngine(
   if (!initial.ok) throw new Error(initial.message);
   let ownerClient = client;
   let ownerState = initial.state as State;
+  let ownerStateJson = JSON.stringify(ownerState);
   let state = ownerState;
   let revision = initial.revision;
   let stateRequestSequence = 0;
@@ -142,6 +143,11 @@ export async function createRemoteWorkShellEngine(
       readableRequestSequenceFloor = stateRequestSequence + 1;
     }
     acceptedStateRequestSequence = Math.max(acceptedStateRequestSequence, requestSequence);
+    // Every poll parses a fresh copy of the owner state. Re-publishing an
+    // unchanged copy re-rendered the whole TUI ten times a second at idle.
+    const nextJson = JSON.stringify(next);
+    if (source === "read" && nextJson === ownerStateJson) return false;
+    ownerStateJson = nextJson;
     ownerState = next as State;
     notify(projectOwnerState(ownerState));
     return true;

@@ -778,3 +778,24 @@ test("remote steer submission carries the run identity captured by the owner", a
   assert.deepEqual(invocations[0].args, ["narrow the diff", "run-alpha"]);
   engine.dispose();
 });
+
+test("remote adapter polls without notifying when the owner state is unchanged", async () => {
+  const revision = 4;
+  let state = { mode: "standard", entries: [] };
+  // The owner answers over a socket, so every poll parses a fresh copy.
+  const client = {
+    async readEngineState() { return { ok: true, revision, state: structuredClone(state), result: null }; },
+  };
+  const engine = await createRemoteWorkShellEngine(client, "session-idle");
+  const seen = [];
+  engine.subscribe((next) => seen.push(next));
+
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  assert.equal(seen.length, 0, "an idle owner must not re-render the TUI on every poll");
+
+  state = { ...state, entries: [{ role: "assistant", text: "streamed" }] };
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(seen.length, 1, "a content change at the same revision must still reach the TUI");
+  assert.equal(seen[0].entries[0].text, "streamed");
+  engine.dispose();
+});

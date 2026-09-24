@@ -192,19 +192,27 @@ export function useWorkShellDashboardHomeSync(input: {
   readonly refreshHomeState?: (() => Promise<TuiShellHomeState>) | undefined;
 }): void {
   const previousHomeSyncStateRef = useRef<WorkShellDashboardHomeSyncState | undefined>(undefined);
+  // The pane re-renders on every `home.updated` and hands us freshly allocated
+  // line arrays with unchanged contents. Keyed on identity, each sync caused the
+  // next one (an idle render loop spawning Rust three times per frame), so the
+  // effects key on content.
+  const bridgeLinesKey = input.bridgeLines.join("\n");
+  const memoryLinesKey = input.memoryLines.join("\n");
+  const bridgeLines = useMemo(() => input.bridgeLines, [bridgeLinesKey]);
+  const memoryLines = useMemo(() => input.memoryLines, [memoryLinesKey]);
 
   useEffect(() => {
     input.onSyncHomeState?.(
       createWorkShellDashboardHomePatch({
         authLabel: input.authLabel,
-        bridgeLines: input.bridgeLines,
-        memoryLines: input.memoryLines,
+        bridgeLines,
+        memoryLines,
       }),
     );
   }, [
     input.authLabel,
-    input.bridgeLines,
-    input.memoryLines,
+    bridgeLines,
+    memoryLines,
     input.onSyncHomeState,
   ]);
 
@@ -212,8 +220,8 @@ export function useWorkShellDashboardHomeSync(input: {
     const nextHomeSyncState = createWorkShellDashboardHomeSyncState({
       isBusy: input.isBusy,
       authLabel: input.authLabel,
-      bridgeLines: input.bridgeLines,
-      memoryLines: input.memoryLines,
+      bridgeLines,
+      memoryLines,
     });
     const previousHomeSyncState = previousHomeSyncStateRef.current;
     previousHomeSyncStateRef.current = nextHomeSyncState;
@@ -239,9 +247,9 @@ export function useWorkShellDashboardHomeSync(input: {
     };
   }, [
     input.authLabel,
-    input.bridgeLines,
+    bridgeLines,
     input.isBusy,
-    input.memoryLines,
+    memoryLines,
     input.onSyncHomeState,
     input.refreshHomeState,
   ]);
