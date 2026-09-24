@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { unlink } from "node:fs/promises";
 
@@ -43,7 +44,8 @@ function ownerServiceCommand(): readonly [string, readonly string[]] {
     sourceMode ? "./runtime-owner-service.ts" : "./runtime-owner-service.js",
     import.meta.url,
   ));
-  return [process.execPath, sourceMode ? ["--import", "tsx", entry] : [entry]];
+  // Resolve tsx from this module, not the owner's cwd (its lease directory).
+  return [process.execPath, sourceMode ? ["--import", import.meta.resolve("tsx"), entry] : [entry]];
 }
 
 function waitForChildExit(child: ReturnType<typeof spawn>, timeoutMs: number): Promise<boolean> {
@@ -116,7 +118,9 @@ export async function spawnDetachedRuntimeOwner(input: {
     "--owner-id", ownerId,
     "--boot-id", bootId,
   ], {
-    cwd: process.cwd(),
+    // The owner outlives this session and serves every workspace; the launching
+    // cwd may be deleted later, which fails every Rust spawn with ENOENT.
+    cwd: dirname(input.leasePath),
     detached: true,
     env: runtimeOwnerServiceEnvironment(),
     // The owner must not retain a terminal pipe after handoff. In particular,

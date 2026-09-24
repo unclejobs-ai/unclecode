@@ -511,3 +511,19 @@ test("published runtime owner lease includes a real process-start identity", asy
   assert.ok(published.processStartId.length > 0);
   assert.equal(published.processStartId, await processStartIdentity(published.pid));
 });
+
+test("detached owner runs in its lease directory, not the launching workspace", async () => {
+  // The owner outlives the session that started it and serves every workspace.
+  // Inheriting the launcher's cwd let a deleted scratch dir or worktree break
+  // every later Rust spawn with `spawnSync … ENOENT`.
+  const root = await mkdtemp(join(tmpdir(), "unclecode-owner-cwd-"));
+  let spawnedCwd;
+  await rejectDetachedStartup(fixtureOwnerOptions(root, {
+    spawnProcess: (_command, args, options) => {
+      spawnedCwd = options.cwd;
+      return spawnLeaseThenExit(args, options);
+    },
+  }), /exited before publishing a healthy lease/);
+  assert.equal(spawnedCwd, root);
+  await rm(root, { recursive: true, force: true });
+});
