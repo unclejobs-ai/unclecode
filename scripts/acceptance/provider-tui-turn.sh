@@ -28,8 +28,14 @@ stop_owners_in_work() {
 cleanup() { tmux kill-session -t "$S" 2>/dev/null; stop_owners_in_work; rm -rf "$WORK"; }
 trap cleanup EXIT
 
+# tmux sessions inherit the tmux server's environment, not ours: forward proxy settings.
+ENV_ARGS=()
+for name in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy NO_PROXY no_proxy; do
+  if [ -n "${!name+x}" ]; then ENV_ARGS+=(-e "$name=${!name}"); fi
+done
+
 T0=$(now_ms)
-tmux new-session -d -s "$S" -x 120 -y 40 -c "$WORK" \
+tmux new-session -d -s "$S" -x 120 -y 40 -c "$WORK" ${ENV_ARGS[@]+"${ENV_ARGS[@]}"} \
   "node '$REPO/bin/unclecode.cjs' work --provider '$PROVIDER' --model '$MODEL'; echo EXIT=\$?; sleep 30"
 ready=""
 for _ in $(seq 1 600); do

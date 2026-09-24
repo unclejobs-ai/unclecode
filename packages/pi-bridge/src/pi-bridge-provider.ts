@@ -30,6 +30,7 @@ import {
   toPiImageContent,
   toPiTools,
 } from "./pi-message-map.js";
+import { enableEnvProxyForFetch } from "./env-proxy.js";
 import {
   getSharedPiModels,
   resolvePiModel,
@@ -96,6 +97,7 @@ class PiBridgeProvider implements LlmProvider {
   private readonly costLimitUsd: number | undefined;
 
   constructor(private readonly args: CreatePiBridgeProviderArgs) {
+    enableEnvProxyForFetch();
     this.piModel = args.piModel
       ?? resolvePiModel(args.provider, args.model, args.models, args.piProvider, args.baseUrl);
     this.reasoning = args.reasoning;

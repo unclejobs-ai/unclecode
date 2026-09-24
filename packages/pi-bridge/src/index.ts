@@ -22,3 +22,4 @@ export {
   resolveProviderCredentialsPath,
   UncleCodeCredentialStore,
 } from "./unclecode-credential-store.js";
+export { enableEnvProxyForFetch } from "./env-proxy.js";

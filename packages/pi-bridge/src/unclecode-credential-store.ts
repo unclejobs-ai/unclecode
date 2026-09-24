@@ -12,6 +12,7 @@ import type {
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 
 import { errorCode, withCredentialFileLock, writeCredentialFileAtomically } from "./credential-file.js";
+import { enableEnvProxyForFetch } from "./env-proxy.js";
 
 type ProviderCredentialFile = Record<string, Credential>;
 
@@ -92,6 +93,7 @@ export function getUncleCodeCredentialModels(env: NodeJS.ProcessEnv = process.en
   const filePath = resolveProviderCredentialsPath(env);
   let models = modelsByPath.get(filePath);
   if (!models) {
+    enableEnvProxyForFetch(env);
     models = builtinModels({ credentials: new UncleCodeCredentialStore(filePath) });
     modelsByPath.set(filePath, models);
   }
