@@ -656,6 +656,7 @@ export async function loadWorkCliBootstrap(
     readonly model: string;
     readonly reasoning: typeof config.reasoning;
     readonly openAIRuntime: "api" | "codex" | undefined;
+    readonly credentialStore: boolean;
     readonly toolRuntime: ToolRuntime;
   }) => {
     const codexOAuth = resolveCodexOAuthBridgeArgs({
@@ -674,8 +675,8 @@ export async function loadWorkCliBootstrap(
       toolRuntime: input.toolRuntime,
       toolLoopMax: WORK_PI_TURN_STEP_LIMIT,
       costLimitUsd: WORK_PI_TURN_COST_LIMIT_USD,
-      // xAI credentials live in UncleCode's own store (`unclecode auth login xai`).
-      ...(input.provider === "xai" ? { models: getUncleCodeCredentialModels(env) } : {}),
+      // `unclecode auth login <provider>` credentials live in UncleCode's own store.
+      ...(input.credentialStore ? { models: getUncleCodeCredentialModels(env) } : {}),
       ...(codexOAuth ?? {}),
       ...(baseUrl ? { baseUrl } : {}),
     });
@@ -710,6 +711,7 @@ export async function loadWorkCliBootstrap(
               model,
               reasoning,
               openAIRuntime: config.openAIRuntime,
+              credentialStore: config.credentialStore === true,
               toolRuntime,
             }),
         }
@@ -748,16 +750,18 @@ export async function loadWorkCliBootstrap(
         reasoning: reviewConfig.reasoning,
         mode: reviewConfig.mode,
         toolAccess: "none",
-        // The native runtime has no xAI transport; an xAI-only machine reviews on pi too.
-        ...(reviewConfig.provider === "xai"
+        // The native runtime has no xAI transport and cannot read the credential store,
+        // so those reviews run on pi too.
+        ...(reviewConfig.provider === "xai" || reviewConfig.credentialStore
           ? {
               providerOverrideFactory: ({ toolRuntime }: { toolRuntime: ToolRuntime }) =>
                 createPiProviderOverride({
-                  provider: "xai",
+                  provider: resolveRuntimeProvider(reviewConfig.provider),
                   apiKey: reviewConfig.apiKey,
                   model: reviewConfig.model,
                   reasoning: reviewConfig.reasoning,
                   openAIRuntime: undefined,
+                  credentialStore: reviewConfig.credentialStore === true,
                   toolRuntime,
                 }),
             }

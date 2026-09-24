@@ -67,6 +67,8 @@ export type AppConfig = {
   openAIAccountId?: string | null;
   authIssueMessage?: string;
   baseUrl?: string;
+  /** Auth resolves inside pi-ai from UncleCode's credential store (`unclecode auth login <provider>`); `apiKey` is empty. */
+  credentialStore?: true;
 };
 
 function resolveDeepSeekEndpoint(baseUrl: string | undefined): string {
@@ -138,6 +140,27 @@ function isAppReasoningConfig(value: unknown): value is AppReasoningConfig {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** A stored `unclecode auth login <provider>` credential, as config; pi-ai reads and refreshes it per request. */
+async function credentialStoreConfig(input: {
+  provider: ProviderId;
+  model: string;
+  mode: ModeProfileId;
+  reasoning: AppReasoningConfig;
+  env: NodeJS.ProcessEnv;
+}): Promise<AppConfig | undefined> {
+  const stored = await new UncleCodeCredentialStore(resolveProviderCredentialsPath(input.env)).read(input.provider);
+  if (!stored) return undefined;
+  return {
+    provider: input.provider,
+    apiKey: "",
+    model: input.model,
+    mode: input.mode,
+    authLabel: stored.type === "oauth" ? "oauth-pi" : "api-key-file",
+    reasoning: input.reasoning,
+    credentialStore: true,
+  };
 }
 
 async function resolveOpenAIAuthForConfig(input: {
@@ -360,25 +383,15 @@ export async function loadConfig(
   if (provider === "xai") {
     const model = overrides?.model ?? parsed.data.XAI_MODEL;
     const reasoning = resolveReasoningConfig({ provider, model, mode, env });
+    const stored = await credentialStoreConfig({ provider, model, mode, reasoning, env });
+    if (stored) return stored;
     const envKey = parsed.data.XAI_API_KEY?.trim();
-    if (envKey) {
-      return { provider, apiKey: envKey, model, mode, authLabel: "env-key", reasoning };
-    }
-    // pi-ai resolves (and refreshes) the stored credential per request; no key is copied here.
-    const stored = await new UncleCodeCredentialStore(resolveProviderCredentialsPath(env)).read("xai");
-    if (!stored) {
+    if (!envKey) {
       throw new Error(
         "xAI is not signed in. Run `unclecode auth login xai` (SuperGrok / X Premium) or set XAI_API_KEY.",
       );
     }
-    return {
-      provider,
-      apiKey: "",
-      model,
-      mode,
-      authLabel: stored.type === "oauth" ? "oauth-pi" : "api-key-file",
-      reasoning,
-    };
+    return { provider, apiKey: envKey, model, mode, authLabel: "env-key", reasoning };
   }
 
   if (provider === "gemini") {
@@ -397,18 +410,24 @@ export async function loadConfig(
     };
   }
 
+  const model = overrides?.model ?? parsed.data.ANTHROPIC_MODEL;
+  const reasoning = resolveReasoningConfig({ provider, model, mode, env });
+  // A signed-in credential wins over an environment key, as in pi.
+  const stored = await credentialStoreConfig({ provider, model, mode, reasoning, env });
+  if (stored) return stored;
   const apiKey = parsed.data.ANTHROPIC_API_KEY?.trim();
   if (!apiKey) {
-    throw new Error("ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic");
+    throw new Error(
+      "ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic, or sign in with a Claude subscription: `unclecode auth login anthropic`.",
+    );
   }
 
-  const model = overrides?.model ?? parsed.data.ANTHROPIC_MODEL;
   return {
     provider,
     apiKey,
     model,
     mode,
     authLabel: "env-key",
-    reasoning: resolveReasoningConfig({ provider, model, mode, env }),
+    reasoning,
   };
 }

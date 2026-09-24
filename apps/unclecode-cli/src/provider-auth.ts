@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 
 import type { AuthEvent, AuthPrompt } from "@earendil-works/pi-ai";
@@ -14,16 +15,29 @@ function requireOAuthProvider(providerId: string): string {
   return provider.auth.oauth.name;
 }
 
+// Long OAuth URLs break when copied out of a wrapped terminal (a truncated `state`
+// fails the provider's check), so hand them to the browser directly.
+function openInBrowser(url: string): void {
+  const opener = process.platform === "darwin" ? "open" : process.platform === "win32" ? "explorer" : "xdg-open";
+  const child = spawn(opener, [url], { detached: true, stdio: "ignore" });
+  child.once("error", () => {
+    process.stdout.write("Could not open a browser; open the URL above manually.\n");
+  });
+  child.unref();
+}
+
 function printAuthEvent(event: AuthEvent): void {
   switch (event.type) {
     case "device_code":
       process.stdout.write(`Open ${event.verificationUri}\nEnter code: ${event.userCode}\n`);
+      openInBrowser(event.verificationUri);
       if (event.expiresInSeconds) {
         process.stdout.write(`The code expires in ${Math.round(event.expiresInSeconds / 60)} min.\n`);
       }
       return;
     case "auth_url":
       process.stdout.write(`Open ${event.url}\n${event.instructions ? `${event.instructions}\n` : ""}`);
+      openInBrowser(event.url);
       return;
     case "info":
     case "progress":
