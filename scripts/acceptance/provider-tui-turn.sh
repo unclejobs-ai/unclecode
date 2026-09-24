@@ -17,7 +17,15 @@ printf 'alpha\n' > "$WORK/$MARKER.txt"
 printf 'beta\n' > "$WORK/second-file.txt"
 S=ucturn$$
 now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time*1000'; }
-cleanup() { tmux kill-session -t "$S" 2>/dev/null; rm -rf "$WORK"; }
+# The TUI may start the shared runtime owner daemon with this scratch dir as its cwd; a
+# daemon left in a deleted cwd fails every later Rust spawn with `spawnSync … ENOENT`.
+# Stop any owner whose cwd is the scratch dir before removing it.
+stop_owners_in_work() {
+  for pid in $(pgrep -f runtime-owner-service); do
+    if lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | grep -qx "n$(cd "$WORK" && pwd -P)"; then kill "$pid"; fi
+  done
+}
+cleanup() { tmux kill-session -t "$S" 2>/dev/null; stop_owners_in_work; rm -rf "$WORK"; }
 trap cleanup EXIT
 
 T0=$(now_ms)
