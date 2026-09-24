@@ -101,13 +101,15 @@ export type WorkAgentTurnResult = {
 
 const CLEARED_TURN_RESULT: WorkAgentTurnResult = { text: WORK_TURN_CANCELLED_SUMMARY, cancelled: true };
 
-// These tools cannot mutate workspace bytes. Everything else is deliberately
+// These tools cannot mutate workspace bytes (run_code has no fs access of its own;
+// each tool it calls arrives as its own tool.started event). Everything else is deliberately
 // treated as mutation-capable so a newly added tool cannot silently inherit
 // the lightweight direct-turn evidence path.
 const DIRECT_READ_ONLY_TOOLS = new Set([
   "ask_user",
   "list_files",
   "read_file",
+  "run_code",
   "search_text",
   "web_search",
 ]);

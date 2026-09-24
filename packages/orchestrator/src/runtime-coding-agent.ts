@@ -13,6 +13,7 @@ import {
   type CodingAgentTraceEvent,
   type TurnAgent,
 } from "./coding-agent.js";
+import { createCodeModeToolRuntime, type CodeModeNestedCall } from "./code-mode.js";
 import { createToolRuntime } from "./tools.js";
 import { resolveModeExecutionPolicyProfile } from "./tool-executor.js";
 import {
@@ -77,6 +78,33 @@ const READ_ONLY_QUALITY_TOOL_RUNTIME: ToolRuntime = {
   },
 };
 
+/** run_code's nested calls as ordinary tool events, so the TUI and quality gates see each one. */
+function nestedCallTraceEvent(provider: ProviderToolTraceEvent["provider"], call: CodeModeNestedCall): ProviderToolTraceEvent {
+  return call.phase === "started"
+    ? {
+        type: "tool.started",
+        level: "default",
+        provider,
+        toolName: call.toolName,
+        toolCallId: call.callId,
+        input: call.input,
+        startedAt: call.startedAt,
+      }
+    : {
+        type: "tool.completed",
+        level: "default",
+        provider,
+        toolName: call.toolName,
+        toolCallId: call.callId,
+        input: call.input,
+        isError: call.isError,
+        output: call.output,
+        startedAt: call.startedAt,
+        completedAt: call.completedAt,
+        durationMs: call.completedAt - call.startedAt,
+      };
+}
+
 export class RuntimeCodingAgent
   extends BaseCodingAgent<
     ProviderInputAttachment,
@@ -106,7 +134,7 @@ export class RuntimeCodingAgent
       current: resolveModeExecutionPolicyProfile({ mode: modeRef.current, envShellOptIn }),
     };
     const permissionRuleStore = createCanonicalPermissionRuleStore(args.initialPermissionRules ?? []);
-    const toolRuntime = args.toolAccess === "none"
+    const conversationToolRuntime = args.toolAccess === "none"
       ? READ_ONLY_QUALITY_TOOL_RUNTIME
       : createToolRuntime({
           interactionBridge,
@@ -123,6 +151,14 @@ export class RuntimeCodingAgent
                   ...(args.openAIRuntime ? { openAIRuntime: args.openAIRuntime } : {}),
                 },
               }),
+        });
+    // Code Mode adds `run_code` over the same policy-gated tools; UNCLECODE_CODE_MODE=off removes it.
+    // Its nested calls are traced like direct ones once the agent exists (see below).
+    const nestedCallSink: { emit?: (call: CodeModeNestedCall) => void } = {};
+    const toolRuntime = args.toolAccess === "none" || process.env.UNCLECODE_CODE_MODE === "off"
+      ? conversationToolRuntime
+      : createCodeModeToolRuntime(conversationToolRuntime, {
+          onNestedCall: (call) => nestedCallSink.emit?.(call),
         });
     const runtimeProvider = args.providerOverride
       ?? args.providerOverrideFactory?.({ toolRuntime })
@@ -143,6 +179,7 @@ export class RuntimeCodingAgent
       model: args.model,
       provider: runtimeProvider,
     });
+    nestedCallSink.emit = (call) => this.emitTrace(nestedCallTraceEvent(args.provider, call));
     this.runtimeProvider = runtimeProvider;
     this.interactionBridge = interactionBridge;
     this.envShellOptIn = envShellOptIn;

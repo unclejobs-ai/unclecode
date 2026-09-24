@@ -236,7 +236,7 @@ export class CodingAgent<
     }
   }
 
-  private emitTrace(event: CodingAgentTraceEvent<ToolTraceEvent>): void {
+  protected emitTrace(event: CodingAgentTraceEvent<ToolTraceEvent>): void {
     if (!this.traceListener) {
       return;
     }

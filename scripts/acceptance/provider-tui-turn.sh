@@ -5,6 +5,8 @@
 # appeared. Needs real credentials (e.g. `unclecode auth login xai`) — it spends tokens.
 #
 # usage: scripts/acceptance/provider-tui-turn.sh <out-dir> <provider> <model> [timeout-sec]
+# optional env: UC_TURN_SETUP (shell run in the scratch dir), UC_TURN_PROMPT, UC_TURN_EXPECT
+#               (fixed string the answer must contain; defaults to the marker file name)
 # exit:  0 = tool trace and answer seen, 1 = TUI never became ready, 2 = turn incomplete
 set -u
 OUT=$1; PROVIDER=$2; MODEL=$3; TIMEOUT=${4:-120}
@@ -15,6 +17,7 @@ mkdir -p "$OUT"; rm -f "$OUT"/f-*.txt "$OUT"/summary.txt
 WORK=$(mktemp -d)
 printf 'alpha\n' > "$WORK/$MARKER.txt"
 printf 'beta\n' > "$WORK/second-file.txt"
+if [ -n "${UC_TURN_SETUP:-}" ]; then (cd "$WORK" && eval "$UC_TURN_SETUP"); fi
 S=ucturn$$
 now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time*1000'; }
 # The TUI may start the shared runtime owner daemon with this scratch dir as its cwd; a
@@ -30,7 +33,7 @@ trap cleanup EXIT
 
 # tmux sessions inherit the tmux server's environment, not ours: forward proxy settings.
 ENV_ARGS=()
-for name in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy NO_PROXY no_proxy; do
+for name in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy NO_PROXY no_proxy UNCLECODE_CODE_MODE; do
   if [ -n "${!name+x}" ]; then ENV_ARGS+=(-e "$name=${!name}"); fi
 done
 
@@ -49,7 +52,8 @@ if [ -z "$ready" ]; then
   exit 1
 fi
 
-PROMPT="List the files in the current directory with a tool, then reply with the exact name of the file that contains '$MARKER'."
+PROMPT=${UC_TURN_PROMPT:-"List the files in the current directory with a tool, then reply with the exact name of the file that contains '$MARKER'."}
+EXPECT=${UC_TURN_EXPECT:-"$MARKER.txt"}
 tmux send-keys -t "$S" -l "$PROMPT"; tmux send-keys -t "$S" Enter
 T1=$(now_ms)
 tool=""; answer=""; n=0
@@ -61,11 +65,13 @@ while tmux has-session -t "$S" 2>/dev/null; do
   # excludes home-screen lines like `● Ready for the next move`). Answer: the marker file
   # name on a line that is not the prompt echo.
   if [ -z "$tool" ] && grep -Eq '^[[:space:]]*● [a-z][a-z_]*( |$)' "$frame"; then tool=$el; fi
-  if [ -z "$answer" ] && grep -v "List the files" "$frame" | grep -q "$MARKER.txt"; then answer=$el; fi
+  if [ -z "$answer" ] && grep -vF "${PROMPT:0:40}" "$frame" | grep -qF "$EXPECT"; then answer=$el; fi
   if [ -n "$answer" ] && grep -q "$READY_RE" "$frame"; then break; fi
   [ "$el" -ge $(( TIMEOUT * 1000 )) ] && break
   n=$((n+1)); sleep 0.5
 done
 tmux capture-pane -p -S -200 -t "$S" > "$OUT/final.txt" 2>/dev/null
-echo "provider=$PROVIDER model=$MODEL ready_ms=$ready tool_trace_ms=${tool:-none} answer_ms=${answer:-none} frames=$((n+1))" | tee "$OUT/summary.txt"
+calls=$(grep -cE '^[[:space:]]*● [a-z][a-z_]*( |$)' "$OUT/final.txt")
+status=$(grep -oE '▤ [0-9]+ ctx · ~[0-9]+t|TTFT [0-9.]+s|\$[0-9.]+' "$OUT/final.txt" | tr '\n' ' ')
+echo "provider=$PROVIDER model=$MODEL ready_ms=$ready tool_trace_ms=${tool:-none} answer_ms=${answer:-none} tool_lines=$calls status=[$status] frames=$((n+1))" | tee "$OUT/summary.txt"
 [ -n "$tool" ] && [ -n "$answer" ] || exit 2

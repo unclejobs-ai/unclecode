@@ -254,7 +254,7 @@ const lspTools = createLspToolRegistry();
 export const toolDefinitions: ToolDefinition[] = [
   {
     name: "list_files",
-    description: "List files and directories inside a path relative to the current workspace.",
+    description: "List files and directories inside a path relative to the current workspace. Returns one entry per line: `file <name>` or `dir <name>`.",
     input_schema: {
       type: "object",
       properties: {
@@ -279,7 +279,7 @@ export const toolDefinitions: ToolDefinition[] = [
   },
   {
     name: "read_file",
-    description: "Read a UTF-8 text file from the workspace.",
+    description: "Read a UTF-8 text file from the workspace. Returns the file's full text.",
     input_schema: {
       type: "object",
       properties: {
@@ -362,7 +362,7 @@ export const toolDefinitions: ToolDefinition[] = [
   },
   {
     name: "search_text",
-    description: "Search for text using ripgrep in the workspace.",
+    description: "Search for text using ripgrep in the workspace. Returns one match per line: `<path>:<line>:<text>`.",
     input_schema: {
       type: "object",
       properties: {
