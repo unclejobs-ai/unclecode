@@ -25,6 +25,8 @@ import {
   VStack,
 } from "@earendil-works/pi-tui";
 
+import { selectWorkShellLiveToolTraceLines } from "./work-shell-live-activity.js";
+
 export type PiShellEntry = {
   readonly role: "system" | "user" | "assistant" | "tool";
   readonly text: string;
@@ -37,6 +39,9 @@ export type PiShellState = {
   readonly busyStatus: string;
   readonly model: string;
   readonly lastTurnDurationMs: number | undefined;
+  readonly currentTurnStartedAt: number | undefined;
+  /** Newest tool row of the live trace (`→ read .`), as the Ink dock shows it. */
+  readonly liveToolLine: string | undefined;
 };
 
 /** The slice of the work-shell engine this shell drives (local or owner-remote). */
@@ -52,6 +57,7 @@ export type PiShellEngine = {
 const STREAMING_CURSOR = "▌";
 const REASONING_PREFIX = "✻ ";
 const TOOL_RESULT_ROWS_MAX = 8;
+const BUSY_TICK_MS = 1_000;
 const ENTRY_ROLES = new Set(["system", "user", "assistant", "tool"]);
 
 const sgr = (open: number, close: number) => (text: string) => `\u001b[${open}m${text}\u001b[${close}m`;
@@ -114,6 +120,10 @@ export function readPiShellState(value: unknown): PiShellState {
     busyStatus: typeof state.busyStatus === "string" ? state.busyStatus : "",
     model: typeof state.model === "string" ? state.model : "",
     lastTurnDurationMs: typeof state.lastTurnDurationMs === "number" ? state.lastTurnDurationMs : undefined,
+    currentTurnStartedAt: typeof state.currentTurnStartedAt === "number" ? state.currentTurnStartedAt : undefined,
+    liveToolLine: Array.isArray(state.liveTraceLines)
+      ? selectWorkShellLiveToolTraceLines(state.liveTraceLines.filter((line) => typeof line === "string"), 1)[0]
+      : undefined,
   };
 }
 
@@ -134,8 +144,13 @@ export function formatPiShellToolRows(text: string): readonly string[] {
   ];
 }
 
-export function formatPiShellStatus(state: PiShellState): string {
-  if (state.isBusy) return `◆ ${state.busyStatus || "Working"}`;
+export function formatPiShellStatus(state: PiShellState, now: number = Date.now()): string {
+  if (state.isBusy) {
+    const elapsed = state.currentTurnStartedAt === undefined
+      ? ""
+      : ` · ${(Math.max(0, now - state.currentTurnStartedAt) / 1000).toFixed(1)}s`;
+    return `◆ ${state.liveToolLine ?? (state.busyStatus || "Working")}${elapsed}`;
+  }
   const last = state.lastTurnDurationMs === undefined ? "" : ` · last ${(state.lastTurnDurationMs / 1000).toFixed(1)}s`;
   return `◇ Ready${last}`;
 }
@@ -150,7 +165,7 @@ export class PiShellStatusLine implements Component {
   private text = "";
 
   setText(text: string): void {
-    this.text = text.replace(/\s+/g, " ");
+    this.text = text.replace(/[\r\n\t]+/g, " ");
   }
 
   invalidate(): void {}
@@ -248,15 +263,27 @@ export async function renderPiWorkShell(engine: PiShellEngine): Promise<void> {
   ]));
 
   let state = readPiShellState(engine.getState());
+  const showStatus = () => {
+    status.setText(dim([
+      formatPiShellStatus(state),
+      state.model,
+      `PgUp/PgDn · wheel scroll · Ctrl+C ${state.isBusy ? "interrupt" : "quit"}`,
+    ].join("  │  ")));
+    tui.requestRender();
+  };
   const show = (next: unknown) => {
     state = readPiShellState(next);
     sync.apply(state);
-    status.setText(dim(`${formatPiShellStatus(state)}   ${state.model}   PgUp/PgDn · wheel scroll · Ctrl+C ${state.isBusy ? "interrupt" : "quit"}`));
-    tui.requestRender();
+    showStatus();
   };
+  // Owner state only changes on events; the elapsed time of a busy turn also moves between them.
+  const tick = setInterval(() => {
+    if (state.isBusy) showStatus();
+  }, BUSY_TICK_MS);
 
   await new Promise<void>((resolve) => {
     const quit = () => {
+      clearInterval(tick);
       unsubscribe();
       tui.stop();
       resolve();

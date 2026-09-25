@@ -55,3 +55,16 @@ test("status names the idle state the acceptance harness waits for", () => {
   const busy = readPiShellState({ entries: [], isBusy: true, busyStatus: "" });
   assert.equal(formatPiShellStatus(busy), "◆ Working");
 });
+
+test("busy status shows the newest live tool row and the turn's elapsed time", () => {
+  const busy = readPiShellState({
+    entries: [],
+    isBusy: true,
+    busyStatus: "✦ reasoning· planning",
+    currentTurnStartedAt: 1_000,
+    liveTraceLines: ["Turn started", "→ list_files .", "→ read second-file.txt"],
+  });
+  assert.equal(formatPiShellStatus(busy, 4_600), "◆ → read second-file.txt · 3.6s");
+  const thinking = readPiShellState({ entries: [], isBusy: true, busyStatus: "✦ reasoning· planning", liveTraceLines: ["Turn started"] });
+  assert.equal(formatPiShellStatus(thinking), "◆ ✦ reasoning· planning");
+});

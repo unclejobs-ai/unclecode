@@ -8,7 +8,8 @@
 # optional env: UC_TURN_SETUP (shell run in the scratch dir), UC_TURN_PRE (a line submitted
 #               before the prompt, e.g. `/model xai/grok-4.3`), UC_TURN_PROMPT, UC_TURN_EXPECT
 #               (fixed string the answer must contain; defaults to the marker file name),
-#               UC_TURN_SCROLL_KEY (tmux key, e.g. PPage, sent once the answer streams; reports
+#               UC_TURN_SCROLL_KEY (tmux key, e.g. PPage, or `wheel` for five SGR wheel-up
+#               events, sent once the answer streams; reports
 #               whether the view moved and how many later streaming frames kept its top rows;
 #               after the turn, UC_TURN_RESUME_KEY (default End) is sent before the answer check),
 #               UNCLECODE_TUI_SHELL=pi (run the pi-tui shell instead of the Ink shell)
@@ -88,7 +89,14 @@ while tmux has-session -t "$S" 2>/dev/null; do
     # Only once the answer overflows the viewport (the prompt echo has scrolled off):
     # before that there is nothing to scroll and the key proves nothing.
     if [ -z "$scroll_ms" ] && grep -q '▌' "$frame" && ! grep -qF "${PROMPT:0:40}" "$frame"; then
-      pre_top=$top; tmux send-keys -t "$S" "$UC_TURN_SCROLL_KEY"; scroll_ms=$el
+      pre_top=$top; scroll_ms=$el
+      if [ "$UC_TURN_SCROLL_KEY" = wheel ]; then
+        # Five SGR wheel-up events at row 10, col 10: the bytes a terminal sends for a
+        # trackpad/wheel scroll once the app has enabled mouse reporting.
+        for _ in 1 2 3 4 5; do tmux send-keys -t "$S" -l $'\e[<64;10;10M'; done
+      else
+        tmux send-keys -t "$S" "$UC_TURN_SCROLL_KEY"
+      fi
     elif [ -n "$scroll_ms" ] && ! grep -q "$READY_RE" "$frame"; then
       if [ -z "$anchor_set" ]; then
         anchor=$top; anchor_set=1
