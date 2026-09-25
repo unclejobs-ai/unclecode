@@ -38,6 +38,8 @@ export type ProviderAuthCatalogResult =
 
 export type ProviderAuthSignInHandoff =
   | { readonly ok: true; readonly binPath: string; readonly argv: readonly string[]; readonly command: string }
+  /** The sign-in ran inside the TUI and the credential is stored. */
+  | { readonly ok: true; readonly signedIn: true; readonly name: string }
   | {
       readonly ok: false;
       readonly error: {
@@ -49,7 +51,8 @@ export type ProviderAuthSignInHandoff =
 /** Injected at the pane boundary by the app. The TUI never constructs one. */
 export type ProviderAuthCatalogPort = {
   list(): Promise<ProviderAuthCatalogResult>;
-  signIn(providerId: string): Promise<ProviderAuthSignInHandoff>;
+  /** `onProgress` receives what the user must do now (open a URL, enter a code). */
+  signIn(providerId: string, onProgress?: (text: string) => void): Promise<ProviderAuthSignInHandoff>;
 };
 
 /** What the picker knows right now. "loading" is a real state, not an empty list. */
@@ -237,9 +240,8 @@ export function describeProviderAuthCatalogError(code: ProviderAuthCatalogErrorC
 }
 
 export function formatProviderAuthSignInReceipt(handoff: ProviderAuthSignInHandoff): string {
-  return handoff.ok
-    ? `Sign-in handoff · run: ${handoff.command}`
-    : `Sign-in handoff failed · ${handoff.error.message}`;
+  if (!handoff.ok) return `Sign-in failed · ${handoff.error.message}`;
+  return "signedIn" in handoff ? `Signed in · ${handoff.name}` : `Sign-in handoff · run: ${handoff.command}`;
 }
 
 /**

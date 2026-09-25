@@ -185,7 +185,18 @@ test("the sign-in receipt reports the exact OMP handoff, or that the handoff fai
   );
   assert.equal(
     formatProviderAuthSignInReceipt({ ok: false, error: { code: "AUTH_UNAVAILABLE", message: "omp executable not found on PATH" } }),
-    "Sign-in handoff failed · omp executable not found on PATH",
+    "Sign-in failed · omp executable not found on PATH",
+  );
+});
+
+test("a sign-in completed inside the TUI says so instead of handing off", () => {
+  assert.equal(
+    formatProviderAuthSignInReceipt({ ok: true, signedIn: true, name: "xAI (Grok/X subscription)" }),
+    "Signed in · xAI (Grok/X subscription)",
+  );
+  assert.equal(
+    formatProviderAuthSignInReceipt({ ok: false, error: { code: "SIGN_IN_UNAVAILABLE", message: "xAI device code expired · or run: unclecode auth login xai" } }),
+    "Sign-in failed · xAI device code expired · or run: unclecode auth login xai",
   );
 });
 
@@ -318,10 +329,10 @@ test("a broken catalog read renders catalog unavailable and keeps Esc reachable"
 
 test("a failed sign-in handoff is reported instead of a fake success", async () => {
   const output = await renderView({
-    providerAuthSignInReceipt: "Sign-in handoff failed · omp executable not found on PATH",
+    providerAuthSignInReceipt: "Sign-in failed · omp executable not found on PATH",
   });
 
-  assert.match(output, /Sign-in handoff failed · omp executable not found on PATH/);
+  assert.match(output, /Sign-in failed · omp executable not found on PATH/);
 });
 
 test("the picker says so while the catalog is still loading", async () => {

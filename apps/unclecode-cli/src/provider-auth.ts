@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 
-import type { AuthEvent, AuthPrompt } from "@earendil-works/pi-ai";
+import type { AuthEvent, AuthPrompt, Models } from "@earendil-works/pi-ai";
 import {
   getUncleCodeCredentialModels,
   resolveProviderCredentialsPath,
@@ -21,27 +21,29 @@ function requireOAuthProvider(providerId: string): string {
 
 // Long OAuth URLs break when copied out of a wrapped terminal (a truncated `state`
 // fails the provider's check), so hand them to the browser directly.
-function openInBrowser(url: string): void {
+function openInBrowser(url: string, onError: () => void): void {
   const opener = process.platform === "darwin" ? "open" : process.platform === "win32" ? "explorer" : "xdg-open";
   const child = spawn(opener, [url], { detached: true, stdio: "ignore" });
-  child.once("error", () => {
-    process.stdout.write("Could not open a browser; open the URL above manually.\n");
-  });
+  child.once("error", onError);
   child.unref();
+}
+
+function reportBrowserUnavailable(): void {
+  process.stdout.write("Could not open a browser; open the URL above manually.\n");
 }
 
 function printAuthEvent(event: AuthEvent): void {
   switch (event.type) {
     case "device_code":
       process.stdout.write(`Open ${event.verificationUri}\nEnter code: ${event.userCode}\n`);
-      openInBrowser(event.verificationUri);
+      openInBrowser(event.verificationUri, reportBrowserUnavailable);
       if (event.expiresInSeconds) {
         process.stdout.write(`The code expires in ${Math.round(event.expiresInSeconds / 60)} min.\n`);
       }
       return;
     case "auth_url":
       process.stdout.write(`Open ${event.url}\n${event.instructions ? `${event.instructions}\n` : ""}`);
-      openInBrowser(event.url);
+      openInBrowser(event.url, reportBrowserUnavailable);
       return;
     case "info":
     case "progress":
@@ -123,10 +125,52 @@ type ProviderAuthCatalogRow = {
  * provider pi-ai can sign in to with OAuth, and whether it is signed in (stored
  * login, or an environment key). Sign-in hands off to `unclecode auth login`.
  */
-export function createProviderAuthCatalog(env: NodeJS.ProcessEnv = process.env) {
+const TUI_SIGN_IN_TIMEOUT_MS = 15 * 60_000;
+
+/**
+ * Answers a login prompt without the terminal (Ink owns stdin): text and select
+ * take their documented defaults; a manual code waits until the provider's own
+ * browser callback supersedes it. Anything else needs `unclecode auth login`.
+ */
+function answerPromptInTui(prompt: AuthPrompt): Promise<string> {
+  switch (prompt.type) {
+    case "text":
+      return Promise.resolve("");
+    case "select":
+      return Promise.resolve(prompt.options[0]?.id ?? "");
+    case "manual_code":
+      return new Promise((_resolve, reject) => {
+        if (!prompt.signal) {
+          reject(new Error("This sign-in needs a pasted code"));
+          return;
+        }
+        prompt.signal.addEventListener("abort", () => reject(new Error("Superseded by the browser callback")), { once: true });
+      });
+    case "secret":
+      return Promise.reject(new Error("This sign-in needs a secret typed in a terminal"));
+  }
+}
+
+function describeAuthEventForTui(event: AuthEvent): string | undefined {
+  switch (event.type) {
+    case "device_code":
+      return `Enter code ${event.userCode} at ${event.verificationUri} (browser opened)`;
+    case "auth_url":
+      return `Finish signing in in your browser (opened): ${event.url}`;
+    case "info":
+    case "progress":
+      return event.message;
+  }
+}
+
+export function createProviderAuthCatalog(
+  env: NodeJS.ProcessEnv = process.env,
+  deps: { readonly models?: Pick<Models, "getProviders" | "getProvider" | "checkAuth" | "login">; readonly openUrl?: (url: string) => void } = {},
+) {
+  const getModels = () => deps.models ?? getUncleCodeCredentialModels(env);
   return {
     async list(): Promise<{ readonly ok: true; readonly dbPath: string; readonly providers: readonly ProviderAuthCatalogRow[] }> {
-      const models = getUncleCodeCredentialModels(env);
+      const models = getModels();
       const store = new UncleCodeCredentialStore(resolveProviderCredentialsPath(env));
       const providers = await Promise.all(
         models.getProviders()
@@ -148,9 +192,34 @@ export function createProviderAuthCatalog(env: NodeJS.ProcessEnv = process.env) 
       );
       return { ok: true, dbPath: resolveProviderCredentialsPath(env), providers };
     },
-    async signIn(providerId: string) {
+    async signIn(providerId: string, onProgress?: (text: string) => void) {
       const argv = ["auth", "login", providerId] as const;
-      return { ok: true as const, binPath: "unclecode", argv, command: `unclecode ${argv.join(" ")}` };
+      const command = `unclecode ${argv.join(" ")}`;
+      // Without a progress sink there is nowhere to show a code: hand off to the terminal.
+      if (!onProgress) return { ok: true as const, binPath: "unclecode", argv, command };
+      const models = getModels();
+      const flowName = models.getProvider(providerId)?.auth.oauth?.name;
+      if (!flowName) {
+        return { ok: false as const, error: { code: "SIGN_IN_UNAVAILABLE" as const, message: `${providerId} has no sign-in flow` } };
+      }
+      const openUrl = deps.openUrl
+        ?? ((url: string) => openInBrowser(url, () => onProgress(`Open this URL in a browser: ${url}`)));
+      try {
+        await models.login(providerId, "oauth", {
+          signal: AbortSignal.timeout(TUI_SIGN_IN_TIMEOUT_MS),
+          prompt: answerPromptInTui,
+          notify: (event) => {
+            if (event.type === "device_code") openUrl(event.verificationUri);
+            if (event.type === "auth_url") openUrl(event.url);
+            const text = describeAuthEventForTui(event);
+            if (text) onProgress(text);
+          },
+        });
+        return { ok: true as const, signedIn: true as const, name: flowName };
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        return { ok: false as const, error: { code: "SIGN_IN_UNAVAILABLE" as const, message: `${reason} · or run: ${command}` } };
+      }
     },
   };
 }

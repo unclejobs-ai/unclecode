@@ -133,13 +133,19 @@ export function useProviderAuthPicker(input: {
         return true;
       }
       const requestId = ++nextSignInRequestIdRef.current;
-      setReceipt({ open: true, requestId });
-      const handoff = await port.signIn(row.id);
-      setReceipt((current) =>
-        current.open && current.requestId === requestId
-          ? { open: true, requestId, text: formatProviderAuthSignInReceipt(handoff) }
-          : current,
-      );
+      const showForThisRequest = (text: string) =>
+        setReceipt((current) =>
+          current.open && current.requestId === requestId ? { open: true, requestId, text } : current,
+        );
+      setReceipt({ open: true, requestId, text: `Signing in · ${row.name}…` });
+      const handoff = await port.signIn(row.id, showForThisRequest);
+      showForThisRequest(formatProviderAuthSignInReceipt(handoff));
+      if (handoff.ok && "signedIn" in handoff) {
+        // The store changed: re-read it so the row turns ● signed in.
+        void port.list().then((result) => {
+          if (result.ok) setCatalog({ status: "ready", providers: result.providers });
+        });
+      }
       return true;
     },
     [catalog, cursor, matches, port],
