@@ -149,12 +149,12 @@ test("typing /auth reads the injected OMP catalog and makes it the first surface
     React.createElement(
       WorkShellPane,
       paneProps(engine, {
-        ompAuthCatalog: {
+        providerAuthCatalog: {
           list: async () => {
             listCalls += 1;
             return { ok: true, dbPath: "/tmp/agent.db", providers: CATALOG_ROWS };
           },
-          signIn: async () => ({ ok: false, error: { code: "OMP_UNAVAILABLE", message: "unused" } }),
+          signIn: async () => ({ ok: false, error: { code: "AUTH_UNAVAILABLE", message: "unused" } }),
         },
       }),
     ),
@@ -182,14 +182,14 @@ test("leaving while the catalog loads retries cleanly on the next /auth open", a
     React.createElement(
       WorkShellPane,
       paneProps(engine, {
-        ompAuthCatalog: {
+        providerAuthCatalog: {
           list: () => {
             listCalls += 1;
             return new Promise((resolve) => {
               pendingCatalogs.push(resolve);
             });
           },
-          signIn: async () => ({ ok: false, error: { code: "OMP_UNAVAILABLE", message: "unused" } }),
+          signIn: async () => ({ ok: false, error: { code: "AUTH_UNAVAILABLE", message: "unused" } }),
         },
       }),
     ),
@@ -222,7 +222,7 @@ test("Down then Enter hands the highlighted provider to the OMP-owned sign-in", 
     React.createElement(
       WorkShellPane,
       paneProps(engine, {
-        ompAuthCatalog: {
+        providerAuthCatalog: {
           list: async () => ({ ok: true, dbPath: "/tmp/agent.db", providers: CATALOG_ROWS }),
           signIn: async (providerId) => {
             signInCalls.push(providerId);
@@ -270,10 +270,10 @@ test("a failed catalog read shows the failure and never routes /auth to a fake p
     React.createElement(
       WorkShellPane,
       paneProps(engine, {
-        ompAuthCatalog: {
+        providerAuthCatalog: {
           list: async () => ({
             ok: false,
-            error: { code: "OMP_UNAVAILABLE", message: "omp executable not found on PATH" },
+            error: { code: "AUTH_UNAVAILABLE", message: "omp executable not found on PATH" },
           }),
           signIn: async () => {
             throw new Error("signIn must not be reachable without a catalog");
@@ -300,7 +300,7 @@ test("/auth status stays on the existing auth surface without opening the OMP pi
     React.createElement(
       WorkShellPane,
       paneProps(engine, {
-        ompAuthCatalog: {
+        providerAuthCatalog: {
           list: async () => {
             listCalls += 1;
             return { ok: true, dbPath: "/tmp/agent.db", providers: CATALOG_ROWS };
@@ -335,7 +335,7 @@ test("Enter on an unavailable provider states why instead of calling OMP sign-in
     React.createElement(
       WorkShellPane,
       paneProps(engine, {
-        ompAuthCatalog: {
+        providerAuthCatalog: {
           list: async () => ({
             ok: true,
             dbPath: "/tmp/agent.db",
@@ -346,7 +346,7 @@ test("Enter on an unavailable provider states why instead of calling OMP sign-in
           }),
           signIn: async (providerId) => {
             signInCalls.push(providerId);
-            return { ok: false, error: { code: "OMP_SIGN_IN_UNAVAILABLE", message: "unreachable" } };
+            return { ok: false, error: { code: "SIGN_IN_UNAVAILABLE", message: "unreachable" } };
           },
         },
       }),
@@ -382,7 +382,7 @@ test("closing /auth retires the sign-in receipt so reopening cannot replay it", 
     React.createElement(
       WorkShellPane,
       paneProps(engine, {
-        ompAuthCatalog: {
+        providerAuthCatalog: {
           list: async () => ({ ok: true, dbPath: "/tmp/agent.db", providers: CATALOG_ROWS }),
           signIn: async (providerId) => ({
             ok: true,
@@ -433,7 +433,7 @@ test("a new sign-in drops the previous receipt before its own handoff lands", as
     React.createElement(
       WorkShellPane,
       paneProps(engine, {
-        ompAuthCatalog: {
+        providerAuthCatalog: {
           list: async () => ({ ok: true, dbPath: "/tmp/agent.db", providers: CATALOG_ROWS }),
           signIn: (providerId) => {
             signInCalls.push(providerId);
@@ -502,7 +502,7 @@ test("a sign-in that resolves after close and reopen cannot paint a stale receip
     React.createElement(
       WorkShellPane,
       paneProps(engine, {
-        ompAuthCatalog: {
+        providerAuthCatalog: {
           list: async () => ({ ok: true, dbPath: "/tmp/agent.db", providers: CATALOG_ROWS }),
           signIn: () => new Promise((resolve) => {
             resolveSignIn = resolve;
@@ -551,7 +551,7 @@ test("only the latest overlapping sign-in may publish a receipt", async () => {
     React.createElement(
       WorkShellPane,
       paneProps(engine, {
-        ompAuthCatalog: {
+        providerAuthCatalog: {
           list: async () => ({ ok: true, dbPath: "/tmp/agent.db", providers: CATALOG_ROWS }),
           signIn: (providerId) => new Promise((resolve) => {
             pendingSignIns.push({ providerId, resolve });

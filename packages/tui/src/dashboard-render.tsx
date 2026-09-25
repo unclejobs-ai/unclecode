@@ -12,7 +12,7 @@ import React from "react";
 import type { TuiRenderOptions } from "./index.js";
 import type { TuiShellHomeState } from "./shell-state.js";
 import type { WorkShellImageAttachment } from "./work-shell-attachments.js";
-import type { OmpAuthCatalogPort } from "./work-shell-auth-provider-picker-model.js";
+import type { ProviderAuthCatalogPort } from "./work-shell-auth-provider-picker-model.js";
 import type { WorkShellPaneRuntimeState } from "./work-shell-hooks.js";
 import {
   EmbeddedWorkShellPane,
@@ -107,7 +107,7 @@ export type ManagedWorkShellDashboardInput<
     CreateWorkShellEngineInput<Attachment, Reasoning, TraceEvent>,
     "onExit"
   > & {
-    readonly ompAuthCatalog?: OmpAuthCatalogPort | undefined;
+    readonly providerAuthCatalog?: ProviderAuthCatalogPort | undefined;
   };
   readonly onEngineReady?: ((engine: WorkShellPaneRuntime<Attachment, Reasoning, TraceEvent>["engine"]) => void) | undefined;
   readonly paneEngine?: WorkShellPaneRuntime<Attachment, Reasoning, TraceEvent>["engine"] | undefined;
@@ -164,8 +164,8 @@ export function createManagedWorkShellDashboardProps<
           ?? ((value) => getWorkShellSlashSuggestions(value, slashOptions)),
         browserOAuthAvailable: localRuntime?.browserOAuthAvailable
           ?? Boolean(input.paneRuntime.browserOAuthAvailable),
-        ...(input.paneRuntime.ompAuthCatalog
-          ? { ompAuthCatalog: input.paneRuntime.ompAuthCatalog }
+        ...(input.paneRuntime.providerAuthCatalog
+          ? { providerAuthCatalog: input.paneRuntime.providerAuthCatalog }
           : {}),
         shouldBlockSlashSubmit: localRuntime?.shouldBlockSlashSubmit
           ?? ((line) => shouldBlockSlashSubmit(line, slashOptions)),

@@ -1,5 +1,5 @@
 /**
- * `/auth` provider catalog — the OMP-style credential selector.
+ * `/auth` provider catalog — the credential selector.
  *
  * Chrome follows the work shell's existing overlay language (single-line
  * border, section header, dim subtitle, footer hints) and paints entirely
@@ -14,19 +14,19 @@ import React from "react";
 import type { ContextInspectorPalette } from "./work-shell-context-inspector-model.js";
 import { getDisplayWidth, truncateForDisplayWidth } from "./text-width.js";
 import {
-  layoutOmpAuthPickerKeyHints,
-  clampOmpAuthPickerCursor,
-  describeOmpAuthCatalogError,
-  describeOmpAuthProviderRow,
-  filterOmpAuthProviders,
-  formatOmpAuthPickerScrollSummary,
-  resolveOmpAuthPickerViewport,
-  type OmpAuthPickerCatalog,
-  type OmpAuthProviderRowView,
+  layoutProviderAuthPickerKeyHints,
+  clampProviderAuthPickerCursor,
+  describeProviderAuthCatalogError,
+  describeProviderAuthRow,
+  filterProviderAuths,
+  formatProviderAuthPickerScrollSummary,
+  resolveProviderAuthPickerViewport,
+  type ProviderAuthPickerCatalog,
+  type ProviderAuthRowView,
 } from "./work-shell-auth-provider-picker-model.js";
 
-export type OmpAuthProviderPickerInput = {
-  readonly catalog: OmpAuthPickerCatalog;
+export type ProviderAuthPickerInput = {
+  readonly catalog: ProviderAuthPickerCatalog;
   readonly query: string;
   readonly cursor: number;
   readonly width: number;
@@ -42,7 +42,7 @@ const DEFAULT_MAX_ROWS = 8;
 const NARROW_COLUMNS = 60;
 const NARROW_MAX_ROWS = 5;
 
-function toneColor(tone: OmpAuthProviderRowView["tone"], palette: ContextInspectorPalette): string {
+function toneColor(tone: ProviderAuthRowView["tone"], palette: ContextInspectorPalette): string {
   if (tone === "signed-in") {
     return palette.success;
   }
@@ -57,7 +57,7 @@ function toneColor(tone: OmpAuthProviderRowView["tone"], palette: ContextInspect
  * that stops mid-row reads as a highlight artefact, not a selection.
  */
 function renderProviderRow(input: {
-  readonly view: OmpAuthProviderRowView;
+  readonly view: ProviderAuthRowView;
   readonly selected: boolean;
   readonly contentWidth: number;
   readonly palette: ContextInspectorPalette;
@@ -88,7 +88,7 @@ function renderProviderRow(input: {
 }
 
 function renderKeyHints(palette: ContextInspectorPalette, contentWidth: number, uiLocale: "en" | "ko"): React.ReactNode {
-  return layoutOmpAuthPickerKeyHints(contentWidth).map((row) => (
+  return layoutProviderAuthPickerKeyHints(contentWidth).map((row) => (
     <Text key={row.map((hint) => hint.key).join("|")} wrap="truncate">
       {row.map((hint, index) => (
         <Text key={hint.key}>
@@ -101,7 +101,7 @@ function renderKeyHints(palette: ContextInspectorPalette, contentWidth: number, 
   ));
 }
 
-function renderCatalogBody(input: OmpAuthProviderPickerInput, contentWidth: number): React.ReactNode {
+function renderCatalogBody(input: ProviderAuthPickerInput, contentWidth: number): React.ReactNode {
   const { catalog, palette } = input;
   const ko = input.uiLocale === "ko";
 
@@ -112,7 +112,7 @@ function renderCatalogBody(input: OmpAuthProviderPickerInput, contentWidth: numb
   if (catalog.status === "error") {
     return (
       <Box flexDirection="column">
-        <Text color={palette.warning} wrap="truncate">{describeOmpAuthCatalogError(catalog.code)}</Text>
+        <Text color={palette.warning} wrap="truncate">{describeProviderAuthCatalogError(catalog.code)}</Text>
         <Text color={palette.textDim} wrap="truncate">{catalog.message}</Text>
         <Text color={palette.textDim} wrap="truncate">
           {ko ? "로그인은 터미널에서 진행합니다. 여기서는 아무것도 변경하지 않았습니다." : "Sign-in runs in your terminal; nothing was changed here."}
@@ -121,26 +121,26 @@ function renderCatalogBody(input: OmpAuthProviderPickerInput, contentWidth: numb
     );
   }
 
-  const matches = filterOmpAuthProviders(catalog.providers, input.query);
+  const matches = filterProviderAuths(catalog.providers, input.query);
   const maxRows = input.maxRows ?? (input.width < NARROW_COLUMNS ? NARROW_MAX_ROWS : DEFAULT_MAX_ROWS);
-  const viewport = resolveOmpAuthPickerViewport({
+  const viewport = resolveProviderAuthPickerViewport({
     rowCount: matches.length,
     cursor: input.cursor,
     maxRows,
   });
-  const cursor = clampOmpAuthPickerCursor(input.cursor, matches.length);
+  const cursor = clampProviderAuthPickerCursor(input.cursor, matches.length);
 
   return (
     <Box flexDirection="column">
       {matches.slice(viewport.start, viewport.end).map((row, index) =>
         renderProviderRow({
-          view: localizeProviderRow(describeOmpAuthProviderRow(row), input.uiLocale ?? "en"),
+          view: localizeProviderRow(describeProviderAuthRow(row), input.uiLocale ?? "en"),
           selected: viewport.start + index === cursor,
           contentWidth,
           palette,
         }))}
       <Text color={palette.textDim} wrap="truncate">
-        {localizeAuthSummary(formatOmpAuthPickerScrollSummary({
+        {localizeAuthSummary(formatProviderAuthPickerScrollSummary({
           hiddenBefore: viewport.hiddenBefore,
           hiddenAfter: viewport.hiddenAfter,
           matched: matches.length,
@@ -151,7 +151,7 @@ function renderCatalogBody(input: OmpAuthProviderPickerInput, contentWidth: numb
   );
 }
 
-export function renderOmpAuthProviderPicker(input: OmpAuthProviderPickerInput): React.ReactNode {
+export function renderProviderAuthPicker(input: ProviderAuthPickerInput): React.ReactNode {
   const { palette } = input;
   const width = Math.max(28, input.width);
   const contentWidth = Math.max(20, width - 4);
@@ -188,7 +188,7 @@ export function renderOmpAuthProviderPicker(input: OmpAuthProviderPickerInput): 
   );
 }
 
-function localizeProviderRow(view: OmpAuthProviderRowView, uiLocale: "en" | "ko"): OmpAuthProviderRowView {
+function localizeProviderRow(view: ProviderAuthRowView, uiLocale: "en" | "ko"): ProviderAuthRowView {
   if (uiLocale === "en") return view;
   return {
     ...view,

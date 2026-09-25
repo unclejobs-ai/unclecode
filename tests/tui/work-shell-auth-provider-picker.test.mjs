@@ -4,19 +4,19 @@ import test from "node:test";
 import React from "react";
 
 import {
-  OMP_AUTH_PICKER_KEY_HINTS,
-  clampOmpAuthPickerCursor,
-  describeOmpAuthCatalogError,
-  describeOmpAuthProviderRow,
-  filterOmpAuthProviders,
-  formatOmpAuthPickerScrollSummary,
-  formatOmpAuthSignInReceipt,
-  formatOmpAuthUnavailableReceipt,
-  layoutOmpAuthPickerKeyHints,
-  moveOmpAuthPickerCursor,
-  resolveOmpAuthPickerQuery,
-  resolveOmpAuthPickerViewport,
-  shouldOmpAuthPickerHandleSubmit,
+  PROVIDER_AUTH_PICKER_KEY_HINTS,
+  clampProviderAuthPickerCursor,
+  describeProviderAuthCatalogError,
+  describeProviderAuthRow,
+  filterProviderAuths,
+  formatProviderAuthPickerScrollSummary,
+  formatProviderAuthSignInReceipt,
+  formatProviderAuthUnavailableReceipt,
+  layoutProviderAuthPickerKeyHints,
+  moveProviderAuthPickerCursor,
+  resolveProviderAuthPickerQuery,
+  resolveProviderAuthPickerViewport,
+  shouldProviderAuthPickerHandleSubmit,
 } from "../../packages/tui/src/work-shell-auth-provider-picker-model.ts";
 import { getDisplayWidth } from "../../packages/tui/src/text-width.ts";
 import { WorkShellView } from "../../packages/tui/src/work-shell-view.tsx";
@@ -36,61 +36,61 @@ const PROVIDERS = [
 
 const READY = { status: "ready", providers: PROVIDERS };
 
-test("resolveOmpAuthPickerQuery reads the filter typed after /auth", () => {
-  assert.equal(resolveOmpAuthPickerQuery("/auth"), "");
-  assert.equal(resolveOmpAuthPickerQuery("  /auth  "), "");
-  assert.equal(resolveOmpAuthPickerQuery("/auth kimi"), "kimi");
-  assert.equal(resolveOmpAuthPickerQuery("/auth  Kimi Code "), "Kimi Code");
-  assert.equal(resolveOmpAuthPickerQuery("/model gpt"), "");
+test("resolveProviderAuthPickerQuery reads the filter typed after /auth", () => {
+  assert.equal(resolveProviderAuthPickerQuery("/auth"), "");
+  assert.equal(resolveProviderAuthPickerQuery("  /auth  "), "");
+  assert.equal(resolveProviderAuthPickerQuery("/auth kimi"), "kimi");
+  assert.equal(resolveProviderAuthPickerQuery("/auth  Kimi Code "), "Kimi Code");
+  assert.equal(resolveProviderAuthPickerQuery("/model gpt"), "");
 });
 
-test("filterOmpAuthProviders matches provider id and display name, case-insensitively", () => {
-  assert.equal(filterOmpAuthProviders(PROVIDERS, "").length, PROVIDERS.length);
+test("filterProviderAuths matches provider id and display name, case-insensitively", () => {
+  assert.equal(filterProviderAuths(PROVIDERS, "").length, PROVIDERS.length);
   assert.deepEqual(
-    filterOmpAuthProviders(PROVIDERS, "KIMI").map((row) => row.id),
+    filterProviderAuths(PROVIDERS, "KIMI").map((row) => row.id),
     ["kimi-code"],
   );
   assert.deepEqual(
-    filterOmpAuthProviders(PROVIDERS, "open").map((row) => row.id),
+    filterProviderAuths(PROVIDERS, "open").map((row) => row.id),
     ["openai-codex", "openrouter"],
   );
   assert.deepEqual(
-    filterOmpAuthProviders(PROVIDERS, "claude").map((row) => row.id),
+    filterProviderAuths(PROVIDERS, "claude").map((row) => row.id),
     ["anthropic"],
   );
-  assert.deepEqual(filterOmpAuthProviders(PROVIDERS, "no-such-provider"), []);
+  assert.deepEqual(filterProviderAuths(PROVIDERS, "no-such-provider"), []);
 });
 
 test("cursor navigation clamps at both ends and survives a shrinking filter", () => {
-  assert.equal(moveOmpAuthPickerCursor(0, -1, 7), 0);
-  assert.equal(moveOmpAuthPickerCursor(0, 1, 7), 1);
-  assert.equal(moveOmpAuthPickerCursor(6, 1, 7), 6);
-  assert.equal(moveOmpAuthPickerCursor(3, -1, 7), 2);
-  assert.equal(moveOmpAuthPickerCursor(3, 1, 0), 0);
+  assert.equal(moveProviderAuthPickerCursor(0, -1, 7), 0);
+  assert.equal(moveProviderAuthPickerCursor(0, 1, 7), 1);
+  assert.equal(moveProviderAuthPickerCursor(6, 1, 7), 6);
+  assert.equal(moveProviderAuthPickerCursor(3, -1, 7), 2);
+  assert.equal(moveProviderAuthPickerCursor(3, 1, 0), 0);
 
-  assert.equal(clampOmpAuthPickerCursor(5, 2), 1);
-  assert.equal(clampOmpAuthPickerCursor(-4, 7), 0);
-  assert.equal(clampOmpAuthPickerCursor(2, 0), 0);
+  assert.equal(clampProviderAuthPickerCursor(5, 2), 1);
+  assert.equal(clampProviderAuthPickerCursor(-4, 7), 0);
+  assert.equal(clampProviderAuthPickerCursor(2, 0), 0);
 });
 
-test("describeOmpAuthProviderRow renders a status glyph and a muted provenance suffix", () => {
-  assert.deepEqual(describeOmpAuthProviderRow(PROVIDERS[2]), {
+test("describeProviderAuthRow renders a status glyph and a muted provenance suffix", () => {
+  assert.deepEqual(describeProviderAuthRow(PROVIDERS[2]), {
     id: "kimi-code",
     name: "Kimi Code",
     glyph: "●",
     tone: "signed-in",
     provenance: "oauth",
   });
-  assert.equal(describeOmpAuthProviderRow(PROVIDERS[3]).provenance, "env OPENROUTER_API_KEY");
-  assert.equal(describeOmpAuthProviderRow(PROVIDERS[4]).provenance, "api key · stored as zai");
-  assert.deepEqual(describeOmpAuthProviderRow(PROVIDERS[5]), {
+  assert.equal(describeProviderAuthRow(PROVIDERS[3]).provenance, "env OPENROUTER_API_KEY");
+  assert.equal(describeProviderAuthRow(PROVIDERS[4]).provenance, "api key · stored as zai");
+  assert.deepEqual(describeProviderAuthRow(PROVIDERS[5]), {
     id: "perplexity",
     name: "Perplexity",
     glyph: "○",
     tone: "available",
     provenance: "not signed in",
   });
-  assert.deepEqual(describeOmpAuthProviderRow(PROVIDERS[6]), {
+  assert.deepEqual(describeProviderAuthRow(PROVIDERS[6]), {
     id: "devin",
     name: "Devin",
     glyph: "×",
@@ -98,31 +98,31 @@ test("describeOmpAuthProviderRow renders a status glyph and a muted provenance s
     provenance: "unavailable",
   });
   assert.equal(
-    describeOmpAuthProviderRow({ id: "wafer", name: "Wafer", available: true, credentialKey: "wafer", signedIn: true }).provenance,
+    describeProviderAuthRow({ id: "wafer", name: "Wafer", available: true, credentialKey: "wafer", signedIn: true }).provenance,
     "signed in",
   );
 });
 
 test("the viewport window follows the cursor and reports what is scrolled away", () => {
-  assert.deepEqual(resolveOmpAuthPickerViewport({ rowCount: 7, cursor: 0, maxRows: 3 }), {
+  assert.deepEqual(resolveProviderAuthPickerViewport({ rowCount: 7, cursor: 0, maxRows: 3 }), {
     start: 0,
     end: 3,
     hiddenBefore: 0,
     hiddenAfter: 4,
   });
-  assert.deepEqual(resolveOmpAuthPickerViewport({ rowCount: 7, cursor: 4, maxRows: 3 }), {
+  assert.deepEqual(resolveProviderAuthPickerViewport({ rowCount: 7, cursor: 4, maxRows: 3 }), {
     start: 3,
     end: 6,
     hiddenBefore: 3,
     hiddenAfter: 1,
   });
-  assert.deepEqual(resolveOmpAuthPickerViewport({ rowCount: 7, cursor: 6, maxRows: 3 }), {
+  assert.deepEqual(resolveProviderAuthPickerViewport({ rowCount: 7, cursor: 6, maxRows: 3 }), {
     start: 4,
     end: 7,
     hiddenBefore: 4,
     hiddenAfter: 0,
   });
-  assert.deepEqual(resolveOmpAuthPickerViewport({ rowCount: 2, cursor: 0, maxRows: 5 }), {
+  assert.deepEqual(resolveProviderAuthPickerViewport({ rowCount: 2, cursor: 0, maxRows: 5 }), {
     start: 0,
     end: 2,
     hiddenBefore: 0,
@@ -132,25 +132,25 @@ test("the viewport window follows the cursor and reports what is scrolled away",
 
 test("the scroll summary counts matches, the catalog total, and hidden rows", () => {
   assert.equal(
-    formatOmpAuthPickerScrollSummary({ hiddenBefore: 0, hiddenAfter: 58, matched: 66, total: 66 }),
+    formatProviderAuthPickerScrollSummary({ hiddenBefore: 0, hiddenAfter: 58, matched: 66, total: 66 }),
     "66 providers · ↓ 58 more",
   );
   assert.equal(
-    formatOmpAuthPickerScrollSummary({ hiddenBefore: 2, hiddenAfter: 3, matched: 12, total: 66 }),
+    formatProviderAuthPickerScrollSummary({ hiddenBefore: 2, hiddenAfter: 3, matched: 12, total: 66 }),
     "12 of 66 providers · ↑ 2 more · ↓ 3 more",
   );
   assert.equal(
-    formatOmpAuthPickerScrollSummary({ hiddenBefore: 0, hiddenAfter: 0, matched: 3, total: 66 }),
+    formatProviderAuthPickerScrollSummary({ hiddenBefore: 0, hiddenAfter: 0, matched: 3, total: 66 }),
     "3 of 66 providers",
   );
   assert.equal(
-    formatOmpAuthPickerScrollSummary({ hiddenBefore: 0, hiddenAfter: 0, matched: 0, total: 66 }),
+    formatProviderAuthPickerScrollSummary({ hiddenBefore: 0, hiddenAfter: 0, matched: 0, total: 66 }),
     "no provider matches · 66 in catalog",
   );
 });
 
 test("the footer publishes two-tone key hints for every picker action", () => {
-  assert.deepEqual(OMP_AUTH_PICKER_KEY_HINTS, [
+  assert.deepEqual(PROVIDER_AUTH_PICKER_KEY_HINTS, [
     { key: "↑↓", label: "provider" },
     { key: "type", label: "filter" },
     { key: "⌫", label: "edit" },
@@ -160,58 +160,58 @@ test("the footer publishes two-tone key hints for every picker action", () => {
 });
 
 test("key hints wrap instead of truncating away the Enter affordance", () => {
-  assert.deepEqual(layoutOmpAuthPickerKeyHints(96), [OMP_AUTH_PICKER_KEY_HINTS]);
+  assert.deepEqual(layoutProviderAuthPickerKeyHints(96), [PROVIDER_AUTH_PICKER_KEY_HINTS]);
   assert.deepEqual(
-    layoutOmpAuthPickerKeyHints(44).map((row) => row.map((hint) => hint.key)),
+    layoutProviderAuthPickerKeyHints(44).map((row) => row.map((hint) => hint.key)),
     [["↑↓", "type", "⌫"], ["Enter", "Esc"]],
   );
   // Every hint survives at any width; nothing is dropped to fit.
   assert.deepEqual(
-    layoutOmpAuthPickerKeyHints(8).flat(),
-    [...OMP_AUTH_PICKER_KEY_HINTS],
+    layoutProviderAuthPickerKeyHints(8).flat(),
+    [...PROVIDER_AUTH_PICKER_KEY_HINTS],
   );
 });
 
 test("catalog failures become plain UI states instead of fabricated success", () => {
-  assert.equal(describeOmpAuthCatalogError("OMP_UNAVAILABLE"), "sign-in unavailable");
-  assert.equal(describeOmpAuthCatalogError("OMP_CATALOG_UNAVAILABLE"), "catalog unavailable");
-  assert.equal(describeOmpAuthCatalogError("OMP_PROTOCOL_ERROR"), "catalog unavailable");
+  assert.equal(describeProviderAuthCatalogError("AUTH_UNAVAILABLE"), "sign-in unavailable");
+  assert.equal(describeProviderAuthCatalogError("AUTH_CATALOG_UNAVAILABLE"), "catalog unavailable");
+  assert.equal(describeProviderAuthCatalogError("AUTH_PROTOCOL_ERROR"), "catalog unavailable");
 });
 
 test("the sign-in receipt reports the exact OMP handoff, or that the handoff failed", () => {
   assert.equal(
-    formatOmpAuthSignInReceipt({ ok: true, binPath: "/x/omp", argv: ["auth-broker", "login", "kimi-code"], command: "omp auth-broker login kimi-code" }),
+    formatProviderAuthSignInReceipt({ ok: true, binPath: "/x/omp", argv: ["auth-broker", "login", "kimi-code"], command: "omp auth-broker login kimi-code" }),
     "Sign-in handoff · run: omp auth-broker login kimi-code",
   );
   assert.equal(
-    formatOmpAuthSignInReceipt({ ok: false, error: { code: "OMP_UNAVAILABLE", message: "omp executable not found on PATH" } }),
+    formatProviderAuthSignInReceipt({ ok: false, error: { code: "AUTH_UNAVAILABLE", message: "omp executable not found on PATH" } }),
     "Sign-in handoff failed · omp executable not found on PATH",
   );
 });
 
 test("an unavailable provider gets an explicit receipt of its own, not a handoff", () => {
   assert.equal(
-    formatOmpAuthUnavailableReceipt({ id: "devin", name: "Devin", available: false, credentialKey: "devin", signedIn: false }),
+    formatProviderAuthUnavailableReceipt({ id: "devin", name: "Devin", available: false, credentialKey: "devin", signedIn: false }),
     "Sign-in unavailable · Devin is unavailable",
   );
 });
 
 test("Enter drives the picker only when the composer is not holding a real /auth subcommand", () => {
-  assert.equal(shouldOmpAuthPickerHandleSubmit({ line: "/auth", catalog: READY, rowCount: 7 }), true);
-  assert.equal(shouldOmpAuthPickerHandleSubmit({ line: "/auth kimi", catalog: READY, rowCount: 1 }), true);
+  assert.equal(shouldProviderAuthPickerHandleSubmit({ line: "/auth", catalog: READY, rowCount: 7 }), true);
+  assert.equal(shouldProviderAuthPickerHandleSubmit({ line: "/auth kimi", catalog: READY, rowCount: 1 }), true);
 
   for (const reserved of ["status", "login", "key", "logout", "browser"]) {
     assert.equal(
-      shouldOmpAuthPickerHandleSubmit({ line: `/auth ${reserved}`, catalog: READY, rowCount: 7 }),
+      shouldProviderAuthPickerHandleSubmit({ line: `/auth ${reserved}`, catalog: READY, rowCount: 7 }),
       false,
       `/auth ${reserved} must stay routed to the existing auth action`,
     );
   }
 
-  assert.equal(shouldOmpAuthPickerHandleSubmit({ line: "/auth login --api-key sk", catalog: READY, rowCount: 7 }), false);
-  assert.equal(shouldOmpAuthPickerHandleSubmit({ line: "/model gpt", catalog: READY, rowCount: 7 }), false);
-  assert.equal(shouldOmpAuthPickerHandleSubmit({ line: "/auth", catalog: { status: "loading" }, rowCount: 0 }), false);
-  assert.equal(shouldOmpAuthPickerHandleSubmit({ line: "/auth zzz", catalog: READY, rowCount: 0 }), false);
+  assert.equal(shouldProviderAuthPickerHandleSubmit({ line: "/auth login --api-key sk", catalog: READY, rowCount: 7 }), false);
+  assert.equal(shouldProviderAuthPickerHandleSubmit({ line: "/model gpt", catalog: READY, rowCount: 7 }), false);
+  assert.equal(shouldProviderAuthPickerHandleSubmit({ line: "/auth", catalog: { status: "loading" }, rowCount: 0 }), false);
+  assert.equal(shouldProviderAuthPickerHandleSubmit({ line: "/auth zzz", catalog: READY, rowCount: 0 }), false);
 });
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: measuring painted columns requires stripping SGR sequences.
@@ -233,8 +233,8 @@ function viewProps(overrides = {}) {
     slashSuggestionCount: 5,
     terminalColumns: 100,
     cwd: "/tmp/unclecode-auth-picker",
-    ompAuthCatalog: READY,
-    ompAuthPickerCursor: 0,
+    providerAuthCatalog: READY,
+    providerAuthPickerCursor: 0,
     ...overrides,
   };
 }
@@ -276,7 +276,7 @@ test("/auth status keeps the existing auth panel even if a catalog prop is prese
 });
 
 test("the selected row tracks the cursor and the search row echoes the filter", async () => {
-  const output = await renderView({ inputValue: "/auth open", ompAuthPickerCursor: 1 });
+  const output = await renderView({ inputValue: "/auth open", providerAuthPickerCursor: 1 });
 
   assert.match(output, /⌕ open/);
   assert.match(output, /› ● OpenRouter/);
@@ -298,7 +298,7 @@ test("the picker keeps every row inside a 52-column terminal", async () => {
 
 test("an unavailable OMP install renders an explicit failure state, never an empty catalog", async () => {
   const output = await renderView({
-    ompAuthCatalog: { status: "error", code: "OMP_UNAVAILABLE", message: "omp executable not found on PATH" },
+    providerAuthCatalog: { status: "error", code: "AUTH_UNAVAILABLE", message: "omp executable not found on PATH" },
   });
 
   assert.match(output, /sign-in unavailable/);
@@ -308,7 +308,7 @@ test("an unavailable OMP install renders an explicit failure state, never an emp
 
 test("a broken catalog read renders catalog unavailable and keeps Esc reachable", async () => {
   const output = await renderView({
-    ompAuthCatalog: { status: "error", code: "OMP_CATALOG_UNAVAILABLE", message: "agent.db is locked" },
+    providerAuthCatalog: { status: "error", code: "AUTH_CATALOG_UNAVAILABLE", message: "agent.db is locked" },
   });
 
   assert.match(output, /catalog unavailable/);
@@ -318,14 +318,14 @@ test("a broken catalog read renders catalog unavailable and keeps Esc reachable"
 
 test("a failed sign-in handoff is reported instead of a fake success", async () => {
   const output = await renderView({
-    ompAuthSignInReceipt: "Sign-in handoff failed · omp executable not found on PATH",
+    providerAuthSignInReceipt: "Sign-in handoff failed · omp executable not found on PATH",
   });
 
   assert.match(output, /Sign-in handoff failed · omp executable not found on PATH/);
 });
 
 test("the picker says so while the catalog is still loading", async () => {
-  const output = await renderView({ ompAuthCatalog: { status: "loading" } });
+  const output = await renderView({ providerAuthCatalog: { status: "loading" } });
 
   assert.match(output, /Reading providers/);
   assert.doesNotMatch(output, /Kimi Code|ChatGPT Plus/);

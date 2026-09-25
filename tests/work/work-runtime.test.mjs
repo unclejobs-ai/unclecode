@@ -1149,7 +1149,7 @@ test("goal context projection states missing acceptance criteria and evidence in
 });
 
 test("managed dashboard preserves the resumed submitted receipt identity", () => {
-  const ompAuthCatalog = {
+  const providerAuthCatalog = {
     list: async () => ({ ok: true, providers: [] }),
     signIn: async () => ({ ok: true, command: "omp auth-broker login kimi-code" }),
   };
@@ -1174,7 +1174,7 @@ test("managed dashboard preserves the resumed submitted receipt identity", () =>
       contextSummaryLines: [],
       homeState: {},
       initialLastSubmittedContextReceiptId: "receipt-resumed-submitted",
-      ompAuthCatalog,
+      providerAuthCatalog,
     },
   }, {
     resolveWorkShellInlineCommand: async () => ({ lines: [], failed: false }),
@@ -1191,7 +1191,7 @@ test("managed dashboard preserves the resumed submitted receipt identity", () =>
     syncHomeState() {},
   });
   const pane = embeddedPane.props.buildPane({ onExit() {} });
-  assert.equal(pane.ompAuthCatalog, ompAuthCatalog);
+  assert.equal(pane.providerAuthCatalog, providerAuthCatalog);
 });
 
 test("managed dashboard publishes one attachment callback per runtime engine", () => {

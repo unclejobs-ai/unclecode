@@ -578,7 +578,7 @@ export async function loadWorkCliBootstrap(
         browserOAuthAvailable: config.provider === "openai"
           && Boolean(env.OPENAI_OAUTH_CLIENT_ID?.trim()),
         // Reads this machine's credential store directly; the owner is not involved.
-        ompAuthCatalog: createProviderAuthCatalog(env),
+        providerAuthCatalog: createProviderAuthCatalog(env),
       },
     };
   }
@@ -1205,7 +1205,7 @@ export async function loadWorkCliBootstrap(
       refreshHomeState,
       refreshAuthState,
       browserOAuthAvailable,
-      ompAuthCatalog: createProviderAuthCatalog(env),
+      providerAuthCatalog: createProviderAuthCatalog(env),
       runInlineCommand: (
         args: readonly string[],
         onProgress?: ((line: string) => void) | undefined,

@@ -132,8 +132,8 @@ test("loadWorkCliBootstrap keeps the direct conversation agent on the configured
     assert.equal(result.options.provider, "openai");
     assert.equal(result.options.model, "gpt-5.4");
     assert.notEqual(result.options.interactionBridge, undefined);
-    assert.equal(typeof result.options.ompAuthCatalog?.list, "function");
-    assert.equal(typeof result.options.ompAuthCatalog?.signIn, "function");
+    assert.equal(typeof result.options.providerAuthCatalog?.list, "function");
+    assert.equal(typeof result.options.providerAuthCatalog?.signIn, "function");
   } finally {
     process.env = originalEnv;
     rmSync(workspaceRoot, { recursive: true, force: true });

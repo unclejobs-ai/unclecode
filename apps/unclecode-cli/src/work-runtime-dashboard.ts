@@ -43,7 +43,6 @@ import {
 import type { WorkShellInteractionBridge } from "@unclecode/orchestrator";
 import type { WorkShellControlEngine } from "@unclecode/server";
 import type {
-  OmpAuthCatalogClient,
   ProviderInputAttachment,
   ProviderName,
   ProviderToolTraceEvent,
@@ -61,6 +60,7 @@ import {
   type TuiShellHomeState,
   type TuiRenderOptions,
 } from "@unclecode/tui";
+import type { ProviderAuthCatalogPort } from "@unclecode/tui";
 
 export type StartReplOptions = {
   provider: ProviderName;
@@ -108,7 +108,7 @@ export type StartReplOptions = {
    * OMP-owned OAuth provider catalog and sign-in handoff for the `/auth`
    * picker. Injected so the TUI never reaches into provider infrastructure.
    */
-  ompAuthCatalog?: OmpAuthCatalogClient | undefined;
+  providerAuthCatalog?: ProviderAuthCatalogPort | undefined;
   /** Optional agentops recorder callback. Non-blocking. Fired after every prompt turn. */
   recordTurn?: ((turn: { prompt: string; status: string; summary?: string; turnId?: string; contextReceiptId?: string; packetId?: string }) => void) | undefined;
   /** Context Inspector (Sprint 2): SQL mutation callback for the /context overlay. */
@@ -320,8 +320,8 @@ export function createManagedDashboardInput(
         : {}),
       ...(input.userHomeDir ? { userHomeDir: input.userHomeDir } : {}),
       browserOAuthAvailable: Boolean(session.options.browserOAuthAvailable),
-      ...(session.options.ompAuthCatalog !== undefined
-        ? { ompAuthCatalog: session.options.ompAuthCatalog }
+      ...(session.options.providerAuthCatalog !== undefined
+        ? { providerAuthCatalog: session.options.providerAuthCatalog }
         : {}),
       ...(session.options.recordTurn !== undefined
         ? { recordTurn: session.options.recordTurn }

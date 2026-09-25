@@ -58,16 +58,16 @@ import {
   WorkShellAgentConsoleHud,
   WorkShellAgentConsoleOverlay,
 } from "./work-shell-agent-console-view.js";
-import { renderOmpAuthProviderPicker } from "./work-shell-auth-provider-picker.js";
+import { renderProviderAuthPicker } from "./work-shell-auth-provider-picker.js";
 import {
   resolveComposerRenderedRowCount,
   WorkShellComposerFrameContext,
   type ComposerFrameGeometry,
 } from "./composer.js";
 import {
-  resolveOmpAuthPickerQuery,
-  shouldShowOmpAuthPicker,
-  type OmpAuthPickerCatalog,
+  resolveProviderAuthPickerQuery,
+  shouldShowProviderAuthPicker,
+  type ProviderAuthPickerCatalog,
 } from "./work-shell-auth-provider-picker-model.js";
 import { formatProviderPerformanceStatus } from "./work-shell-performance-receipt.js";
 import {
@@ -3288,9 +3288,9 @@ export function WorkShellView(props: {
   readonly agentConsoleView?: AgentConsoleViewState;
   readonly decisionSelectedIndex?: number;
   /** `/auth` OMP provider catalog, injected at the pane boundary. */
-  readonly ompAuthCatalog?: OmpAuthPickerCatalog;
-  readonly ompAuthPickerCursor?: number;
-  readonly ompAuthSignInReceipt?: string;
+  readonly providerAuthCatalog?: ProviderAuthPickerCatalog;
+  readonly providerAuthPickerCursor?: number;
+  readonly providerAuthSignInReceipt?: string;
 }) {
   // Hooks run before any early-return branch, so the clock keeps one identity
   // across every frame the shell can render.
@@ -3387,10 +3387,10 @@ export function WorkShellView(props: {
     props.activePanel.title === "Agent History" && props.agentConsole !== undefined;
   // `/auth` leads with the OMP credential catalog. The Rust auth-picker lines
   // stay behind the explicit subcommands (`/auth status`, `/auth login`, …).
-  const shouldRenderOmpAuthPicker =
+  const shouldRenderProviderAuthPicker =
     props.activePanel.title === "Auth"
-    && props.ompAuthCatalog !== undefined
-    && shouldShowOmpAuthPicker(props.inputValue);
+    && props.providerAuthCatalog !== undefined
+    && shouldShowProviderAuthPicker(props.inputValue);
 
   const composerFrameLayout = resolveWorkShellComposerFrameLayout({
     ...(props.terminalRows !== undefined ? { terminalRows: props.terminalRows } : {}),
@@ -3419,16 +3419,16 @@ export function WorkShellView(props: {
     />
   );
 
-  const panel = shouldRenderOmpAuthPicker && props.ompAuthCatalog !== undefined ? (
-    renderOmpAuthProviderPicker({
-      catalog: props.ompAuthCatalog,
-      query: resolveOmpAuthPickerQuery(props.inputValue),
-      cursor: props.ompAuthPickerCursor ?? 0,
+  const panel = shouldRenderProviderAuthPicker && props.providerAuthCatalog !== undefined ? (
+    renderProviderAuthPicker({
+      catalog: props.providerAuthCatalog,
+      query: resolveProviderAuthPickerQuery(props.inputValue),
+      cursor: props.providerAuthPickerCursor ?? 0,
       width: Math.max(32, (props.terminalColumns ?? process.stdout.columns ?? 96) - 4),
       borderColor: panelBorderColor,
       palette: W,
       uiLocale: props.uiLocale ?? "en",
-      ...(props.ompAuthSignInReceipt ? { signInReceipt: props.ompAuthSignInReceipt } : {}),
+      ...(props.providerAuthSignInReceipt ? { signInReceipt: props.providerAuthSignInReceipt } : {}),
     })
   ) : (
     <WorkShellPanelBlock

@@ -131,12 +131,12 @@ test("auxiliary auth, telemetry, and context overlays keep EN and KO chrome cons
     providers: [{ id: "openai", name: "OpenAI", available: true, credentialKey: "OPENAI_API_KEY", signedIn: false }],
   };
   const koAuth = await frame({
-    uiLocale: "ko", inputValue: "/auth", activePanel: { title: "Auth", lines: [] }, ompAuthCatalog: catalog,
+    uiLocale: "ko", inputValue: "/auth", activePanel: { title: "Auth", lines: [] }, providerAuthCatalog: catalog,
   });
   assert.match(koAuth, /OMP 제공자|입력하여 필터|로그인 안 됨/u);
   assert.doesNotMatch(koAuth, /UncleCode sign-in|type to filter|not signed in|back to work/);
   const enAuth = await frame({
-    uiLocale: "en", inputValue: "/auth", activePanel: { title: "Auth", lines: [] }, ompAuthCatalog: catalog,
+    uiLocale: "en", inputValue: "/auth", activePanel: { title: "Auth", lines: [] }, providerAuthCatalog: catalog,
   });
   assert.match(enAuth, /Providers · UncleCode sign-in|type to filter|not signed in/);
   assert.doesNotMatch(enAuth, /제공자|필터|로그인 안 됨/u);

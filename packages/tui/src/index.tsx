@@ -5,6 +5,7 @@ export * from "./dashboard-components.js";
 export * from "./dashboard-model.js";
 export * from "./dashboard-navigation.js";
 export * from "./dashboard-render.js";
+export type { ProviderAuthCatalogPort } from "./work-shell-auth-provider-picker-model.js";
 export * from "./dashboard-shell.js";
 export * from "./renderer-capabilities.js";
 export * from "./tui-entry.js";

@@ -37,10 +37,10 @@ import {
   resolveWorkShellComposerAdditionalRows,
   WorkShellView,
 } from "./work-shell-view.js";
-import { useOmpAuthProviderPicker } from "./work-shell-auth-provider-picker-state.js";
+import { useProviderAuthPicker } from "./work-shell-auth-provider-picker-state.js";
 import {
-  shouldShowOmpAuthPicker,
-  type OmpAuthCatalogPort,
+  shouldShowProviderAuthPicker,
+  type ProviderAuthCatalogPort,
 } from "./work-shell-auth-provider-picker-model.js";
 
 export type WorkShellPaneProps<
@@ -63,10 +63,10 @@ export type WorkShellPaneProps<
   ) => readonly WorkShellSlashSuggestion[];
   readonly browserOAuthAvailable?: boolean | undefined;
   /**
-   * OMP credential catalog for the `/auth` surface, injected by the app. Left
+   * Provider sign-in catalog for the `/auth` surface, injected by the app. Left
    * undefined, `/auth` keeps its existing panel rather than inventing rows.
    */
-  readonly ompAuthCatalog?: OmpAuthCatalogPort | undefined;
+  readonly providerAuthCatalog?: ProviderAuthCatalogPort | undefined;
   readonly onExit: () => void;
   readonly onRequestSessionsView?: (() => void) | undefined;
   readonly onSyncHomeState?: ((homeState: Partial<TuiShellHomeState>) => void) | undefined;
@@ -337,9 +337,9 @@ export function WorkShellPane<
     [authLabel],
   );
   const authPickerActive =
-    activePanel.title === "Auth" && shouldShowOmpAuthPicker(inputValue);
-  const authPicker = useOmpAuthProviderPicker({
-    ...(props.ompAuthCatalog ? { port: props.ompAuthCatalog } : {}),
+    activePanel.title === "Auth" && shouldShowProviderAuthPicker(inputValue);
+  const authPicker = useProviderAuthPicker({
+    ...(props.providerAuthCatalog ? { port: props.providerAuthCatalog } : {}),
     active: authPickerActive,
     inputValue,
   });
@@ -505,9 +505,9 @@ export function WorkShellPane<
       {...{ terminalRows }}
       {...(transcriptScrollOffset > 0 ? { transcriptScrollOffset } : {})}
       transcriptReservedRows={transcriptReservedRows}
-      {...(authPickerActive && authPicker.catalog ? { ompAuthCatalog: authPicker.catalog } : {})}
-      ompAuthPickerCursor={authPicker.cursor}
-      {...(authPickerActive && authPicker.signInReceipt ? { ompAuthSignInReceipt: authPicker.signInReceipt } : {})}
+      {...(authPickerActive && authPicker.catalog ? { providerAuthCatalog: authPicker.catalog } : {})}
+      providerAuthPickerCursor={authPicker.cursor}
+      {...(authPickerActive && authPicker.signInReceipt ? { providerAuthSignInReceipt: authPicker.signInReceipt } : {})}
       composer={
         <Composer
           value={inputValue}

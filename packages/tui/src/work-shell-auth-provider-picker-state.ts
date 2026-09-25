@@ -1,6 +1,6 @@
 /**
- * `/auth` provider-catalog state: one lazy read of the injected OMP port, a
- * cursor derived from the current filter, and Enter → OMP-owned sign-in.
+ * `/auth` provider-catalog state: one lazy read of the injected catalog port, a
+ * cursor derived from the current filter, and Enter → the app-owned sign-in handoff.
  *
  * The port is supplied by the app at the pane boundary; this hook never
  * constructs one, so the TUI keeps no dependency on provider infrastructure.
@@ -12,32 +12,32 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useInput } from "ink";
 
 import {
-  clampOmpAuthPickerCursor,
-  filterOmpAuthProviders,
-  formatOmpAuthSignInReceipt,
-  formatOmpAuthUnavailableReceipt,
-  moveOmpAuthPickerCursor,
-  resolveOmpAuthPickerQuery,
-  shouldOmpAuthPickerHandleSubmit,
-  type OmpAuthCatalogPort,
-  type OmpAuthPickerCatalog,
+  clampProviderAuthPickerCursor,
+  filterProviderAuths,
+  formatProviderAuthSignInReceipt,
+  formatProviderAuthUnavailableReceipt,
+  moveProviderAuthPickerCursor,
+  resolveProviderAuthPickerQuery,
+  shouldProviderAuthPickerHandleSubmit,
+  type ProviderAuthCatalogPort,
+  type ProviderAuthPickerCatalog,
 } from "./work-shell-auth-provider-picker-model.js";
 
-export type OmpAuthProviderPickerState = {
-  readonly catalog: OmpAuthPickerCatalog | undefined;
+export type ProviderAuthPickerState = {
+  readonly catalog: ProviderAuthPickerCatalog | undefined;
   readonly cursor: number;
   readonly signInReceipt: string | undefined;
   /** Returns true when the picker consumed Enter; false leaves the line to the engine. */
   readonly submit: (line: string) => Promise<boolean>;
 };
 
-export function useOmpAuthProviderPicker(input: {
-  readonly port?: OmpAuthCatalogPort | undefined;
+export function useProviderAuthPicker(input: {
+  readonly port?: ProviderAuthCatalogPort | undefined;
   readonly active: boolean;
   readonly inputValue: string;
-}): OmpAuthProviderPickerState {
+}): ProviderAuthPickerState {
   const { active, inputValue, port } = input;
-  const [catalog, setCatalog] = useState<OmpAuthPickerCatalog | undefined>(undefined);
+  const [catalog, setCatalog] = useState<ProviderAuthPickerCatalog | undefined>(undefined);
   const [cursorState, setCursorState] = useState<{ query: string; cursor: number }>({
     query: "",
     cursor: 0,
@@ -56,19 +56,19 @@ export function useOmpAuthProviderPicker(input: {
     setReceipt({ open: active });
   }
 
-  const query = resolveOmpAuthPickerQuery(inputValue);
+  const query = resolveProviderAuthPickerQuery(inputValue);
   const matches = useMemo(
-    () => (catalog?.status === "ready" ? filterOmpAuthProviders(catalog.providers, query) : []),
+    () => (catalog?.status === "ready" ? filterProviderAuths(catalog.providers, query) : []),
     [catalog, query],
   );
   // Derived, not stored: a new filter re-anchors the cursor to the first match
   // without an extra render pass.
-  const cursor = clampOmpAuthPickerCursor(
+  const cursor = clampProviderAuthPickerCursor(
     cursorState.query === query ? cursorState.cursor : 0,
     matches.length,
   );
 
-  // External system sync: OMP's credential store lives in another process, so
+  // External system sync: the credential store lives outside React state, so
   // the catalog is read once the /auth surface is actually opened.
   const loadedRef = useRef(false);
   useEffect(() => {
@@ -104,7 +104,7 @@ export function useOmpAuthProviderPicker(input: {
       if (direction === undefined) {
         return;
       }
-      setCursorState({ query, cursor: moveOmpAuthPickerCursor(cursor, direction, matches.length) });
+      setCursorState({ query, cursor: moveProviderAuthPickerCursor(cursor, direction, matches.length) });
     },
     { isActive: active && catalog?.status === "ready" && matches.length > 0 },
   );
@@ -114,7 +114,7 @@ export function useOmpAuthProviderPicker(input: {
       if (!port || catalog === undefined) {
         return false;
       }
-      if (!shouldOmpAuthPickerHandleSubmit({ line, catalog, rowCount: matches.length })) {
+      if (!shouldProviderAuthPickerHandleSubmit({ line, catalog, rowCount: matches.length })) {
         return false;
       }
       const row = matches[cursor];
@@ -128,7 +128,7 @@ export function useOmpAuthProviderPicker(input: {
         setReceipt({
           open: true,
           requestId: ++nextSignInRequestIdRef.current,
-          text: formatOmpAuthUnavailableReceipt(row),
+          text: formatProviderAuthUnavailableReceipt(row),
         });
         return true;
       }
@@ -137,7 +137,7 @@ export function useOmpAuthProviderPicker(input: {
       const handoff = await port.signIn(row.id);
       setReceipt((current) =>
         current.open && current.requestId === requestId
-          ? { open: true, requestId, text: formatOmpAuthSignInReceipt(handoff) }
+          ? { open: true, requestId, text: formatProviderAuthSignInReceipt(handoff) }
           : current,
       );
       return true;
