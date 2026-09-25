@@ -375,16 +375,24 @@ export function createCrpRuntime(
           ? { recordPerformanceSample: bootstrap.recordPerformanceSample }
           : {}),
       });
+      const summaryItems = buildContextSummaryItems(input.contextSummaryLines).filter(
+        (item) => item.category !== "workspace-guidance",
+      );
       await upsertPacketItemsAsContextSources({
         store: crpState.store,
         projectId: crpState.projectId,
-        items: buildContextSummaryItems(input.contextSummaryLines).filter(
-          (item) => item.category !== "workspace-guidance",
-        ),
+        items: summaryItems,
         salience: 0.9,
         ...(bootstrap.recordPerformanceSample !== undefined
           ? { recordPerformanceSample: bootstrap.recordPerformanceSample }
           : {}),
+      });
+      // Summary lines describe this session and carry positional ids; rows a
+      // previous session left at other positions are stale, not project context.
+      crpState.store.deleteContextSourcesByIdPrefix({
+        projectId: crpState.projectId,
+        idPrefix: "workspace-context-",
+        keepIds: summaryItems.map((item) => item.id),
       });
       const workGraphItems = buildWorkGraphContextItems(input.workGraph);
       await upsertPacketItemsAsContextSources({

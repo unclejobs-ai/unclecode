@@ -14,6 +14,7 @@ import {
 } from "@unclecode/contracts";
 
 import { listProjectBridgeLines } from "./context-memory.js";
+import { isBootstrapSyntheticMemoryLine } from "./memory-prefetch.js";
 import {
   deriveSalience,
   estimateTokens,
@@ -61,6 +62,12 @@ export function createBridgeProvider(): ContextProvider {
         input.store.upsertContextSource(upsert);
         touched.push(id);
       }
+      // Ids are positions in this sync's list; rows past its end are stale.
+      input.store.deleteContextSourcesByIdPrefix({
+        projectId: input.projectId,
+        idPrefix: "context-bridge-",
+        keepIds: touched,
+      });
       return touched;
     },
   };
@@ -156,7 +163,8 @@ export function createMemoryProvider(
         }),
         listScopedMemoryLines({ scope: "project", cwd: input.cwd, env }),
       ]);
-      const all = [...sessionLines, ...projectLines];
+      // Bootstrap stamps are synthetic memories; memory prefetch skips them too.
+      const all = [...sessionLines, ...projectLines].filter((line) => !isBootstrapSyntheticMemoryLine(line));
       for (let i = 0; i < all.length; i += 1) {
         const line = all[i];
         if (line === undefined) continue;
@@ -174,6 +182,13 @@ export function createMemoryProvider(
         input.store.upsertContextSource(upsert);
         touched.push(id);
       }
+      // Ids are positions in this sync's list; rows past its end belong to an
+      // earlier session's memory list.
+      input.store.deleteContextSourcesByIdPrefix({
+        projectId: input.projectId,
+        idPrefix: "context-memory-",
+        keepIds: touched,
+      });
       return touched;
     },
   };

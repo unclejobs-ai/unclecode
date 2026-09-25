@@ -581,3 +581,43 @@ test("CRP runtime fallback hides provider and selection diagnostics", async () =
     rmSync(workspaceRoot, { recursive: true, force: true });
   }
 });
+test("a session's context summary lines do not survive into the next session's packet", async () => {
+  // Summary lines were stored under positional ids (`workspace-context-N`) in the
+  // project-wide store, so a later session with a different line list kept the
+  // earlier rows it did not overwrite: yesterday's bootstrap stamp, an old
+  // `Resumed session:` line and repeated hints all rode along into today's packet.
+  const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-work-crp-summary-lines-"));
+  const fakeHome = path.join(workspaceRoot, "home");
+  const packetLabels = (packet) => [...packet.included, ...packet.excluded].map((entry) => entry.label);
+  const sessionInput = (sessionId, contextSummaryLines) => ({
+    cwd: workspaceRoot,
+    sessionId,
+    contextSummaryLines,
+    bridgeLines: [],
+    memoryLines: [],
+    traceLines: [],
+  });
+
+  try {
+    await createCrpTestRuntime(fakeHome).resolveContextPacket(sessionInput("work-yesterday", [
+      "Bootstrap context · 2026-09-24T13:30:31.851Z",
+      "Loaded MCP servers: 1",
+      "Resumed session: work-old",
+      "/context · /help · /sessions",
+    ]));
+    const today = await createCrpTestRuntime(fakeHome).resolveContextPacket(sessionInput("work-today", [
+      "Bootstrap context · 2026-09-25T09:46:01.197Z",
+      "Loaded MCP servers: 1",
+    ]));
+
+    const labels = packetLabels(today);
+    assert.ok(labels.includes("Bootstrap context · 2026-09-25T09:46:01.197Z"));
+    assert.deepEqual(
+      labels.filter((label) => /Bootstrap context|Resumed session|\/context · \/help/u.test(label)),
+      ["Bootstrap context · 2026-09-25T09:46:01.197Z"],
+    );
+    assert.equal(labels.filter((label) => label === "Loaded MCP servers: 1").length, 1);
+  } finally {
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});

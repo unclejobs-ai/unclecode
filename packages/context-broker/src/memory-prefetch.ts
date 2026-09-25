@@ -27,6 +27,12 @@ function isBootstrapSyntheticMemory(entry: ScopedMemoryEntry): boolean {
   return BOOTSTRAP_SYNTHETIC_MEMORY_PREFIX.test(entry.summary.trim());
 }
 
+/** The same test on a transparency line (`{scope} · {summary} · cite …`). */
+export function isBootstrapSyntheticMemoryLine(line: string): boolean {
+  const summary = line.slice(line.indexOf(" · ") + " · ".length);
+  return line.includes(" · ") && BOOTSTRAP_SYNTHETIC_MEMORY_PREFIX.test(summary.trim());
+}
+
 async function withPrefetchTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   try {

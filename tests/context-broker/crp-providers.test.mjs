@@ -477,3 +477,28 @@ test("selectContextPacketFromStore marks turn_last_seen", async () => {
   });
   assert.equal(result.selected[0].turnLastSeen, 42);
 });
+
+test("MemoryProvider drops rows a previous sync left behind and skips bootstrap stamps", async () => {
+  // Memory rows were stored under positional ids and never pruned, so a shorter
+  // or different memory list kept the previous session's rows; legacy bootstrap
+  // stamps (`Bootstrap context: …`, which memory prefetch already skips) rode
+  // along five times per packet.
+  const store = makeStore();
+  let lines = [
+    "session · old session note · cite memory:session:1 · fresh",
+    "project · keep the release notes short · cite memory:project:2 · fresh",
+  ];
+  const provider = createMemoryProvider(async ({ scope }) => (scope === "session" ? lines.slice(0, 1) : lines.slice(1)));
+  await provider.sync({ store, projectId: "proj_test", cwd: "/repos/test", sessionId: "s1" });
+
+  lines = [
+    "project · Bootstrap context: 4 guidance, 0 cursor rules, 77 skills, 1 MCP servers. · cite memory:project:3 · aged",
+    "project · keep the release notes short · cite memory:project:2 · fresh",
+  ];
+  const touched = await provider.sync({ store, projectId: "proj_test", cwd: "/repos/test", sessionId: "s2" });
+
+  const contents = store.selectContextSources({ projectId: "proj_test", tokenBudget: 10000, turnIndex: 2 })
+    .selected.map((source) => source.content);
+  assert.deepEqual(contents, ["project · keep the release notes short · cite memory:project:2 · fresh"]);
+  assert.equal(touched.length, 1);
+});
