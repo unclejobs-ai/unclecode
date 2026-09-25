@@ -16,8 +16,6 @@ import {
   Container,
   type OverlayHandle,
   Editor,
-  Markdown,
-  type MarkdownTheme,
   matchesKey,
   ProcessTerminal,
   ScrollView,
@@ -28,6 +26,7 @@ import {
 } from "@earendil-works/pi-tui";
 
 import { PiAuthPicker } from "./pi-auth-picker.js";
+import { bold, cyan, dim, type PiShellEntry, TranscriptSync, yellow } from "./pi-transcript.js";
 import { CONTEXT_DESK_PANES, type ContextDeskPane } from "@unclecode/contracts";
 
 import {
@@ -41,11 +40,6 @@ import {
 import { formatPiDecisionRows, piDecisionOptionCount, type PiShellDecision, readPiShellDecision } from "./pi-decision.js";
 import type { ProviderAuthCatalogPort } from "./work-shell-auth-provider-picker-model.js";
 import { selectWorkShellLiveToolTraceLines } from "./work-shell-live-activity.js";
-
-export type PiShellEntry = {
-  readonly role: "system" | "user" | "assistant" | "tool";
-  readonly text: string;
-};
 
 export type PiShellState = {
   readonly entries: readonly PiShellEntry[];
@@ -83,41 +77,11 @@ export type PiShellEngine = PiContextDeskEngine & {
   cancelPendingDecision?(decisionId: string): unknown;
 };
 
-const STREAMING_CURSOR = "▌";
-const REASONING_PREFIX = "✻ ";
-const TOOL_RESULT_ROWS_MAX = 8;
 const BUSY_TICK_MS = 1_000;
 /** The engine's resting panel: the collapsed context summary, not something a command opened. */
 const RESTING_PANEL_TITLE = "Context";
 const panelBg = (text: string) => `\u001b[48;5;236m${text}\u001b[49m`;
 const ENTRY_ROLES = new Set(["system", "user", "assistant", "tool"]);
-
-const sgr = (open: number, close: number) => (text: string) => `\u001b[${open}m${text}\u001b[${close}m`;
-const bold = sgr(1, 22);
-const dim = sgr(2, 22);
-const italic = sgr(3, 23);
-const underline = sgr(4, 24);
-const strike = sgr(9, 29);
-const cyan = sgr(36, 39);
-const green = sgr(32, 39);
-const yellow = sgr(33, 39);
-
-const MARKDOWN_THEME: MarkdownTheme = {
-  heading: bold,
-  link: underline,
-  linkUrl: dim,
-  code: cyan,
-  codeBlock: (text) => text,
-  codeBlockBorder: dim,
-  quote: italic,
-  quoteBorder: dim,
-  hr: dim,
-  listBullet: cyan,
-  bold,
-  italic,
-  strikethrough: strike,
-  underline,
-};
 
 const EDITOR_THEME = {
   borderColor: dim,
@@ -168,23 +132,6 @@ function readPiShellPanel(value: unknown): PiShellPanel | undefined {
   return { title: value.title, lines };
 }
 
-/**
- * A completed tool entry is glyph-less multi-row text (`{verb} {arg}`, metric
- * rows, excerpt — see `formatWorkShellToolDetailEntry`); the renderer owns the
- * `● ` / `⎿` glyphs, as in the Ink shell.
- */
-export function formatPiShellToolRows(text: string): readonly string[] {
-  const [call = "", ...rest] = text.trimEnd().split("\n");
-  const results = rest.filter((line) => line.trim().length > 0);
-  const shown = results.slice(0, TOOL_RESULT_ROWS_MAX);
-  const hidden = results.length - shown.length;
-  return [
-    `● ${call.trim()}`,
-    ...shown.map((line, index) => `${index === 0 ? "  ⎿ " : "    "}${line}`),
-    ...(hidden > 0 ? [`    … +${hidden} more lines`] : []),
-  ];
-}
-
 export function formatPiShellStatus(state: PiShellState, now: number = Date.now()): string {
   if (state.isBusy) {
     const elapsed = state.currentTurnStartedAt === undefined
@@ -226,73 +173,6 @@ export class PiShellStatusLine implements Component {
 
   render(width: number): string[] {
     return [truncateToWidth(` ${this.text}`, width)];
-  }
-}
-
-function createEntryComponent(entry: PiShellEntry): Component {
-  const text = entry.text.replace(STREAMING_CURSOR, "");
-  switch (entry.role) {
-    case "user":
-      return new Text(bold(`› ${text}`), 1, 0);
-    case "tool":
-      return new Text(formatPiShellToolRows(text).map((row, index) => (index === 0 ? green(row) : dim(row))).join("\n"), 1, 0);
-    case "system":
-      return new Text(dim(`· ${text}`), 1, 0);
-    case "assistant":
-      return text.startsWith(REASONING_PREFIX)
-        ? new Text(dim(italic(text.trimEnd())), 1, 0)
-        : new Markdown(text, 1, 0, MARKDOWN_THEME);
-  }
-}
-
-/**
- * Mirrors engine entries into transcript components. Entries only append or
- * change at the tail during a turn, so an unchanged prefix keeps its
- * components (and their rendered-line caches); anything else rebuilds.
- * Entries compare by value: the owner-remote engine parses a fresh state
- * object on every poll, so identity would rebuild the transcript each time.
- */
-class TranscriptSync {
-  private readonly rendered: PiShellEntry[] = [];
-  private readonly components: Component[] = [];
-  private streaming: Markdown | undefined;
-  private streamingText = "";
-
-  constructor(private readonly transcript: Container) {}
-
-  apply(state: PiShellState): void {
-    let keep = 0;
-    while (
-      keep < this.rendered.length
-      && keep < state.entries.length
-      && this.rendered[keep]?.role === state.entries[keep]?.role
-      && this.rendered[keep]?.text === state.entries[keep]?.text
-    ) keep += 1;
-    if (keep < this.rendered.length) {
-      for (const component of this.components.splice(keep)) this.transcript.removeChild(component);
-      this.rendered.splice(keep);
-    }
-    this.detachStreaming();
-    for (const entry of state.entries.slice(keep)) {
-      const component = createEntryComponent(entry);
-      this.rendered.push(entry);
-      this.components.push(component);
-      this.transcript.addChild(component);
-    }
-    const streamingText = state.streamingAssistantText;
-    if (streamingText.length > 0) {
-      if (!this.streaming) this.streaming = new Markdown("", 1, 0, MARKDOWN_THEME);
-      if (streamingText !== this.streamingText) this.streaming.setText(`${streamingText}${STREAMING_CURSOR}`);
-      this.streamingText = streamingText;
-      this.transcript.addChild(this.streaming);
-    } else {
-      this.streaming = undefined;
-      this.streamingText = "";
-    }
-  }
-
-  private detachStreaming(): void {
-    if (this.streaming) this.transcript.removeChild(this.streaming);
   }
 }
 
