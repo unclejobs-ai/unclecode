@@ -314,3 +314,22 @@ test("memory promotion restores its predecessor when content persistence fails",
   assert.equal(lineage.records.get(lineage.recordInputs[0].memoryId)?.state, "superseded");
   assert.equal(lineage.records.get("memory-previous")?.state, "active");
 });
+
+test("automatic work-shell turn summaries stay out of the project bridge lines", async () => {
+  // Every successful turn published `[summary] work-shell → project-context: Q: … · A: …`
+  // and the six newest rode into every other session's packet: one session's
+  // test turns ("scroll turn 09") showed up as context in unrelated sessions.
+  const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-context-broker-turn-bridge-"));
+  const env = { ...process.env, UNCLECODE_SESSION_STORE_ROOT: path.join(cwd, ".state") };
+  await publishContextBridge({
+    cwd, env, summary: "Release branch is frozen until Friday", source: "planner", target: "project-context", kind: "decision",
+  });
+  for (let turn = 1; turn <= 7; turn += 1) {
+    await publishContextBridge({
+      cwd, env, summary: `Q: scroll turn ${turn} · A: ok`, source: "work-shell", target: "project-context", kind: "summary",
+    });
+  }
+  assert.deepEqual(await listProjectBridgeLines(cwd, env), [
+    "[decision] planner → project-context: Release branch is frozen until Friday",
+  ]);
+});

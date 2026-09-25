@@ -140,6 +140,13 @@ export async function publishContextBridge(input: {
   };
 }
 
+/**
+ * What every successful work-shell turn publishes (`Q: … · A: …`). The session
+ * that wrote it already has the turn in its conversation, and to any other
+ * session it is an unrelated conversation, so it is not project context.
+ */
+const WORK_SHELL_TURN_SUMMARY_PREFIX = "[summary] work-shell → project-context: ";
+
 export async function listProjectBridgeLines(
   cwd: string,
   env: NodeJS.ProcessEnv = process.env,
@@ -149,6 +156,7 @@ export async function listProjectBridgeLines(
   return entries
     .filter((entry) => entry.memoryId.startsWith("bridge:"))
     .map((entry) => entry.content)
+    .filter((line) => !line.startsWith(WORK_SHELL_TURN_SUMMARY_PREFIX))
     .slice(-6)
     .reverse();
 }
