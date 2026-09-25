@@ -119,6 +119,8 @@ export type PersistentOwnerWorkShellController = {
   readonly embeddedWorkPane: NonNullable<Awaited<ReturnType<typeof createEmbeddedWorkPaneController<TuiShellHomeState>>>>;
   /** The initial session's owner-remote engine, for shells that render it directly. */
   readonly initialEngine: object;
+  /** Attaches another owner session (`--session-id <id>` …) and returns its engine. */
+  readonly openSessionEngine: (forwardedArgs: readonly string[]) => Promise<object>;
   readonly dispose: () => Promise<void>;
 };
 
@@ -405,10 +407,10 @@ export async function createPersistentOwnerWorkShellController(input: {
       attachments.clear();
     }
   };
-  const createSnapshot = async (
+  const attachEngine = async (
     target: ManagedDashboardSession,
     resume: boolean,
-  ): Promise<TuiRenderOptions<TuiShellHomeState>> => {
+  ): Promise<{ readonly session: ManagedDashboardSession; readonly engine: DisposableRemoteEngine }> => {
     if (disposed) throw new Error("Persistent owner Work controller is closed.");
     const ownerSessionId = await createAndAttachOwnerSession(activeClient, target, resume);
     const attachedSession: ManagedDashboardSession = {
@@ -433,6 +435,13 @@ export async function createPersistentOwnerWorkShellController(input: {
       },
     }) as DisposableRemoteEngine;
     attachments.add(remoteEngine);
+    return { session: attachedSession, engine: remoteEngine };
+  };
+  const createSnapshot = async (
+    target: ManagedDashboardSession,
+    resume: boolean,
+  ): Promise<TuiRenderOptions<TuiShellHomeState>> => {
+    const { session: attachedSession, engine: remoteEngine } = await attachEngine(target, resume);
     initialEngine ??= remoteEngine;
     let snapshotDisposed = false;
     const disposeSnapshot = () => {
@@ -457,7 +466,11 @@ export async function createPersistentOwnerWorkShellController(input: {
       },
     });
     if (!embeddedWorkPane || !initialEngine) throw new Error("Remote Work pane failed to initialize.");
-    return { initialProps, embeddedWorkPane, initialEngine, dispose };
+    const openSessionEngine = async (forwardedArgs: readonly string[]) => {
+      const switched = resolveSwitchedSession(input.session, forwardedArgs);
+      return (await attachEngine(switched.session, switched.resume)).engine;
+    };
+    return { initialProps, embeddedWorkPane, initialEngine, openSessionEngine, dispose };
   } catch (error) {
     await dispose();
     throw error;
@@ -502,6 +515,8 @@ export async function startRepl(
     if (process.env.UNCLECODE_TUI_SHELL === "pi") {
       await renderPiWorkShell(controller.initialEngine as PiShellEngine, {
         providerAuthCatalog: options.providerAuthCatalog,
+        openSession: async (sessionId) =>
+          await controller.openSessionEngine(["--session-id", sessionId]) as PiShellEngine,
       });
       return;
     }

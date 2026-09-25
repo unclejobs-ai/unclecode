@@ -9,6 +9,7 @@ import {
   formatPiShellToolRows,
   PiShellStatusLine,
   readPiShellState,
+  resolvePiSessionChoice,
 } from "@unclecode/tui";
 
 test("status row stays one row when the busy status carries newlines", () => {
@@ -96,4 +97,18 @@ test("Ctrl+V adds a clipboard image to the next submit; no image changes nothing
     pastePiClipboardImage(() => ({ status: "too-large", reason: "12 MB over the 5 MB limit" }), []),
     { pending: [], error: "clipboard: 12 MB over the 5 MB limit" },
   );
+});
+
+test("a digit in the /sessions panel picks that session's id", () => {
+  const panel = {
+    title: "Recent sessions",
+    lines: [
+      "1. work-1f9c5db5-856c-4dbe-88ae-84f92877e53d · idle · Work shell ready.",
+      "2. work-1b5eff1f-ad99-43f9-84f4-ebf136782d60 · idle · Work shell ready.",
+    ],
+  };
+  assert.equal(resolvePiSessionChoice(panel, "2"), "work-1b5eff1f-ad99-43f9-84f4-ebf136782d60");
+  assert.equal(resolvePiSessionChoice(panel, "7"), undefined);
+  assert.equal(resolvePiSessionChoice({ ...panel, title: "Help" }, "1"), undefined);
+  assert.equal(resolvePiSessionChoice(undefined, "1"), undefined);
 });

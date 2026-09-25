@@ -82,6 +82,7 @@ export type PiShellEngine = PiContextDeskEngine & {
   initialize?(): unknown;
   handleSubmit(line: string, attachments?: readonly ClipboardImageAttachment[]): Promise<unknown>;
   setMode?(mode: string): unknown;
+  dispose?(): unknown;
   interruptTurn?(): unknown;
   updateTerminalColumns?(columns: number): unknown;
   submitPendingDecisionText?(value: string, decisionId: string): unknown;
@@ -92,6 +93,7 @@ export type PiShellEngine = PiContextDeskEngine & {
 const BUSY_TICK_MS = 1_000;
 /** The engine's resting panel: the collapsed context summary, not something a command opened. */
 const RESTING_PANEL_TITLE = "Context";
+const SESSIONS_PANEL_TITLE = "Recent sessions";
 const panelBg = (text: string) => `\u001b[48;5;236m${text}\u001b[49m`;
 const ENTRY_ROLES = new Set(["system", "user", "assistant", "tool"]);
 
@@ -160,6 +162,13 @@ export function pastePiClipboardImage(
   return { pending, error: result.status === "no-image" ? undefined : `clipboard: ${result.reason}` };
 }
 
+/** The session a digit picks in the `/sessions` panel (`N. work-… · state · summary`). */
+export function resolvePiSessionChoice(panel: PiShellPanel | undefined, digit: string): string | undefined {
+  if (panel?.title !== SESSIONS_PANEL_TITLE || !/^[1-9]$/u.test(digit)) return undefined;
+  const line = panel.lines.find((candidate) => candidate.trimStart().startsWith(`${digit}. `));
+  return line?.match(/^\s*\d+\. (\S+)/u)?.[1];
+}
+
 /** Shift+Tab's next mode, in the Ink shell's cycle order. */
 export function nextPiShellMode(current: string): string {
   const index = WORK_SHELL_MODE_CYCLE.findIndex((mode) => mode === current);
@@ -216,12 +225,15 @@ export class PiShellStatusLine implements Component {
 }
 
 export async function renderPiWorkShell(
-  engine: PiShellEngine,
+  initialEngine: PiShellEngine,
   options: {
     readonly providerAuthCatalog?: ProviderAuthCatalogPort | undefined;
     readonly captureClipboardImage?: (() => ClipboardImageResult) | undefined;
+    /** Attaches another owner session; the shell then renders that session's engine. */
+    readonly openSession?: ((sessionId: string) => Promise<PiShellEngine>) | undefined;
   } = {},
 ): Promise<void> {
+  let engine = initialEngine;
   const terminal = new ProcessTerminal();
   const tui = new TuiAltScreen(terminal, undefined, undefined, { scrollToEndIndicator: () => " ↓ new output · End " });
   const transcript = new Container();
@@ -424,6 +436,12 @@ export async function renderPiWorkShell(
         }
         if (applyPiContextDeskAction(engine, desk, action)) return { consume: true };
       }
+      const sessionId = editor.getText().length === 0 ? resolvePiSessionChoice(state.panel, data) : undefined;
+      if (sessionId !== undefined && options.openSession) {
+        errorText = undefined;
+        void openSession(sessionId).catch(reportError);
+        return { consume: true };
+      }
       if (matchesKey(data, "escape") && shownPanelKey !== undefined && editor.getText().length === 0) {
         dismissedPanelKey = shownPanelKey;
         syncPanel();
@@ -436,7 +454,19 @@ export async function renderPiWorkShell(
       }
       return undefined;
     });
-    const unsubscribe = engine.subscribe(show);
+    let unsubscribe = engine.subscribe(show);
+    const openSession = async (sessionId: string) => {
+      if (!options.openSession) return;
+      const next = await options.openSession(sessionId);
+      unsubscribe();
+      engine.dispose?.();
+      engine = next;
+      unsubscribe = engine.subscribe(show);
+      engine.updateTerminalColumns?.(terminal.columns);
+      void engine.initialize?.();
+      dismissedPanelKey = shownPanelKey;
+      show(engine.getState());
+    };
     tui.setFocus(editor);
     tui.start();
     engine.updateTerminalColumns?.(terminal.columns);
