@@ -106,7 +106,7 @@ function renderCatalogBody(input: OmpAuthProviderPickerInput, contentWidth: numb
   const ko = input.uiLocale === "ko";
 
   if (catalog.status === "loading") {
-    return <Text color={palette.textMuted} wrap="truncate">{ko ? "OMP 자격 증명 목록 읽는 중…" : "Reading OMP credential catalog…"}</Text>;
+    return <Text color={palette.textMuted} wrap="truncate">{ko ? "제공자 목록 읽는 중…" : "Reading providers…"}</Text>;
   }
 
   if (catalog.status === "error") {
@@ -115,7 +115,7 @@ function renderCatalogBody(input: OmpAuthProviderPickerInput, contentWidth: numb
         <Text color={palette.warning} wrap="truncate">{describeOmpAuthCatalogError(catalog.code)}</Text>
         <Text color={palette.textDim} wrap="truncate">{catalog.message}</Text>
         <Text color={palette.textDim} wrap="truncate">
-          {ko ? "로그인은 OMP가 담당하며 여기서는 아무것도 변경하지 않았습니다." : "Sign-in is owned by OMP; nothing was changed here."}
+          {ko ? "로그인은 터미널에서 진행합니다. 여기서는 아무것도 변경하지 않았습니다." : "Sign-in runs in your terminal; nothing was changed here."}
         </Text>
       </Box>
     );
@@ -166,8 +166,8 @@ export function renderOmpAuthProviderPicker(input: OmpAuthProviderPickerInput): 
       width={width}
     >
       <Text wrap="truncate">
-        <Text color={palette.warning} bold>{input.uiLocale === "ko" ? "OMP 제공자" : "OMP providers"}</Text>
-        <Text color={palette.textDim}>{input.uiLocale === "ko" ? " · OMP가 자격 증명 관리" : " · credentials owned by OMP"}</Text>
+        <Text color={palette.warning} bold>{input.uiLocale === "ko" ? "제공자" : "Providers"}</Text>
+        <Text color={palette.textDim}>{input.uiLocale === "ko" ? " · UncleCode 로그인" : " · UncleCode sign-in"}</Text>
       </Text>
       <Text wrap="truncate">
         <Text color={palette.assistant}>{"⌕ "}</Text>

@@ -60,6 +60,7 @@ import {
 import { runWorkspaceGuardianChecks } from "./guardian-checks.js";
 import type { GuardianLspBridge } from "./guardian-check-types.js";
 import { createRuntimeCodingAgent } from "./runtime-coding-agent.js";
+import { createProviderAuthCatalog } from "./provider-auth.js";
 import { resolveDefaultWorkEngine, resolveWorkShellAuthLabel } from "./work-engine-auth.js";
 import {
   createPiBridgeProvider,
@@ -68,7 +69,6 @@ import {
   resolvePiProviderBaseUrl,
 } from "@unclecode/pi-bridge";
 import {
-  createOmpAuthCatalogClient,
   createOmpWorkerProvider,
   OMP_WORKER_DEFAULT_MODEL,
   OMP_WORKER_PROVIDER_ID,
@@ -577,6 +577,8 @@ export async function loadWorkCliBootstrap(
         ...(sessionId ? { sessionId } : {}),
         browserOAuthAvailable: config.provider === "openai"
           && Boolean(env.OPENAI_OAUTH_CLIENT_ID?.trim()),
+        // Reads this machine's credential store directly; the owner is not involved.
+        ompAuthCatalog: createProviderAuthCatalog(env),
       },
     };
   }
@@ -1203,7 +1205,7 @@ export async function loadWorkCliBootstrap(
       refreshHomeState,
       refreshAuthState,
       browserOAuthAvailable,
-      ompAuthCatalog: createOmpAuthCatalogClient({ env }),
+      ompAuthCatalog: createProviderAuthCatalog(env),
       runInlineCommand: (
         args: readonly string[],
         onProgress?: ((line: string) => void) | undefined,

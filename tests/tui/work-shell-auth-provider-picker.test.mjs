@@ -173,7 +173,7 @@ test("key hints wrap instead of truncating away the Enter affordance", () => {
 });
 
 test("catalog failures become plain UI states instead of fabricated success", () => {
-  assert.equal(describeOmpAuthCatalogError("OMP_UNAVAILABLE"), "OMP unavailable");
+  assert.equal(describeOmpAuthCatalogError("OMP_UNAVAILABLE"), "sign-in unavailable");
   assert.equal(describeOmpAuthCatalogError("OMP_CATALOG_UNAVAILABLE"), "catalog unavailable");
   assert.equal(describeOmpAuthCatalogError("OMP_PROTOCOL_ERROR"), "catalog unavailable");
 });
@@ -192,7 +192,7 @@ test("the sign-in receipt reports the exact OMP handoff, or that the handoff fai
 test("an unavailable provider gets an explicit receipt of its own, not a handoff", () => {
   assert.equal(
     formatOmpAuthUnavailableReceipt({ id: "devin", name: "Devin", available: false, credentialKey: "devin", signedIn: false }),
-    "Sign-in unavailable · Devin is marked unavailable by OMP",
+    "Sign-in unavailable · Devin is unavailable",
   );
 });
 
@@ -255,7 +255,7 @@ async function renderView(overrides = {}, columns = 100) {
 test("/auth opens the OMP provider catalog as its first surface", async () => {
   const output = await renderView();
 
-  assert.match(output, /OMP providers/);
+  assert.match(output, /Providers · UncleCode sign-in/);
   assert.match(output, /ChatGPT Plus\/Pro \(Codex Subscription\)/);
   assert.match(output, /Kimi Code/);
   assert.match(output, /oauth/);
@@ -272,7 +272,7 @@ test("/auth status keeps the existing auth panel even if a catalog prop is prese
   const output = await renderView({ inputValue: "/auth status" });
 
   assert.match(output, /status · login · key · logout · browser/);
-  assert.doesNotMatch(output, /OMP providers|no provider matches/);
+  assert.doesNotMatch(output, /Providers · UncleCode sign-in|no provider matches/);
 });
 
 test("the selected row tracks the cursor and the search row echoes the filter", async () => {
@@ -292,7 +292,7 @@ test("the picker keeps every row inside a 52-column terminal", async () => {
     .map((line) => `${getDisplayWidth(line)}:${line}`);
 
   assert.deepEqual(overflow, [], "the provider picker overflowed a 52-column terminal");
-  assert.match(output, /OMP providers/);
+  assert.match(output, /Providers · UncleCode sign-in/);
   assert.match(output, /Enter sign in/);
 });
 
@@ -301,7 +301,7 @@ test("an unavailable OMP install renders an explicit failure state, never an emp
     ompAuthCatalog: { status: "error", code: "OMP_UNAVAILABLE", message: "omp executable not found on PATH" },
   });
 
-  assert.match(output, /OMP unavailable/);
+  assert.match(output, /sign-in unavailable/);
   assert.match(output, /omp executable not found on PATH/);
   assert.doesNotMatch(output, /Kimi Code|ChatGPT Plus|\d+ providers/);
 });
@@ -327,7 +327,7 @@ test("a failed sign-in handoff is reported instead of a fake success", async () 
 test("the picker says so while the catalog is still loading", async () => {
   const output = await renderView({ ompAuthCatalog: { status: "loading" } });
 
-  assert.match(output, /Reading OMP credential catalog/);
+  assert.match(output, /Reading providers/);
   assert.doesNotMatch(output, /Kimi Code|ChatGPT Plus/);
   assert.doesNotMatch(output, /no provider matches/);
 });

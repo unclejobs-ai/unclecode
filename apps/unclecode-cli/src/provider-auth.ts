@@ -2,7 +2,11 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 
 import type { AuthEvent, AuthPrompt } from "@earendil-works/pi-ai";
-import { getUncleCodeCredentialModels, resolveProviderCredentialsPath } from "@unclecode/pi-bridge";
+import {
+  getUncleCodeCredentialModels,
+  resolveProviderCredentialsPath,
+  UncleCodeCredentialStore,
+} from "@unclecode/pi-bridge";
 
 function requireOAuthProvider(providerId: string): string {
   const provider = getUncleCodeCredentialModels().getProvider(providerId);
@@ -102,4 +106,51 @@ export async function printProviderAuthStatus(providerId: string): Promise<void>
 export async function runProviderLogout(providerId: string): Promise<void> {
   await getUncleCodeCredentialModels().logout(providerId);
   process.stdout.write(`Signed out of ${providerId}.\n`);
+}
+
+type ProviderAuthCatalogRow = {
+  readonly id: string;
+  readonly name: string;
+  readonly available: boolean;
+  readonly credentialKey: string;
+  readonly signedIn: boolean;
+  readonly originKind?: "oauth" | "api_key" | "env";
+  readonly originEnvVar?: string;
+};
+
+/**
+ * The TUI's `/auth` catalog, answered by UncleCode's own credential store: every
+ * provider pi-ai can sign in to with OAuth, and whether it is signed in (stored
+ * login, or an environment key). Sign-in hands off to `unclecode auth login`.
+ */
+export function createProviderAuthCatalog(env: NodeJS.ProcessEnv = process.env) {
+  return {
+    async list(): Promise<{ readonly ok: true; readonly dbPath: string; readonly providers: readonly ProviderAuthCatalogRow[] }> {
+      const models = getUncleCodeCredentialModels(env);
+      const store = new UncleCodeCredentialStore(resolveProviderCredentialsPath(env));
+      const providers = await Promise.all(
+        models.getProviders()
+          .filter((provider) => provider.auth.oauth !== undefined)
+          .map(async (provider): Promise<ProviderAuthCatalogRow> => {
+            const row = {
+              id: provider.id,
+              name: provider.auth.oauth?.name ?? provider.name,
+              available: true,
+              credentialKey: provider.id,
+            };
+            const stored = await store.read(provider.id);
+            if (stored) return { ...row, signedIn: true, originKind: stored.type };
+            const check = await models.checkAuth(provider.id);
+            return check?.source
+              ? { ...row, signedIn: true, originKind: "env", originEnvVar: check.source }
+              : { ...row, signedIn: false };
+          }),
+      );
+      return { ok: true, dbPath: resolveProviderCredentialsPath(env), providers };
+    },
+    async signIn(providerId: string) {
+      const argv = ["auth", "login", providerId] as const;
+      return { ok: true as const, binPath: "unclecode", argv, command: `unclecode ${argv.join(" ")}` };
+    },
+  };
 }

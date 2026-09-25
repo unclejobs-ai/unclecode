@@ -234,7 +234,7 @@ export function formatOmpAuthPickerScrollSummary(input: {
 }
 
 export function describeOmpAuthCatalogError(code: OmpAuthCatalogErrorCode): string {
-  return code === "OMP_UNAVAILABLE" ? "OMP unavailable" : "catalog unavailable";
+  return code === "OMP_UNAVAILABLE" ? "sign-in unavailable" : "catalog unavailable";
 }
 
 export function formatOmpAuthSignInReceipt(handoff: OmpAuthSignInHandoff): string {
@@ -249,7 +249,7 @@ export function formatOmpAuthSignInReceipt(handoff: OmpAuthSignInHandoff): strin
  * whatever generic failure comes back.
  */
 export function formatOmpAuthUnavailableReceipt(row: OmpAuthProviderRow): string {
-  return `Sign-in unavailable · ${row.name} is marked unavailable by OMP`;
+  return `Sign-in unavailable · ${row.name} is unavailable`;
 }
 
 

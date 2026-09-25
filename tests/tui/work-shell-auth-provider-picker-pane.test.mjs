@@ -162,7 +162,7 @@ test("typing /auth reads the injected OMP catalog and makes it the first surface
 
   try {
     stdin.write("/auth");
-    await waitFor(() => /OMP providers/.test(getOutput()), "the OMP provider catalog");
+    await waitFor(() => /Providers · UncleCode sign-in/.test(getOutput()), "the OMP provider catalog");
     const output = getOutput();
     assert.match(output, /Kimi Code/);
     assert.match(output, /OpenRouter/);
@@ -197,7 +197,7 @@ test("leaving while the catalog loads retries cleanly on the next /auth open", a
 
   try {
     stdin.write("/auth");
-    await waitFor(() => /Reading OMP credential catalog/.test(getOutput()), "the first catalog read");
+    await waitFor(() => /Reading providers/.test(getOutput()), "the first catalog read");
     assert.equal(listCalls, 1);
 
     const closeBaseline = getOutput();
@@ -285,7 +285,7 @@ test("a failed catalog read shows the failure and never routes /auth to a fake p
 
   try {
     stdin.write("/auth");
-    await waitFor(() => /OMP unavailable/.test(getOutput()), "the OMP unavailable state");
+    await waitFor(() => /sign-in unavailable/.test(getOutput()), "the OMP unavailable state");
     assert.match(getOutput(), /omp executable not found on PATH/);
   } finally {
     instance.unmount();
@@ -317,7 +317,7 @@ test("/auth status stays on the existing auth surface without opening the OMP pi
     stdin.write("/auth status");
     await waitFor(() => /\/auth status/.test(getFrame()), "the reserved auth command");
     assert.equal(listCalls, 0, "reserved auth commands must not load the OMP catalog");
-    assert.doesNotMatch(getFrame(), /OMP providers|no provider matches/);
+    assert.doesNotMatch(getFrame(), /Providers · UncleCode sign-in|no provider matches/);
 
     stdin.write(KEY_ENTER);
     await waitFor(() => submitted.length > 0, "the engine submit");
@@ -364,7 +364,7 @@ test("Enter on an unavailable provider states why instead of calling OMP sign-in
 
     stdin.write(KEY_ENTER);
     await waitFor(
-      () => /Sign-in unavailable · Devin is marked unavailable by OMP/.test(getFrame()),
+      () => /Sign-in unavailable · Devin is unavailable/.test(getFrame()),
       "the unavailable receipt",
     );
 
@@ -410,7 +410,7 @@ test("closing /auth retires the sign-in receipt so reopening cannot replay it", 
     await waitForSettledFrame(getOutput, { baseline: closeBaseline, timeoutMs: 5_000 });
     const reopenBaseline = getOutput();
     stdin.write("/auth");
-    await waitFor(() => /OMP providers/.test(getFrame()), "the reopened provider catalog");
+    await waitFor(() => /Providers · UncleCode sign-in/.test(getFrame()), "the reopened provider catalog");
     await waitForSettledFrame(getOutput, { baseline: reopenBaseline, timeoutMs: 5_000 });
 
     assert.match(getFrame(), /Kimi Code/);
@@ -478,7 +478,7 @@ test("a new sign-in drops the previous receipt before its own handoff lands", as
     stdin.write(KEY_ENTER);
     await waitFor(() => signInCalls.length === 2, "the second sign-in");
     await waitFor(
-      () => /OMP providers/.test(getFrame()) && !/Sign-in handoff/.test(getFrame()),
+      () => /Providers · UncleCode sign-in/.test(getFrame()) && !/Sign-in handoff/.test(getFrame()),
       "the retired first receipt",
     );
 
@@ -523,7 +523,7 @@ test("a sign-in that resolves after close and reopen cannot paint a stale receip
     stdin.write(KEY_ESCAPE);
     await waitForSettledFrame(getOutput, { baseline: closeBaseline, timeoutMs: 5_000 });
     stdin.write("/auth");
-    await waitFor(() => /OMP providers/.test(getFrame()), "the reopened picker");
+    await waitFor(() => /Providers · UncleCode sign-in/.test(getFrame()), "the reopened picker");
 
     resolveSignIn({
       ok: true,
@@ -569,7 +569,7 @@ test("only the latest overlapping sign-in may publish a receipt", async () => {
     await waitFor(() => pendingSignIns.length === 1, "the first pending sign-in");
 
     stdin.write("/auth");
-    await waitFor(() => /OMP providers/.test(getFrame()), "the refiltered picker");
+    await waitFor(() => /Providers · UncleCode sign-in/.test(getFrame()), "the refiltered picker");
     const cursorBaseline = getOutput();
     stdin.write(KEY_DOWN);
     await waitForSettledFrame(getOutput, { baseline: cursorBaseline, timeoutMs: 5_000 });
