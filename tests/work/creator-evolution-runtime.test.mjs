@@ -795,3 +795,23 @@ test("the host evaluator reads sealed Git blobs and rejects synthetic provider i
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a workspace without the held-out suite gets no held-out evaluator instead of a startup crash", () => {
+  // With three distinct review providers configured, `unclecode work` in any
+  // directory other than this repo died at startup with
+  // `ENOENT … lstat '<cwd>/benchmarks'`: the suite only exists here.
+  const root = mkdtempSync(path.join(tmpdir(), "unclecode-no-held-out-suite-"));
+  try {
+    assert.equal(createHostHeldOutWorktreeEvaluator({
+      cwd: root,
+      creator: { provider: "deepseek", model: "creator" },
+      evaluator: { provider: "anthropic", model: "evaluator" },
+      reviewer: { provider: "gemini", model: "reviewer" },
+      createWorkloadAgent: () => fakeAgent(async () => ({ text: "unused" })),
+      createEvaluatorAgent: () => fakeAgent(async () => ({ text: "unused" })),
+      createReviewerAgent: () => fakeAgent(async () => ({ text: "unused" })),
+    }), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

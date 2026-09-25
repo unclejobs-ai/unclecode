@@ -82,8 +82,11 @@ export function createHostHeldOutWorktreeEvaluator(input: {
   const evaluator = freezeProviderIdentity(input.evaluator, "evaluator");
   const reviewer = freezeProviderIdentity(input.reviewer, "reviewer");
   if (new Set([creator.provider, evaluator.provider, reviewer.provider]).size !== 3) return undefined;
+  // The suite ships with this repo only; any other workspace has nothing to evaluate against.
+  const suiteRoot = join(input.cwd, "benchmarks", "held-out", "v1");
+  if (!existsSync(suiteRoot)) return undefined;
 
-  const loadedSuite = loadHeldOutSuite(join(input.cwd, "benchmarks", "held-out", "v1"));
+  const loadedSuite = loadHeldOutSuite(suiteRoot);
   const immutableSuite = deepFreeze({
     id: loadedSuite.manifest.suiteId,
     version: loadedSuite.manifest.version,
