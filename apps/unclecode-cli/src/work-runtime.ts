@@ -11,7 +11,9 @@ import {
   createManagedWorkShellDashboardProps,
   formatWorkShellError,
   renderEmbeddedWorkShellPaneDashboard,
+  renderPiWorkShell,
   showRuntimeConnectionStatus,
+  type PiShellEngine,
   type EmbeddedWorkDashboardSnapshot,
   type TuiRenderOptions,
   type TuiShellHomeState,
@@ -115,6 +117,8 @@ type DisposableRemoteEngine = object & {
 export type PersistentOwnerWorkShellController = {
   readonly initialProps: TuiRenderOptions<TuiShellHomeState>;
   readonly embeddedWorkPane: NonNullable<Awaited<ReturnType<typeof createEmbeddedWorkPaneController<TuiShellHomeState>>>>;
+  /** The initial session's owner-remote engine, for shells that render it directly. */
+  readonly initialEngine: object;
   readonly dispose: () => Promise<void>;
 };
 
@@ -390,6 +394,7 @@ export async function createPersistentOwnerWorkShellController(input: {
   const attachments = new Set<DisposableRemoteEngine>();
   const sessions = new Map<string, ManagedDashboardSession>();
   let embeddedWorkPane: Awaited<ReturnType<typeof createEmbeddedWorkPaneController<TuiShellHomeState>>>;
+  let initialEngine: DisposableRemoteEngine | undefined;
   const dispose = async () => {
     if (disposed) return;
     disposed = true;
@@ -428,6 +433,7 @@ export async function createPersistentOwnerWorkShellController(input: {
       },
     }) as DisposableRemoteEngine;
     attachments.add(remoteEngine);
+    initialEngine ??= remoteEngine;
     let snapshotDisposed = false;
     const disposeSnapshot = () => {
       if (snapshotDisposed) return;
@@ -450,8 +456,8 @@ export async function createPersistentOwnerWorkShellController(input: {
         return createSnapshot(switched.session, switched.resume);
       },
     });
-    if (!embeddedWorkPane) throw new Error("Remote Work pane failed to initialize.");
-    return { initialProps, embeddedWorkPane, dispose };
+    if (!embeddedWorkPane || !initialEngine) throw new Error("Remote Work pane failed to initialize.");
+    return { initialProps, embeddedWorkPane, initialEngine, dispose };
   } catch (error) {
     await dispose();
     throw error;
@@ -493,6 +499,10 @@ export async function startRepl(
     startupFrame.restore();
   }
   try {
+    if (process.env.UNCLECODE_TUI_SHELL === "pi") {
+      await renderPiWorkShell(controller.initialEngine as PiShellEngine);
+      return;
+    }
     await (dependencies.renderDashboard ?? renderEmbeddedWorkShellPaneDashboard)({
       ...controller.initialProps,
       ...controller.embeddedWorkPane,

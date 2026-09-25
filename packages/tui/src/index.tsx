@@ -27,4 +27,5 @@ export * from "./text-width.js";
 export * from "./terminal-theme.js";
 export * from "./mouse-wheel.js";
 export * from "./work-shell-view.js";
+export * from "./pi-work-shell.js";
 export type { TuiShellHomeState } from "./shell-state.js";

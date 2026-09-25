@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@earendil-works/pi-tui": "0.87.1",
     "@unclecode/contracts": "file:../contracts",
     "@unclecode/orchestrator": "file:../orchestrator",
     "ink": "^7.1.1",

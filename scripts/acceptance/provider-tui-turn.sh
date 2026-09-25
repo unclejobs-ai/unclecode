@@ -7,7 +7,11 @@
 # usage: scripts/acceptance/provider-tui-turn.sh <out-dir> <provider> <model> [timeout-sec]
 # optional env: UC_TURN_SETUP (shell run in the scratch dir), UC_TURN_PRE (a line submitted
 #               before the prompt, e.g. `/model xai/grok-4.3`), UC_TURN_PROMPT, UC_TURN_EXPECT
-#               (fixed string the answer must contain; defaults to the marker file name)
+#               (fixed string the answer must contain; defaults to the marker file name),
+#               UC_TURN_SCROLL_KEY (tmux key, e.g. PPage, sent once the answer streams; reports
+#               whether the view moved and how many later streaming frames kept its top rows;
+#               after the turn, UC_TURN_RESUME_KEY (default End) is sent before the answer check),
+#               UNCLECODE_TUI_SHELL=pi (run the pi-tui shell instead of the Ink shell)
 # exit:  0 = tool trace and answer seen, 1 = TUI never became ready, 2 = turn incomplete
 set -u
 OUT=$1; PROVIDER=$2; MODEL=$3; TIMEOUT=${4:-120}
@@ -34,7 +38,7 @@ trap cleanup EXIT
 
 # tmux sessions inherit the tmux server's environment, not ours: forward proxy settings.
 ENV_ARGS=()
-for name in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy NO_PROXY no_proxy UNCLECODE_CODE_MODE; do
+for name in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy NO_PROXY no_proxy UNCLECODE_CODE_MODE UNCLECODE_TUI_SHELL; do
   if [ -n "${!name+x}" ]; then ENV_ARGS+=(-e "$name=${!name}"); fi
 done
 
@@ -62,7 +66,8 @@ PROMPT=${UC_TURN_PROMPT:-"List the files in the current directory with a tool, t
 EXPECT=${UC_TURN_EXPECT:-"$MARKER.txt"}
 tmux send-keys -t "$S" -l "$PROMPT"; tmux send-keys -t "$S" Enter
 T1=$(now_ms)
-tool=""; answer=""; n=0
+tool=""; answer=""; n=0; torn=0
+scroll_ms=""; resume_ms=""; pre_top=""; anchor=""; anchor_set=""; scroll_moved=no; scroll_frames=0; scroll_held=0
 while tmux has-session -t "$S" 2>/dev/null; do
   el=$(( $(now_ms) - T1 ))
   frame="$OUT/f-$(printf %04d $n).txt"
@@ -72,6 +77,32 @@ while tmux has-session -t "$S" 2>/dev/null; do
   # name on a line that is not the prompt echo.
   if [ -z "$tool" ] && grep -Eq '^[[:space:]]*● [a-z][a-z_]*( |$)' "$frame"; then tool=$el; fi
   if [ -z "$answer" ] && grep -vF "${PROMPT:0:40}" "$frame" | grep -qF "$EXPECT"; then answer=$el; fi
+  # A torn frame shows the status row twice: something scrolled the terminal under the
+  # renderer, and every row-based reading of that frame is suspect.
+  [ "$(grep -cE '^ ?[◇◆] ' "$frame")" -gt 1 ] && torn=$((torn+1))
+  # Scroll probe: the first overflowing frame showing the streaming cursor gets the key; every later
+  # frame of the same turn should keep the top rows of the first post-key frame (the view
+  # stays where the user scrolled while the answer grows below it).
+  if [ -n "${UC_TURN_SCROLL_KEY:-}" ]; then
+    top=$(sed -n '2,21p' "$frame")
+    # Only once the answer overflows the viewport (the prompt echo has scrolled off):
+    # before that there is nothing to scroll and the key proves nothing.
+    if [ -z "$scroll_ms" ] && grep -q '▌' "$frame" && ! grep -qF "${PROMPT:0:40}" "$frame"; then
+      pre_top=$top; tmux send-keys -t "$S" "$UC_TURN_SCROLL_KEY"; scroll_ms=$el
+    elif [ -n "$scroll_ms" ] && ! grep -q "$READY_RE" "$frame"; then
+      if [ -z "$anchor_set" ]; then
+        anchor=$top; anchor_set=1
+        [ "$anchor" != "$pre_top" ] && scroll_moved=yes
+      else
+        scroll_frames=$((scroll_frames+1)); [ "$top" = "$anchor" ] && scroll_held=$((scroll_held+1))
+      fi
+    fi
+  fi
+  # A scrolled-away view does not show the end of the answer: once the turn is done, send
+  # the resume key and keep looking for the answer.
+  if [ -n "$scroll_ms" ] && [ -z "$resume_ms" ] && grep -q "$READY_RE" "$frame"; then
+    tmux send-keys -t "$S" "${UC_TURN_RESUME_KEY:-End}"; resume_ms=$el
+  fi
   if [ -n "$answer" ] && grep -q "$READY_RE" "$frame"; then break; fi
   [ "$el" -ge $(( TIMEOUT * 1000 )) ] && break
   n=$((n+1)); sleep 0.5
@@ -79,5 +110,9 @@ done
 tmux capture-pane -p -S -200 -t "$S" > "$OUT/final.txt" 2>/dev/null
 calls=$(grep -cE '^[[:space:]]*● [a-z][a-z_]*( |$)' "$OUT/final.txt")
 status=$(grep -oE '▤ [0-9]+ ctx · ~[0-9]+t|TTFT [0-9.]+s|\$[0-9.]+' "$OUT/final.txt" | tr '\n' ' ')
-echo "provider=$PROVIDER model=$MODEL ready_ms=$ready tool_trace_ms=${tool:-none} answer_ms=${answer:-none} tool_lines=$calls status=[$status] frames=$((n+1))" | tee "$OUT/summary.txt"
+scroll=""
+if [ -n "${UC_TURN_SCROLL_KEY:-}" ]; then
+  scroll=" scroll_key=$UC_TURN_SCROLL_KEY scroll_key_ms=${scroll_ms:-none} scroll_moved=$scroll_moved scroll_held=$scroll_held/$scroll_frames resume_key_ms=${resume_ms:-none}"
+fi
+echo "provider=$PROVIDER model=$MODEL ready_ms=$ready tool_trace_ms=${tool:-none} answer_ms=${answer:-none} tool_lines=$calls status=[$status] frames=$((n+1)) torn_frames=$torn$scroll" | tee "$OUT/summary.txt"
 [ -n "$tool" ] && [ -n "$answer" ] || exit 2
