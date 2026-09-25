@@ -1,4 +1,5 @@
 import { explainUncleCodeConfig } from "@unclecode/config-core";
+import { providerAuthStatusLines } from "./provider-auth.js";
 import {
   listProjectBridgeLines,
   listScopedMemoryLines,
@@ -730,7 +731,10 @@ export async function runTuiSessionCenterAction(input: {
       ];
     }
     case "auth-status":
-      return formatOpenAIAuthStatus(await resolveOpenAIAuthStatus({ env: input.env })).split("\n");
+      // `prompt` names a non-OpenAI live provider (`/auth status` routed by the engine).
+      return input.prompt
+        ? await providerAuthStatusLines(input.prompt)
+        : formatOpenAIAuthStatus(await resolveOpenAIAuthStatus({ env: input.env })).split("\n");
     case "api-key-login": {
       const raw = input.prompt?.trim() ?? "";
       if (!raw) {

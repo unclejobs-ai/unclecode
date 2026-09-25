@@ -471,6 +471,11 @@ pub fn resolve_work_shell_inline_action_json(input_json: &str) -> Result<String,
     let result = match normalized.as_str() {
         "doctor" => Some(json!({ "actionId": "doctor" })),
         "auth status" => Some(json!({ "actionId": "auth-status" })),
+        // `/auth status` on a non-OpenAI live provider: that provider's sign-in state.
+        _ if normalized.starts_with("auth status ") && args.len() == 3 => Some(json!({
+            "actionId": "auth-status",
+            "prompt": args[2].as_str(),
+        })),
         "auth login" | "auth login --browser" => Some(json!({ "actionId": "browser-login" })),
         "auth logout" => Some(json!({ "actionId": "auth-logout" })),
         "mcp list" => Some(json!({ "actionId": "mcp-list" })),
@@ -963,6 +968,20 @@ fn read_manifest_json(path: &Path) -> Option<Value> {
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    #[test]
+    fn inline_auth_status_can_name_a_provider() {
+        let routed: Value = serde_json::from_str(
+            &resolve_work_shell_inline_action_json(r#"{"args":["auth","status","xai"]}"#).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(routed, json!({ "actionId": "auth-status", "prompt": "xai" }));
+        let openai: Value = serde_json::from_str(
+            &resolve_work_shell_inline_action_json(r#"{"args":["auth","status"]}"#).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(openai, json!({ "actionId": "auth-status" }));
+    }
 
     #[test]
     fn routes_builtin_cli_slash_commands() {

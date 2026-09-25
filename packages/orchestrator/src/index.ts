@@ -37,6 +37,7 @@ export * from "./rust-command.js";
 export * from "./workspace-providers.js";
 export * from "./tools.js";
 export * from "./code-mode.js";
+export * from "./live-provider.js";
 export * from "./tool-executor.js";
 export * from "./permission-scope.js";
 export * from "./ast-tools.js";

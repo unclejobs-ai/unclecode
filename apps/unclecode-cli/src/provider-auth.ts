@@ -88,20 +88,32 @@ export async function runProviderOAuthLogin(providerId: string): Promise<void> {
   }
 }
 
-/** `unclecode auth status <provider>`: whether a model call can authenticate, without refreshing. */
-export async function printProviderAuthStatus(providerId: string): Promise<void> {
+/**
+ * `unclecode auth status <provider>` and the TUI's `/auth status` for that provider:
+ * whether a model call can authenticate, without refreshing. Same `key: value` shape
+ * and source labels as the OpenAI status, so the /auth status panel reads both.
+ */
+export async function providerAuthStatusLines(providerId: string): Promise<readonly string[]> {
   const models = getUncleCodeCredentialModels();
   if (!models.getProvider(providerId)) {
     throw new Error(`Unknown provider: ${providerId}`);
   }
-  const check = await models.checkAuth(providerId);
-  process.stdout.write(`provider=${providerId}\n`);
-  process.stdout.write(`ready=${check ? "yes" : "no"}\n`);
-  process.stdout.write(`authType=${check?.type ?? "none"}\n`);
-  process.stdout.write(`source=${check?.source ?? "none"}\n`);
-  if (!check) {
-    process.stdout.write(`Next: unclecode auth login ${providerId}\n`);
-  }
+  const stored = await new UncleCodeCredentialStore(resolveProviderCredentialsPath()).read(providerId);
+  const check = stored ? undefined : await models.checkAuth(providerId);
+  const source = stored ? `${stored.type === "oauth" ? "oauth" : "api-key"}-store` : check ? "api-key-env" : "none";
+  const auth = stored?.type === "oauth" ? "oauth" : stored || check ? "api-key" : "none";
+  return [
+    `provider: ${providerId}`,
+    `source: ${source}`,
+    `auth: ${auth}`,
+    ...(check?.source ? [`env: ${check.source}`] : []),
+    `ready: ${source === "none" ? "no" : "yes"}`,
+    ...(source === "none" ? [`Next: unclecode auth login ${providerId}`] : []),
+  ];
+}
+
+export async function printProviderAuthStatus(providerId: string): Promise<void> {
+  process.stdout.write(`${(await providerAuthStatusLines(providerId)).join("\n")}\n`);
 }
 
 /** `unclecode auth logout <provider>`: remove the stored credential. */

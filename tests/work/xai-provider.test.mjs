@@ -49,7 +49,7 @@ test("loadConfig defers to the stored xAI OAuth credential without copying the t
     const config = await loadConfig({ cwd: home, env });
     assert.equal(config.apiKey, "");
     assert.equal(config.model, "grok-4.5");
-    assert.equal(config.authLabel, "oauth-pi");
+    assert.equal(config.authLabel, "oauth-store");
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

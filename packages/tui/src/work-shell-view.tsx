@@ -15,6 +15,7 @@ import {
 } from "@unclecode/contracts";
 import {
   getWorkShellMessages,
+  resolveLiveProvider,
   resolveWorkShellSlashArgHint,
   runRustCommandSync,
   sanitizeWorkShellAssistantText,
@@ -351,20 +352,6 @@ function WorkShellSectionDivider(props: {
       {"─".repeat(rightLength)}
     </Text>
   );
-}
-
-// Providers `/model <provider>/<model>` can switch to (the runtime-supported set).
-const WORK_SHELL_SWITCHABLE_PROVIDERS = new Set(["anthropic", "deepseek", "gemini", "openai", "xai"]);
-
-/** The provider actually answering: a `provider/model` id from `/model` overrides the boot provider. */
-export function resolveWorkShellLiveProvider(bootProvider: string, model: string): string {
-  const prefix = model.split("/", 1)[0] ?? "";
-  // A provider outside the set (e.g. groq's `openai/gpt-oss-20b`) uses slashes in its own ids.
-  return WORK_SHELL_SWITCHABLE_PROVIDERS.has(bootProvider)
-    && model.includes("/")
-    && WORK_SHELL_SWITCHABLE_PROVIDERS.has(prefix)
-    ? prefix
-    : bootProvider;
 }
 
 export function formatWorkShellProviderTitle(provider: string): string {
@@ -2563,7 +2550,7 @@ const WorkShellHeaderBlock = React.memo(function WorkShellHeaderBlock(props: {
   readonly terminalColumns?: number;
   readonly uiLocale?: "en" | "ko";
 }) {
-  const providerTitle = formatWorkShellProviderTitle(resolveWorkShellLiveProvider(props.provider, props.model));
+  const providerTitle = formatWorkShellProviderTitle(resolveLiveProvider(props.provider, props.model));
   const width = resolveWorkShellChromeWidth(props.terminalColumns);
   // No logo glyph. A bold wordmark is the mark; the ◢ that used to sit here
   // read as decoration from another era and was the only ornament on a screen

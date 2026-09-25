@@ -63,7 +63,7 @@ test("a stored Anthropic subscription login resolves inside pi-ai, not as a copi
     assert.equal(config.provider, "anthropic");
     assert.equal(config.apiKey, "");
     assert.equal(config.model, "claude-sonnet-5");
-    assert.equal(config.authLabel, "oauth-pi");
+    assert.equal(config.authLabel, "oauth-store");
     assert.equal(config.credentialStore, true);
   } finally {
     rmSync(home, { recursive: true, force: true });

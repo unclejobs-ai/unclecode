@@ -107,7 +107,9 @@ pub fn resolve_auth_status_panel_lines_json(input_json: &str) -> Result<String, 
     };
     let auth_display = format_auth_label_for_display(&source);
 
-    let refined = if source == "none" {
+    let refined = if is_store_auth_label(&source) {
+        build_default_auth_launcher_lines(Some(&source), browser_oauth_available, None)
+    } else if source == "none" {
         let mut out = vec![
             "Current".to_string(),
             "Auth · Not signed in".to_string(),
@@ -1165,11 +1167,28 @@ fn ensure_auth_launcher_route(
     result
 }
 
+/// A credential from `unclecode auth login <provider>` (UncleCode's own store), as
+/// opposed to the OpenAI/Codex files and env vars the rest of this panel describes.
+fn is_store_auth_label(auth_label: &str) -> bool {
+    auth_label == "oauth-store" || auth_label == "api-key-store"
+}
+
 fn build_default_auth_launcher_lines(
     auth_label: Option<&str>,
     browser_oauth_available: bool,
     oauth_route: Option<&str>,
 ) -> Vec<String> {
+    if let Some(label) = auth_label.filter(|label| is_store_auth_label(label)) {
+        return vec![
+            "Current".to_string(),
+            format!("Auth · {}", format_auth_label_for_display(label)),
+            "Signed in with `unclecode auth login`.".to_string(),
+            String::new(),
+            "Next".to_string(),
+            "/auth lists providers and signs in.".to_string(),
+            "/model <provider>/<model> switches provider.".to_string(),
+        ];
+    }
     let signed_in = auth_label
         .map(|label| !label.is_empty() && label != "none")
         .unwrap_or(false);
@@ -1227,6 +1246,8 @@ fn format_auth_label_for_display(auth_label: &str) -> String {
         "oauth-file-api-blocked" => "OAuth file · API blocked".to_string(),
         "oauth-env-api-blocked" => "OAuth env · API blocked".to_string(),
         "oauth-pi" => "OAuth · pi engine".to_string(),
+        "oauth-store" => "OAuth · UncleCode sign-in".to_string(),
+        "api-key-store" => "API key · UncleCode sign-in".to_string(),
         "oauth-file" => "Browser OAuth · file".to_string(),
         "oauth-env" => "Browser OAuth · env".to_string(),
         "api-key-file" => "API key · file".to_string(),
@@ -1914,6 +1935,46 @@ const MODE_PROFILE_IDS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_status_for_a_store_signed_in_provider_is_not_reported_as_signed_out() {
+        let result = resolve_auth_status_panel_lines_json(
+            r#"{"lines":["provider: xai","source: oauth-store","auth: oauth","ready: yes"],"browserOAuthAvailable":false}"#,
+        )
+        .unwrap();
+        let lines: Value = serde_json::from_str(&result).unwrap();
+        let lines: Vec<&str> = lines["lines"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+        assert_eq!(
+            lines,
+            vec![
+                "Current",
+                "Auth · OAuth · UncleCode sign-in",
+                "Signed in with `unclecode auth login`.",
+                "",
+                "Next",
+                "/auth lists providers and signs in.",
+                "/model <provider>/<model> switches provider.",
+            ]
+        );
+    }
+
+    #[test]
+    fn store_sign_in_is_described_as_unclecode_not_codex_or_browser_oauth() {
+        let lines = build_default_auth_launcher_lines(Some("oauth-store"), false, None);
+        assert_eq!(
+            lines,
+            vec![
+                "Current",
+                "Auth · OAuth · UncleCode sign-in",
+                "Signed in with `unclecode auth login`.",
+                "",
+                "Next",
+                "/auth lists providers and signs in.",
+                "/model <provider>/<model> switches provider.",
+            ]
+        );
+        assert!(!lines.iter().any(|line| line.contains("Codex") || line.starts_with("Route")));
+    }
 
     #[test]
     fn builds_ordered_follow_up_queue_with_mutation_help() {

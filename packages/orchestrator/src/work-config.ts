@@ -157,7 +157,7 @@ async function credentialStoreConfig(input: {
     apiKey: "",
     model: input.model,
     mode: input.mode,
-    authLabel: stored.type === "oauth" ? "oauth-pi" : "api-key-file",
+    authLabel: stored.type === "oauth" ? "oauth-store" : "api-key-store",
     reasoning: input.reasoning,
     credentialStore: true,
   };

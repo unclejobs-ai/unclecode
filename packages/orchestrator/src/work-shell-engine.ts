@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { resolveLiveProvider, routeAuthStatusToLiveProvider } from "./live-provider.js";
 import { existsSync } from "node:fs";
 
 import { executeWorkShellBuiltinSubmit } from "./work-shell-engine-builtin-runtime.js";
@@ -2841,7 +2842,10 @@ export class WorkShellEngine<
         break;
       }
       case "inline-command":
-        await this.handleInlineCommandSubmit(route.line, route.slashCommand);
+        await this.handleInlineCommandSubmit(
+          route.line,
+          routeAuthStatusToLiveProvider(route.slashCommand, resolveLiveProvider(this.options.provider, this.state.model)),
+        );
         break;
       case "local-command":
         await this.handleLocalCommandSubmit(route.line, route.localCommand);
