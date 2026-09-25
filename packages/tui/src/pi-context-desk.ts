@@ -7,12 +7,16 @@
 import {
   CONTEXT_DESK_COLLECTIONS,
   CONTEXT_DESK_PANES,
+  CONTEXT_POLICY_ACTIONS,
+  CONTEXT_POLICY_SUGGESTION_STATES,
+  type ContextPolicySuggestion,
   type ContextDeskCollection,
   type ContextDeskPane,
   type ContextPacketView,
 } from "@unclecode/contracts";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
+import { getSelectedVisibleContextPolicySuggestion } from "./work-shell-context-advice.js";
 import { resolveContextInspectorSourceCapabilities } from "./work-shell-context-inspector.js";
 import {
   buildContextDeskCollectionRows,
@@ -35,6 +39,8 @@ export type PiContextDesk = {
   readonly sourceActionsEnabled: boolean;
   readonly canUndo: boolean;
   readonly modelWindow: number;
+  readonly adviceEnabled: boolean;
+  readonly suggestions: readonly ContextPolicySuggestion[];
 };
 
 /** The engine calls the desk makes; all optional so a narrower engine simply loses them. */
@@ -49,6 +55,8 @@ export type PiContextDeskEngine = {
   includeContextSourceAtCursor?(): unknown;
   toggleContextInspectorExpanded?(): unknown;
   undoLastContextSourceAction?(): unknown;
+  acceptContextSuggestion?(suggestionId: string): unknown;
+  rejectContextSuggestion?(suggestionId: string): unknown;
 };
 
 const GROUPS_WIDTH = 22;
@@ -62,6 +70,18 @@ function isContextPacketView(value: unknown): value is ContextPacketView {
     && Array.isArray(value.included)
     && Array.isArray(value.excluded)
     && typeof value.tokenEstimate === "number";
+}
+
+function isContextPolicySuggestion(value: unknown): value is ContextPolicySuggestion {
+  return isRecord(value)
+    && typeof value.id === "string"
+    && typeof value.sourceId === "string"
+    && typeof value.packetReceiptId === "string"
+    && typeof value.reasonCode === "string"
+    && typeof value.reasonText === "string"
+    && typeof value.createdAt === "string"
+    && CONTEXT_POLICY_ACTIONS.some((action) => action === value.action)
+    && CONTEXT_POLICY_SUGGESTION_STATES.some((status) => status === value.status);
 }
 
 /** The desk is open only while the engine says so and a packet exists to show. */
@@ -81,6 +101,10 @@ export function readPiContextDesk(state: Readonly<Record<string, unknown>>): PiC
     sourceActionsEnabled: state.contextSourceActionsEnabled === true,
     canUndo: receipt?.canUndo === true,
     modelWindow: typeof state.modelWindow === "number" && state.modelWindow > 0 ? state.modelWindow : 200_000,
+    adviceEnabled: state.contextAdviceActionsEnabled === true,
+    suggestions: Array.isArray(state.contextPolicySuggestions)
+      ? state.contextPolicySuggestions.filter(isContextPolicySuggestion)
+      : [],
   };
 }
 
@@ -91,6 +115,23 @@ function padTo(text: string, width: number): string {
 
 function formatTokens(tokens: number | undefined): string {
   return tokens === undefined ? "" : ` · ~${tokens}t`;
+}
+
+function selectedDeskRow(desk: PiContextDesk) {
+  return resolveContextDeskSelectedRow(
+    filterContextDeskRows(buildContextInspectorRows(desk.packet), desk.collection),
+    desk.cursor,
+  );
+}
+
+/** The proposed advice for the selected source, when the engine lets the desk act on it. */
+export function selectedPiDeskSuggestion(desk: PiContextDesk): ContextPolicySuggestion | undefined {
+  if (!desk.adviceEnabled) return undefined;
+  return getSelectedVisibleContextPolicySuggestion({
+    packet: desk.packet,
+    suggestions: desk.suggestions,
+    selectedSourceId: selectedDeskRow(desk)?.item.id,
+  });
 }
 
 /**
@@ -134,6 +175,11 @@ export function formatPiContextDeskLines(desk: PiContextDesk, width: number, hei
   const hiddenAfter = Math.max(0, visible.length - (start + listHeight));
   if (hiddenAfter > 0) lines.push(`${" ".repeat(GROUPS_WIDTH + 2)}… ${hiddenAfter} more below`);
 
+  const advice = selectedPiDeskSuggestion(desk);
+  if (advice) {
+    const saving = advice.estimatedTokenSaving ? ` · saves ~${advice.estimatedTokenSaving}t` : "";
+    lines.push("", truncateToWidth(`Advice · ${advice.action}${saving} — ${advice.reasonText}  (a accept · r reject)`, width));
+  }
   lines.push("", truncateToWidth(`${focus("preview", "PREVIEW")} ${selected ? selected.item.label : "nothing selected"}`, width));
   if (selected) {
     const expanded = desk.expandedId === selected.item.id && desk.detailContent !== undefined;
@@ -162,10 +208,7 @@ export function resolvePiContextDeskAction(input: {
   };
   readonly composerEmpty: boolean;
 }): WorkShellContextInspectorAction {
-  const selected = resolveContextDeskSelectedRow(
-    filterContextDeskRows(buildContextInspectorRows(input.desk.packet), input.desk.collection),
-    input.desk.cursor,
-  );
+  const selected = selectedDeskRow(input.desk);
   const capabilities = resolveContextInspectorSourceCapabilities(selected?.item);
   return resolveWorkShellContextInspectorAction({
     value: input.value,
@@ -174,7 +217,7 @@ export function resolvePiContextDeskAction(input: {
     actionsEnabled: input.desk.sourceActionsEnabled,
     pinActionsEnabled: input.desk.sourceActionsEnabled && (capabilities.pin || capabilities.unpin),
     deliveryActionsEnabled: input.desk.sourceActionsEnabled && capabilities.delivery !== undefined,
-    adviceActionsEnabled: false,
+    adviceActionsEnabled: selectedPiDeskSuggestion(input.desk) !== undefined,
     undoActionsEnabled: input.desk.sourceActionsEnabled && input.desk.canUndo,
     expandActionsEnabled: capabilities.preview,
     composerEmpty: input.composerEmpty,
@@ -203,11 +246,7 @@ export function applyPiContextDeskAction(
       engine.toggleContextInspectorPin?.();
       return true;
     case "toggle-delivery": {
-      const selected = resolveContextDeskSelectedRow(
-        filterContextDeskRows(buildContextInspectorRows(desk.packet), desk.collection),
-        desk.cursor,
-      );
-      if (selected?.heldBack) engine.includeContextSourceAtCursor?.();
+      if (selectedDeskRow(desk)?.heldBack) engine.includeContextSourceAtCursor?.();
       else engine.forgetContextSourceAtCursor?.();
       return true;
     }
@@ -218,7 +257,13 @@ export function applyPiContextDeskAction(
       engine.toggleContextInspectorExpanded?.();
       return true;
     case "accept-advice":
-    case "reject-advice":
+    case "reject-advice": {
+      const suggestion = selectedPiDeskSuggestion(desk);
+      if (!suggestion) return false;
+      if (action.type === "accept-advice") engine.acceptContextSuggestion?.(suggestion.id);
+      else engine.rejectContextSuggestion?.(suggestion.id);
+      return true;
+    }
     case "none":
       return false;
   }

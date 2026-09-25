@@ -83,3 +83,33 @@ test("a pending draft owns every key, as in the Ink desk", () => {
   const action = resolvePiContextDeskAction({ desk, value: "", key: { downArrow: true }, composerEmpty: false });
   assert.equal(applyPiContextDeskAction({}, desk, action), false);
 });
+
+test("advice on the selected source shows with a/r, and a/r settle that suggestion", () => {
+  const suggestion = {
+    id: "advice-1",
+    packetReceiptId: "receipt-1",
+    sourceId: "stamp",
+    action: "hold-back",
+    reasonCode: "stale",
+    reasonText: "unchanged for 3 turns",
+    estimatedTokenSaving: 23,
+    status: "proposed",
+    createdAt: "2026-09-25T00:00:00.000Z",
+  };
+  const desk = readPiContextDesk(engineState({ contextAdviceActionsEnabled: true, contextPolicySuggestions: [suggestion, { id: "bad" }] }));
+  assert.match(formatPiContextDeskLines(desk, 120, 30).join("\n"), /Advice · hold-back · saves ~23t — unchanged for 3 turns {2}\(a accept · r reject\)/u);
+
+  const calls = [];
+  const engine = {
+    acceptContextSuggestion: (id) => calls.push(`accept ${id}`),
+    rejectContextSuggestion: (id) => calls.push(`reject ${id}`),
+  };
+  for (const value of ["a", "r"]) {
+    applyPiContextDeskAction(engine, desk, resolvePiContextDeskAction({ desk, value, key: {}, composerEmpty: true }));
+  }
+  assert.deepEqual(calls, ["accept advice-1", "reject advice-1"]);
+
+  const disabled = readPiContextDesk(engineState({ contextPolicySuggestions: [suggestion] }));
+  const action = resolvePiContextDeskAction({ desk: disabled, value: "a", key: {}, composerEmpty: true });
+  assert.equal(applyPiContextDeskAction(engine, disabled, action), false);
+});
