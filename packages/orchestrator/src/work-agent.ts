@@ -114,18 +114,28 @@ const DIRECT_READ_ONLY_TOOLS = new Set([
   "web_search",
 ]);
 
+// Display and read-only inspection commands, including the ones models use to check
+// their own work (`wc -l`, `cat`, `rg`).
+const DIRECT_READ_ONLY_SHELL_COMMANDS = new Set([
+  "cat", "echo", "find", "grep", "head", "ls", "printf", "pwd", "rg", "tail", "wc",
+]);
+// Flags that make those commands write files or run programs.
+const DIRECT_SHELL_WRITE_OR_EXEC_FLAG = /(?:^|\s)(?:-(?:exec|execdir|ok|okdir|delete|fprint|fls)|--pre\b)/u;
+
 function isDirectReadOnlyToolEvent(event: { readonly toolName?: unknown; readonly input?: unknown }): boolean {
   if (typeof event.toolName !== "string") return false;
   if (DIRECT_READ_ONLY_TOOLS.has(event.toolName)) return true;
   if (event.toolName !== "run_shell" || !event.input || typeof event.input !== "object") return false;
   const command = (event.input as { readonly command?: unknown }).command;
   if (typeof command !== "string") return false;
-  // A deliberately tiny shell subset used for display/probe commands. Shell
-  // composition, substitution, redirection, and multiline input all fall back
-  // to mutation-capable. This is an evidence optimization, not an authority
+  // A deliberately small shell subset. Shell composition, substitution,
+  // redirection, multiline input, and write/exec flags all fall back to
+  // mutation-capable. This is an evidence optimization, not an authority
   // grant; policy still governs execution independently.
-  return /^(?:printf|echo|pwd)(?:\s|$)/u.test(command)
-    && !/[\n\r;&|<>`$(){}]/u.test(command);
+  const program = command.trimStart().split(/\s/u, 1)[0] ?? "";
+  return DIRECT_READ_ONLY_SHELL_COMMANDS.has(program)
+    && !/[\n\r;&|<>`$(){}]/u.test(command)
+    && !DIRECT_SHELL_WRITE_OR_EXEC_FLAG.test(command);
 }
 
 /** What an executable guardian check is told about a finished plan. */
