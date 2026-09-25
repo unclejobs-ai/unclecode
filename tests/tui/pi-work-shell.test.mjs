@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  formatPiShellQueue,
   formatPiShellStatus,
+  nextPiShellMode,
   formatPiShellToolRows,
   PiShellStatusLine,
   readPiShellState,
@@ -74,4 +76,12 @@ test("a command's panel is read; the resting context panel is not", () => {
   assert.deepEqual(help.panel, { title: "Help", lines: ["/model  pick a model"] });
   assert.equal(readPiShellState({ entries: [], panel: { title: "Context", lines: ["guidance"] } }).panel, undefined);
   assert.equal(readPiShellState({ entries: [] }).panel, undefined);
+});
+
+test("Shift+Tab cycles modes in the Ink order; the queue shows only when something waits", () => {
+  assert.equal(nextPiShellMode("default"), "yolo");
+  assert.equal(nextPiShellMode("search"), "default");
+  assert.equal(nextPiShellMode("unknown-mode"), "default");
+  assert.equal(formatPiShellQueue(readPiShellState({ entries: [], queuedCount: 0 })), undefined);
+  assert.equal(formatPiShellQueue(readPiShellState({ entries: [], queuedCount: 2, queuePaused: true })), "2 queued · paused");
 });

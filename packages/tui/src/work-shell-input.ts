@@ -1,4 +1,4 @@
-const WORK_SHELL_MODE_CYCLE = ["default", "yolo", "ultrawork", "analyze", "search"] as const;
+export const WORK_SHELL_MODE_CYCLE = ["default", "yolo", "ultrawork", "analyze", "search"] as const;
 const RUST_WHITESPACE_AT_EDGES = /^\p{White_Space}+|\p{White_Space}+$/gu;
 const RUST_I64_MAX = 9_223_372_036_854_775_807n;
 

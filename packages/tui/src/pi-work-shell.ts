@@ -39,6 +39,7 @@ import {
 } from "./pi-context-desk.js";
 import { formatPiDecisionRows, piDecisionOptionCount, type PiShellDecision, readPiShellDecision } from "./pi-decision.js";
 import type { ProviderAuthCatalogPort } from "./work-shell-auth-provider-picker-model.js";
+import { WORK_SHELL_MODE_CYCLE } from "./work-shell-input.js";
 import { selectWorkShellLiveToolTraceLines } from "./work-shell-live-activity.js";
 
 export type PiShellState = {
@@ -47,6 +48,9 @@ export type PiShellState = {
   readonly isBusy: boolean;
   readonly busyStatus: string;
   readonly model: string;
+  readonly mode: string;
+  readonly queuedCount: number;
+  readonly queuePaused: boolean;
   readonly lastTurnDurationMs: number | undefined;
   readonly currentTurnStartedAt: number | undefined;
   /** Newest tool row of the live trace (`→ read .`), as the Ink dock shows it. */
@@ -70,6 +74,7 @@ export type PiShellEngine = PiContextDeskEngine & {
   subscribe(listener: (state: unknown) => void): () => void;
   initialize?(): unknown;
   handleSubmit(line: string): Promise<unknown>;
+  setMode?(mode: string): unknown;
   interruptTurn?(): unknown;
   updateTerminalColumns?(columns: number): unknown;
   submitPendingDecisionText?(value: string, decisionId: string): unknown;
@@ -115,6 +120,9 @@ export function readPiShellState(value: unknown): PiShellState {
     isBusy: state.isBusy === true,
     busyStatus: typeof state.busyStatus === "string" ? state.busyStatus : "",
     model: typeof state.model === "string" ? state.model : "",
+    mode: typeof state.mode === "string" ? state.mode : "default",
+    queuedCount: typeof state.queuedCount === "number" ? state.queuedCount : 0,
+    queuePaused: state.queuePaused === true,
     lastTurnDurationMs: typeof state.lastTurnDurationMs === "number" ? state.lastTurnDurationMs : undefined,
     currentTurnStartedAt: typeof state.currentTurnStartedAt === "number" ? state.currentTurnStartedAt : undefined,
     panel: readPiShellPanel(state.panel),
@@ -130,6 +138,17 @@ function readPiShellPanel(value: unknown): PiShellPanel | undefined {
   if (!isRecord(value) || typeof value.title !== "string" || value.title === RESTING_PANEL_TITLE) return undefined;
   const lines = Array.isArray(value.lines) ? value.lines.filter((line) => typeof line === "string") : [];
   return { title: value.title, lines };
+}
+
+/** Shift+Tab's next mode, in the Ink shell's cycle order. */
+export function nextPiShellMode(current: string): string {
+  const index = WORK_SHELL_MODE_CYCLE.findIndex((mode) => mode === current);
+  return WORK_SHELL_MODE_CYCLE[(index + 1) % WORK_SHELL_MODE_CYCLE.length] ?? "default";
+}
+
+export function formatPiShellQueue(state: PiShellState): string | undefined {
+  if (state.queuedCount === 0) return undefined;
+  return `${state.queuedCount} queued${state.queuePaused ? " · paused" : ""}`;
 }
 
 export function formatPiShellStatus(state: PiShellState, now: number = Date.now()): string {
@@ -211,7 +230,8 @@ export async function renderPiWorkShell(
     }
     status.setText(dim([
       formatPiShellStatus(state),
-      state.model,
+      `${state.model} · ${state.mode}`,
+      ...(formatPiShellQueue(state) ? [formatPiShellQueue(state)] : []),
       `PgUp/PgDn · wheel scroll · Ctrl+C ${state.isBusy ? "interrupt" : "quit"}`,
     ].join("  │  ")));
     tui.requestRender();
@@ -326,6 +346,10 @@ export async function renderPiWorkShell(
       if (matchesKey(data, "escape") && authPicker?.isOpen) {
         authPicker.close();
         tui.requestRender();
+        return { consume: true };
+      }
+      if (matchesKey(data, "shift+tab") && !state.isBusy && engine.setMode) {
+        void Promise.resolve(engine.setMode(nextPiShellMode(state.mode))).catch(reportError);
         return { consume: true };
       }
       if (matchesKey(data, "ctrl+c")) {
