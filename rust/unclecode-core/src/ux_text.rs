@@ -568,6 +568,8 @@ pub fn format_work_shell_provider_title(provider: &str) -> String {
         "openai" => "UncleCode · OpenAI".to_string(),
         "gemini" => "UncleCode · Gemini".to_string(),
         "anthropic" => "UncleCode · Anthropic".to_string(),
+        "xai" => "UncleCode · xAI".to_string(),
+        "deepseek" => "UncleCode · DeepSeek".to_string(),
         _ => format!("UncleCode · {provider}"),
     }
 }
