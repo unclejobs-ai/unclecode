@@ -72,6 +72,7 @@ export * from "./work-shell-engine-panels.js";
 export * from "./work-shell-engine-persistence.js";
 export * from "./work-shell-engine-prompt-runtime.js";
 export * from "./work-shell-engine-submit.js";
+export * from "./work-shell-bang.js";
 export * from "./work-shell-engine-post-turns.js";
 export * from "./work-shell-engine-trace.js";
 export * from "./work-shell-engine-turns.js";

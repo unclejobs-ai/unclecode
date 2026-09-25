@@ -84,7 +84,8 @@ import {
   workShellLanguageInstruction,
   type WorkShellUiLocale,
 } from "./work-shell-locale.js";
-import { applyWorkShellTraceEvent } from "./work-shell-engine-trace.js";
+import { applyWorkShellTraceEvent, formatWorkShellToolDetailEntry } from "./work-shell-engine-trace.js";
+import { runWorkShellBangCommand } from "./work-shell-bang.js";
 import {
   applyTraceEventToAgentConsole,
   type AgentConsoleUsageRecorder,
@@ -2350,6 +2351,49 @@ export class WorkShellEngine<
     return false;
   }
 
+  /**
+   * `! <command>`: runs in the session cwd and lands as a `run_shell`-shaped
+   * tool entry. Ctrl+C reaches it through the active turn abort controller;
+   * `interruptTurn` then owns the idle transition and its message.
+   */
+  private async handleShellSubmit(line: string, command: string): Promise<void> {
+    this.appendEntries({ role: "user", text: line });
+    const abortController = this.startActiveTurnAbortController();
+    this.setState(createWorkShellBusyStatePatch({
+      state: this.state,
+      isBusy: true,
+      busyStatus: `$ ${command}`,
+      currentTurnStartedAt: Date.now(),
+    }));
+    try {
+      const result = await runWorkShellBangCommand({
+        command,
+        cwd: this.options.cwd,
+        signal: abortController.signal,
+      });
+      if (abortController.signal.aborted) return;
+      this.appendEntries({
+        role: "tool",
+        text: formatWorkShellToolDetailEntry({
+          type: "tool.completed",
+          toolName: "run_shell",
+          input: { command },
+          output: result.output,
+          isError: result.isError,
+          durationMs: result.durationMs,
+        }),
+      });
+      this.setState({
+        isBusy: false,
+        busyStatus: undefined,
+        currentTurnStartedAt: undefined,
+        lastTurnDurationMs: result.durationMs,
+      });
+    } finally {
+      this.clearActiveTurnAbortController(abortController);
+    }
+  }
+
   private startActiveTurnAbortController(): AbortController {
     const abortController = new AbortController();
     this.activeTurnAbortController = abortController;
@@ -2737,6 +2781,9 @@ export class WorkShellEngine<
         break;
       case "builtin":
         await this.handleBuiltinSubmit(route.line, route.command);
+        break;
+      case "shell":
+        await this.handleShellSubmit(route.line, route.command);
         break;
       case "prompt-command": {
         const abortController = this.startActiveTurnAbortController();

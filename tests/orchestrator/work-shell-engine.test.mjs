@@ -10875,3 +10875,50 @@ test("WorkShellEngine detail scrolling follows the renderer with and without act
 
   assert.deepEqual(failures, [], failures.join("\n"));
 });
+
+function createBangEngine(cwd) {
+  return createEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd,
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+    },
+  });
+}
+
+test("WorkShellEngine runs `! <command>` in the session cwd without a provider turn", async () => {
+  // The composer advertised `! shell` but sent `!seq 1 120` to the model.
+  const cwd = mkdtempSync(path.join(tmpdir(), "uc-bang-"));
+  writeFileSync(path.join(cwd, "marker.txt"), "x");
+  const { engine, calls } = createBangEngine(cwd);
+
+  await engine.handleSubmit("!ls; seq 1 12");
+
+  assert.deepEqual(calls.turns, []);
+  const entries = engine.getState().entries;
+  assert.deepEqual([entries.at(-2).role, entries.at(-2).text], ["user", "!ls; seq 1 12"]);
+  const tool = entries.at(-1);
+  assert.equal(tool.role, "tool");
+  assert.match(tool.text, /^bash ls; seq 1 12\n13 lines/u);
+  assert.match(tool.text, /marker\.txt/u);
+  assert.equal(engine.getState().isBusy, false);
+});
+
+test("WorkShellEngine interrupts a running `! <command>` and leaves no tool entry", async () => {
+  const { engine } = createBangEngine(mkdtempSync(path.join(tmpdir(), "uc-bang-")));
+
+  const running = engine.handleSubmit("!sleep 30");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(engine.getState().isBusy, true);
+  assert.equal(engine.interruptTurn(), true);
+  const startedAt = Date.now();
+  await running;
+
+  assert.ok(Date.now() - startedAt < 5_000);
+  assert.equal(engine.getState().isBusy, false);
+  assert.equal(engine.getState().entries.some((entry) => entry.role === "tool"), false);
+});

@@ -7,6 +7,7 @@ import { runRustCommandSync } from "./rust-command.js";
 import type { WorkShellComposerMode } from "./work-shell-engine.js";
 import type { WorkShellPromptCommand } from "./work-shell-engine-turns.js";
 import { listWorkShellSlashSuggestionEntries } from "./work-shell-slash.js";
+import { parseWorkShellBangCommand } from "./work-shell-bang.js";
 
 export type WorkShellSubmitRoute =
   | { readonly kind: "secure-api-key-entry"; readonly line: string }
@@ -14,6 +15,8 @@ export type WorkShellSubmitRoute =
   | { readonly kind: "prompt-command"; readonly line: string; readonly promptCommand: WorkShellPromptCommand }
   | { readonly kind: "inline-command"; readonly line: string; readonly slashCommand: readonly string[] }
   | { readonly kind: "local-command"; readonly line: string; readonly localCommand: ResolvedWorkShellLocalCommand }
+  /** `! <command>`: the operator's own shell command (`work-shell-bang.ts`). */
+  | { readonly kind: "shell"; readonly line: string; readonly command: string }
   /**
    * `consoleInvalid` is Rust's verdict that the line is a console-like form
    * that can never run (`/tod`, `/agents extra`). It only ever reaches the
@@ -186,6 +189,10 @@ export function resolveWorkShellSubmitRoute(input: {
   resolveWorkShellSlashCommand: (input: string) => readonly string[] | undefined;
   hasInlineCommandRunner: boolean;
 }): WorkShellSubmitRoute | undefined {
+  const bangCommand = input.composerMode === "default" ? parseWorkShellBangCommand(input.value) : undefined;
+  if (bangCommand !== undefined) {
+    return { kind: "shell", line: input.value.trim(), command: bangCommand };
+  }
   const route = parseRustSubmitRoute(runRustCommandSync(
     [
       "rust",
