@@ -5,6 +5,7 @@ import {
   formatPiShellQueue,
   formatPiShellStatus,
   nextPiShellMode,
+  pastePiClipboardImage,
   formatPiShellToolRows,
   PiShellStatusLine,
   readPiShellState,
@@ -84,4 +85,15 @@ test("Shift+Tab cycles modes in the Ink order; the queue shows only when somethi
   assert.equal(nextPiShellMode("unknown-mode"), "default");
   assert.equal(formatPiShellQueue(readPiShellState({ entries: [], queuedCount: 0 })), undefined);
   assert.equal(formatPiShellQueue(readPiShellState({ entries: [], queuedCount: 2, queuePaused: true })), "2 queued · paused");
+});
+
+test("Ctrl+V adds a clipboard image to the next submit; no image changes nothing", () => {
+  const image = { type: "image", mimeType: "image/png", dataUrl: "data:image/png;base64,AA==", path: "clipboard", displayName: "clipboard.png" };
+  const first = pastePiClipboardImage(() => ({ status: "ok", attachment: image }), []);
+  assert.deepEqual(first, { pending: [image], error: undefined });
+  assert.deepEqual(pastePiClipboardImage(() => ({ status: "no-image", reason: "empty" }), first.pending), { pending: [image], error: undefined });
+  assert.deepEqual(
+    pastePiClipboardImage(() => ({ status: "too-large", reason: "12 MB over the 5 MB limit" }), []),
+    { pending: [], error: "clipboard: 12 MB over the 5 MB limit" },
+  );
 });

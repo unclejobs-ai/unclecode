@@ -27,7 +27,13 @@ import {
 
 import { PiAuthPicker } from "./pi-auth-picker.js";
 import { bold, cyan, dim, type PiShellEntry, TranscriptSync, yellow } from "./pi-transcript.js";
-import { CONTEXT_DESK_PANES, type ContextDeskPane } from "@unclecode/contracts";
+import {
+  type ClipboardImageAttachment,
+  type ClipboardImageResult,
+  CONTEXT_DESK_PANES,
+  type ContextDeskPane,
+} from "@unclecode/contracts";
+import { captureClipboardImage } from "@unclecode/orchestrator";
 
 import {
   applyPiContextDeskAction,
@@ -39,6 +45,7 @@ import {
 } from "./pi-context-desk.js";
 import { formatPiDecisionRows, piDecisionOptionCount, type PiShellDecision, readPiShellDecision } from "./pi-decision.js";
 import type { ProviderAuthCatalogPort } from "./work-shell-auth-provider-picker-model.js";
+import { formatAttachmentBadgeLine } from "./work-shell-attachments.js";
 import { WORK_SHELL_MODE_CYCLE } from "./work-shell-input.js";
 import { selectWorkShellLiveToolTraceLines } from "./work-shell-live-activity.js";
 
@@ -73,7 +80,7 @@ export type PiShellEngine = PiContextDeskEngine & {
   getState(): unknown;
   subscribe(listener: (state: unknown) => void): () => void;
   initialize?(): unknown;
-  handleSubmit(line: string): Promise<unknown>;
+  handleSubmit(line: string, attachments?: readonly ClipboardImageAttachment[]): Promise<unknown>;
   setMode?(mode: string): unknown;
   interruptTurn?(): unknown;
   updateTerminalColumns?(columns: number): unknown;
@@ -140,6 +147,19 @@ function readPiShellPanel(value: unknown): PiShellPanel | undefined {
   return { title: value.title, lines };
 }
 
+/**
+ * Ctrl+V: a clipboard image joins the next submit, as in the Ink composer. No
+ * image leaves everything as it was; any other capture failure is reported.
+ */
+export function pastePiClipboardImage(
+  capture: () => ClipboardImageResult,
+  pending: readonly ClipboardImageAttachment[],
+): { readonly pending: readonly ClipboardImageAttachment[]; readonly error: string | undefined } {
+  const result = capture();
+  if (result.status === "ok") return { pending: [...pending, result.attachment], error: undefined };
+  return { pending, error: result.status === "no-image" ? undefined : `clipboard: ${result.reason}` };
+}
+
 /** Shift+Tab's next mode, in the Ink shell's cycle order. */
 export function nextPiShellMode(current: string): string {
   const index = WORK_SHELL_MODE_CYCLE.findIndex((mode) => mode === current);
@@ -197,7 +217,10 @@ export class PiShellStatusLine implements Component {
 
 export async function renderPiWorkShell(
   engine: PiShellEngine,
-  options: { readonly providerAuthCatalog?: ProviderAuthCatalogPort | undefined } = {},
+  options: {
+    readonly providerAuthCatalog?: ProviderAuthCatalogPort | undefined;
+    readonly captureClipboardImage?: (() => ClipboardImageResult) | undefined;
+  } = {},
 ): Promise<void> {
   const terminal = new ProcessTerminal();
   const tui = new TuiAltScreen(terminal, undefined, undefined, { scrollToEndIndicator: () => " ↓ new output · End " });
@@ -222,6 +245,7 @@ export async function renderPiWorkShell(
   // A failed control stays on the status row until the next submit; the busy tick would
   // otherwise repaint over it within a second.
   let errorText: string | undefined;
+  let pendingImages: readonly ClipboardImageAttachment[] = [];
   const showStatus = () => {
     if (errorText !== undefined) {
       status.setText(yellow(`✗ ${errorText}`));
@@ -232,6 +256,7 @@ export async function renderPiWorkShell(
       formatPiShellStatus(state),
       `${state.model} · ${state.mode}`,
       ...(formatPiShellQueue(state) ? [formatPiShellQueue(state)] : []),
+      ...(pendingImages.length > 0 ? [formatAttachmentBadgeLine(pendingImages)] : []),
       `PgUp/PgDn · wheel scroll · Ctrl+C ${state.isBusy ? "interrupt" : "quit"}`,
     ].join("  │  ")));
     tui.requestRender();
@@ -325,7 +350,9 @@ export async function renderPiWorkShell(
         return;
       }
       if (authPicker?.submit(line)) return;
-      void engine.handleSubmit(line).catch(reportError);
+      const attachments = pendingImages;
+      pendingImages = [];
+      void engine.handleSubmit(line, attachments).catch(reportError);
     };
     tui.addInputListener((data) => {
       if (authPicker?.handleKey(data)) return { consume: true };
@@ -346,6 +373,13 @@ export async function renderPiWorkShell(
       if (matchesKey(data, "escape") && authPicker?.isOpen) {
         authPicker.close();
         tui.requestRender();
+        return { consume: true };
+      }
+      if (matchesKey(data, "ctrl+v")) {
+        const pasted = pastePiClipboardImage(options.captureClipboardImage ?? captureClipboardImage, pendingImages);
+        pendingImages = pasted.pending;
+        if (pasted.error !== undefined) errorText = pasted.error;
+        showStatus();
         return { consume: true };
       }
       if (matchesKey(data, "shift+tab") && !state.isBusy && engine.setMode) {
