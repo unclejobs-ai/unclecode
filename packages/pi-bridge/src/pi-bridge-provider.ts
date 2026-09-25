@@ -31,8 +31,10 @@ import {
   toPiTools,
 } from "./pi-message-map.js";
 import { enableEnvProxyForFetch } from "./env-proxy.js";
+import { getUncleCodeCredentialModels } from "./unclecode-credential-store.js";
 import {
   getSharedPiModels,
+  PI_BRIDGE_PROVIDER_IDS,
   resolvePiModel,
   toPiThinkingLevel,
 } from "./pi-model.js";
@@ -87,11 +89,27 @@ function addCodexHostedWebSearchTool(payload: unknown): unknown {
     : { ...request, tools: [...tools, { type: "web_search" }] };
 }
 
+/** `xai/grok-4.3` → the runtime provider and its model id; undefined for a bare model id. */
+function parseProviderModel(value: string): { readonly provider: ProviderName; readonly model: string } | undefined {
+  const slash = value.indexOf("/");
+  if (slash <= 0 || slash === value.length - 1) return undefined;
+  const provider = value.slice(0, slash);
+  return isProviderName(provider) ? { provider, model: value.slice(slash + 1) } : undefined;
+}
+
+function isProviderName(value: string): value is ProviderName {
+  return Object.hasOwn(PI_BRIDGE_PROVIDER_IDS, value);
+}
+
 class PiBridgeProvider implements LlmProvider {
   private history: PiMessage[] = [];
   private piModel: Model<Api>;
   private reasoning: RuntimeReasoningConfig;
   private apiKey: string;
+  // The live route. `/model <provider>/<model>` can move it off the boot provider.
+  private provider: ProviderName;
+  private models: Models | undefined;
+  private piProvider: string | undefined;
   private traceListener: ProviderTraceListener | undefined;
   private readonly toolLoopMax: number;
   private readonly costLimitUsd: number | undefined;
@@ -102,6 +120,9 @@ class PiBridgeProvider implements LlmProvider {
       ?? resolvePiModel(args.provider, args.model, args.models, args.piProvider, args.baseUrl);
     this.reasoning = args.reasoning;
     this.apiKey = args.apiKey;
+    this.provider = args.provider;
+    this.models = args.models;
+    this.piProvider = args.piProvider;
     this.toolLoopMax = args.toolLoopMax ?? resolveToolLoopMax(process.env);
     this.costLimitUsd = args.costLimitUsd;
     if (!Number.isSafeInteger(this.toolLoopMax) || this.toolLoopMax <= 0) {
@@ -157,7 +178,7 @@ class PiBridgeProvider implements LlmProvider {
           this.traceListener?.({
             type: "tool.started",
             level: "default",
-            provider: this.args.provider,
+            provider: this.provider,
             toolName: call.name,
             toolCallId: call.id,
             input: call.arguments,
@@ -194,7 +215,7 @@ class PiBridgeProvider implements LlmProvider {
           this.traceListener?.({
             type: "tool.completed",
             level: "default",
-            provider: this.args.provider,
+            provider: this.provider,
             toolName: call.name,
             toolCallId: call.id,
             input: call.arguments,
@@ -220,13 +241,7 @@ class PiBridgeProvider implements LlmProvider {
     options: ProviderQueryOptions = {},
   ): Promise<ProviderQueryResult> {
     const model = options.model
-      ? resolvePiModel(
-          this.args.provider,
-          options.model,
-          this.args.models,
-          this.args.piProvider,
-          this.args.baseUrl,
-        )
+      ? resolvePiModel(this.provider, options.model, this.models, this.piProvider, this.args.baseUrl)
       : this.piModel;
     const mapped = mapQueryMessagesToPi(messages, model);
     const reasoning = options.reasoning ?? this.reasoning;
@@ -258,14 +273,21 @@ class PiBridgeProvider implements LlmProvider {
     if (settings.reasoning) {
       this.reasoning = settings.reasoning;
     }
-    if (settings.model && settings.model !== this.piModel.id) {
-      this.piModel = resolvePiModel(
-        this.args.provider,
-        settings.model,
-        this.args.models,
-        this.args.piProvider,
-        this.args.baseUrl,
-      );
+    if (!settings.model) return;
+    const switched = parseProviderModel(settings.model);
+    if (switched && switched.provider !== this.provider) {
+      // Another provider's auth comes from UncleCode's store (or its env key) inside
+      // pi-ai; the boot provider's explicit key, codex route, and base URL stay behind.
+      this.provider = switched.provider;
+      this.models = getUncleCodeCredentialModels();
+      this.piProvider = undefined;
+      this.apiKey = "";
+      this.piModel = resolvePiModel(switched.provider, switched.model, this.models);
+      return;
+    }
+    const modelId = switched?.model ?? settings.model;
+    if (modelId !== this.piModel.id) {
+      this.piModel = resolvePiModel(this.provider, modelId, this.models, this.piProvider, this.args.baseUrl);
     }
   }
 
@@ -330,7 +352,7 @@ class PiBridgeProvider implements LlmProvider {
           this.traceListener?.({
             type: "assistant.delta",
             level: "default",
-            provider: this.args.provider,
+            provider: this.provider,
             model: model.id,
             itemId: `pi-text-${event.contentIndex}`,
             delta: event.delta,
@@ -339,7 +361,7 @@ class PiBridgeProvider implements LlmProvider {
           this.traceListener?.({
             type: "reasoning.delta",
             level: "default",
-            provider: this.args.provider,
+            provider: this.provider,
             model: model.id,
             kind: "text",
             itemId: `pi-thinking-${event.contentIndex}`,
@@ -354,7 +376,7 @@ class PiBridgeProvider implements LlmProvider {
   }
 
   private defaultStreamFn(): PiBridgeStreamFn {
-    const models = this.args.models ?? getSharedPiModels();
+    const models = this.models ?? getSharedPiModels();
     return (model, context, options) => models.streamSimple(model, context, options);
   }
 }

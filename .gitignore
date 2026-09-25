@@ -52,3 +52,4 @@ renders/
 
 # misspelled duplicate of apps/godness-web (removed 2026-07)
 godness-decetor/
+.DS_Store

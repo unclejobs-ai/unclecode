@@ -500,3 +500,22 @@ test("updateAuthToken and updateRuntimeSettings affect subsequent requests", asy
   assert.equal(calls[0].options.apiKey, "rotated-key");
   assert.equal(calls[0].options.reasoning, "high");
 });
+
+test("a provider/model setting switches the live provider without carrying the old key", async () => {
+  const { calls, streamFn } = fakeStreamFn([textOnlyStep("from anthropic"), textOnlyStep("from grok")]);
+  const events = [];
+  const provider = createProvider({ provider: "anthropic", apiKey: "sk-ant-env", streamFn });
+  provider.setTraceListener((event) => events.push(event));
+
+  await provider.runTurn("first");
+  provider.updateRuntimeSettings({ model: "xai/grok-4.3" });
+  await provider.runTurn("second");
+
+  assert.equal(calls[0].options.apiKey, "sk-ant-env");
+  assert.equal(calls[1].model.provider, "xai");
+  assert.equal(calls[1].model.id, "grok-4.3");
+  assert.equal(calls[1].options.apiKey, undefined);
+  assert.equal(events.at(-1).provider, "xai");
+  // The conversation carries over to the new model.
+  assert.equal(calls[1].context.messages.filter((message) => message.role === "user").length, 2);
+});

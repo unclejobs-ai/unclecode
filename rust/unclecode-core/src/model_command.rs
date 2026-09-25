@@ -1,5 +1,6 @@
 use crate::model_registry::{
-    is_openai_reasoning_effort, openai_reasoning_support, provider_model_catalog,
+    is_openai_reasoning_effort, is_runtime_supported_provider, openai_reasoning_support,
+    provider_model_catalog,
 };
 use crate::ux_model::build_model_panel_json;
 use serde_json::{json, Map, Value};
@@ -42,7 +43,13 @@ pub fn resolve_model_command_json(input_json: &str) -> Result<String, String> {
                     "Usage: /model <name>".to_string(),
                 )
             } else if let Some((candidate, explicit_reasoning)) = parse_model_selection(candidate) {
-                if !models.iter().any(|model| model == candidate) {
+                // `provider/model` switches provider; the pi engine resolves the id
+                // against its own catalog, so only the provider is checked here.
+                let cross_provider = candidate
+                    .split_once('/')
+                    .filter(|(target, model)| !model.is_empty() && is_runtime_supported_provider(target));
+                let target_provider = cross_provider.map(|(target, _)| target);
+                if target_provider.is_none() && !models.iter().any(|model| model == candidate) {
                     (
                         current_model.to_string(),
                         current_reasoning.clone(),
@@ -50,8 +57,8 @@ pub fn resolve_model_command_json(input_json: &str) -> Result<String, String> {
                     )
                 } else {
                     let next_reasoning = resolve_reasoning_for_model(
-                        provider,
-                        candidate,
+                        target_provider.unwrap_or(provider),
+                        cross_provider.map_or(candidate, |(_, model)| model),
                         &current_reasoning,
                         &mode_default_reasoning,
                         explicit_reasoning,
@@ -304,6 +311,29 @@ mod tests {
             parsed["message"],
             "No model match for gpt-4.1-mini. Current model unchanged."
         );
+    }
+
+    #[test]
+    fn switches_to_another_runtime_provider_with_provider_slash_model() {
+        let result = resolve_model_command_json(
+            r#"{
+                "input": "/model xai/grok-4.3",
+                "provider": "anthropic",
+                "currentModel": "claude-sonnet-5",
+                "currentReasoning": {"effort":"unsupported","source":"model-capability","support":{"status":"unsupported","supportedEfforts":[]}}
+            }"#,
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["nextModel"], "xai/grok-4.3");
+        assert_eq!(parsed["message"], "Model set to xai/grok-4.3. Reasoning unsupported.");
+
+        let unknown = resolve_model_command_json(
+            r#"{"input": "/model nope/x", "provider": "anthropic", "currentModel": "claude-sonnet-5"}"#,
+        )
+        .unwrap();
+        let unknown: Value = serde_json::from_str(&unknown).unwrap();
+        assert_eq!(unknown["nextModel"], "claude-sonnet-5");
     }
 
     #[test]

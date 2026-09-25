@@ -5,7 +5,8 @@
 # appeared. Needs real credentials (e.g. `unclecode auth login xai`) — it spends tokens.
 #
 # usage: scripts/acceptance/provider-tui-turn.sh <out-dir> <provider> <model> [timeout-sec]
-# optional env: UC_TURN_SETUP (shell run in the scratch dir), UC_TURN_PROMPT, UC_TURN_EXPECT
+# optional env: UC_TURN_SETUP (shell run in the scratch dir), UC_TURN_PRE (a line submitted
+#               before the prompt, e.g. `/model xai/grok-4.3`), UC_TURN_PROMPT, UC_TURN_EXPECT
 #               (fixed string the answer must contain; defaults to the marker file name)
 # exit:  0 = tool trace and answer seen, 1 = TUI never became ready, 2 = turn incomplete
 set -u
@@ -52,6 +53,11 @@ if [ -z "$ready" ]; then
   exit 1
 fi
 
+if [ -n "${UC_TURN_PRE:-}" ]; then
+  tmux send-keys -t "$S" -l "$UC_TURN_PRE"; tmux send-keys -t "$S" Enter
+  sleep 3
+  tmux capture-pane -p -t "$S" > "$OUT/after-pre.txt"
+fi
 PROMPT=${UC_TURN_PROMPT:-"List the files in the current directory with a tool, then reply with the exact name of the file that contains '$MARKER'."}
 EXPECT=${UC_TURN_EXPECT:-"$MARKER.txt"}
 tmux send-keys -t "$S" -l "$PROMPT"; tmux send-keys -t "$S" Enter

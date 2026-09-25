@@ -356,6 +356,10 @@ pub fn provider_label(provider_id: &str) -> String {
     .to_string()
 }
 
+pub fn is_runtime_supported_provider(provider_id: &str) -> bool {
+    RUNTIME_SUPPORTED_PROVIDERS.contains(&provider_id)
+}
+
 fn is_known_provider(provider_id: &str) -> bool {
     matches!(
         provider_id,
