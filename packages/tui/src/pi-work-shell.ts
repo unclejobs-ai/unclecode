@@ -28,6 +28,7 @@ import {
 } from "@earendil-works/pi-tui";
 
 import { PiAuthPicker } from "./pi-auth-picker.js";
+import { formatPiDecisionRows, piDecisionOptionCount, type PiShellDecision, readPiShellDecision } from "./pi-decision.js";
 import type { ProviderAuthCatalogPort } from "./work-shell-auth-provider-picker-model.js";
 import { selectWorkShellLiveToolTraceLines } from "./work-shell-live-activity.js";
 
@@ -48,6 +49,8 @@ export type PiShellState = {
   readonly liveToolLine: string | undefined;
   /** A panel a command opened (`/help`, `/model`, `/status` …); the collapsed context panel is none. */
   readonly panel: PiShellPanel | undefined;
+  /** A pending approval or question; ordinary submits are ignored until it is answered. */
+  readonly decision: PiShellDecision | undefined;
 };
 
 export type PiShellPanel = {
@@ -63,6 +66,9 @@ export type PiShellEngine = {
   handleSubmit(line: string): Promise<unknown>;
   interruptTurn?(): unknown;
   updateTerminalColumns?(columns: number): unknown;
+  submitPendingDecisionText?(value: string, decisionId: string): unknown;
+  answerPendingDecisionByIndex?(index: number, decisionId: string): unknown;
+  cancelPendingDecision?(decisionId: string): unknown;
 };
 
 const STREAMING_CURSOR = "▌";
@@ -136,6 +142,7 @@ export function readPiShellState(value: unknown): PiShellState {
     lastTurnDurationMs: typeof state.lastTurnDurationMs === "number" ? state.lastTurnDurationMs : undefined,
     currentTurnStartedAt: typeof state.currentTurnStartedAt === "number" ? state.currentTurnStartedAt : undefined,
     panel: readPiShellPanel(state.panel),
+    decision: readPiShellDecision(state.agentConsole),
     liveToolLine: Array.isArray(state.liveTraceLines)
       ? selectWorkShellLiveToolTraceLines(state.liveTraceLines.filter((line) => typeof line === "string"), 1)[0]
       : undefined,
@@ -287,7 +294,15 @@ export async function renderPiWorkShell(
   ]));
 
   let state = readPiShellState(engine.getState());
+  // A failed control stays on the status row until the next submit; the busy tick would
+  // otherwise repaint over it within a second.
+  let errorText: string | undefined;
   const showStatus = () => {
+    if (errorText !== undefined) {
+      status.setText(yellow(`✗ ${errorText}`));
+      tui.requestRender();
+      return;
+    }
     status.setText(dim([
       formatPiShellStatus(state),
       state.model,
@@ -300,17 +315,27 @@ export async function renderPiWorkShell(
   let panelOverlay: OverlayHandle | undefined;
   let shownPanelKey: string | undefined;
   let dismissedPanelKey: string | undefined;
+  // A pending decision takes the same place and cannot be dismissed, only answered or cancelled.
   const syncPanel = () => {
-    const key = state.panel ? `${state.panel.title}\n${state.panel.lines.join("\n")}` : undefined;
-    const visibleKey = key === dismissedPanelKey ? undefined : key;
+    const shown = state.decision
+      ? {
+          key: `decision:${state.decision.id}`,
+          title: state.decision.title ?? (state.decision.kind === "security-approval" ? "Approval needed" : "Decision"),
+          hint: "",
+          lines: formatPiDecisionRows(state.decision),
+        }
+      : state.panel
+        ? { key: `${state.panel.title}\n${state.panel.lines.join("\n")}`, title: state.panel.title, hint: "Esc close", lines: state.panel.lines }
+        : undefined;
+    const visibleKey = shown === undefined || shown.key === dismissedPanelKey ? undefined : shown.key;
     if (visibleKey === shownPanelKey) return;
     panelOverlay?.hide();
     panelOverlay = undefined;
     shownPanelKey = visibleKey;
-    if (!visibleKey || !state.panel) return;
+    if (!visibleKey || !shown) return;
     const box = new Box(1, 0, panelBg);
-    box.addChild(new Text(`${bold(state.panel.title)}  ${dim("Esc close")}`, 0, 0));
-    box.addChild(new Text(state.panel.lines.join("\n"), 0, 0));
+    box.addChild(new Text(`${bold(shown.title)}  ${dim(shown.hint)}`, 0, 0));
+    box.addChild(new Text(shown.lines.join("\n"), 0, 0));
     panelOverlay = tui.showOverlay(box, {
       anchor: "bottom-center",
       width: "90%",
@@ -337,6 +362,10 @@ export async function renderPiWorkShell(
       tui.stop();
       resolve();
     };
+    const reportError = (error: unknown) => {
+      errorText = error instanceof Error ? error.message : String(error);
+      showStatus();
+    };
     const authPicker = options.providerAuthCatalog
       ? new PiAuthPicker(tui, options.providerAuthCatalog, { bold, dim, background: panelBg })
       : undefined;
@@ -344,15 +373,31 @@ export async function renderPiWorkShell(
     editor.onSubmit = (text) => {
       const line = text.trim();
       if (line.length === 0) return;
+      errorText = undefined;
       editor.addToHistory(line);
+      if (state.decision && engine.submitPendingDecisionText) {
+        void Promise.resolve(engine.submitPendingDecisionText(line, state.decision.id)).catch(reportError);
+        return;
+      }
       if (authPicker?.submit(line)) return;
-      void engine.handleSubmit(line).catch((error: unknown) => {
-        status.setText(yellow(`✗ ${error instanceof Error ? error.message : String(error)}`));
-        tui.requestRender();
-      });
+      void engine.handleSubmit(line).catch(reportError);
     };
     tui.addInputListener((data) => {
       if (authPicker?.handleKey(data)) return { consume: true };
+      const decision = state.decision;
+      if (decision && editor.getText().length === 0) {
+        // The engine numbers options from 1, as they are shown.
+        const choice = /^[1-9]$/u.test(data) ? Number(data) : undefined;
+        if (choice !== undefined && choice <= piDecisionOptionCount(decision) && engine.answerPendingDecisionByIndex) {
+          errorText = undefined;
+          void Promise.resolve(engine.answerPendingDecisionByIndex(choice, decision.id)).catch(reportError);
+          return { consume: true };
+        }
+        if (matchesKey(data, "escape") && engine.cancelPendingDecision) {
+          void Promise.resolve(engine.cancelPendingDecision(decision.id)).catch(reportError);
+          return { consume: true };
+        }
+      }
       if (matchesKey(data, "escape") && authPicker?.isOpen) {
         authPicker.close();
         tui.requestRender();
