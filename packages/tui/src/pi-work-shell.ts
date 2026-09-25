@@ -11,8 +11,10 @@
  * `UNCLECODE_TUI_SHELL=pi` selects this shell.
  */
 import {
+  Box,
   type Component,
   Container,
+  type OverlayHandle,
   Editor,
   Markdown,
   type MarkdownTheme,
@@ -42,6 +44,13 @@ export type PiShellState = {
   readonly currentTurnStartedAt: number | undefined;
   /** Newest tool row of the live trace (`→ read .`), as the Ink dock shows it. */
   readonly liveToolLine: string | undefined;
+  /** A panel a command opened (`/help`, `/model`, `/status` …); the collapsed context panel is none. */
+  readonly panel: PiShellPanel | undefined;
+};
+
+export type PiShellPanel = {
+  readonly title: string;
+  readonly lines: readonly string[];
 };
 
 /** The slice of the work-shell engine this shell drives (local or owner-remote). */
@@ -58,6 +67,9 @@ const STREAMING_CURSOR = "▌";
 const REASONING_PREFIX = "✻ ";
 const TOOL_RESULT_ROWS_MAX = 8;
 const BUSY_TICK_MS = 1_000;
+/** The engine's resting panel: the collapsed context summary, not something a command opened. */
+const RESTING_PANEL_TITLE = "Context";
+const panelBg = (text: string) => `\u001b[48;5;236m${text}\u001b[49m`;
 const ENTRY_ROLES = new Set(["system", "user", "assistant", "tool"]);
 
 const sgr = (open: number, close: number) => (text: string) => `\u001b[${open}m${text}\u001b[${close}m`;
@@ -121,10 +133,17 @@ export function readPiShellState(value: unknown): PiShellState {
     model: typeof state.model === "string" ? state.model : "",
     lastTurnDurationMs: typeof state.lastTurnDurationMs === "number" ? state.lastTurnDurationMs : undefined,
     currentTurnStartedAt: typeof state.currentTurnStartedAt === "number" ? state.currentTurnStartedAt : undefined,
+    panel: readPiShellPanel(state.panel),
     liveToolLine: Array.isArray(state.liveTraceLines)
       ? selectWorkShellLiveToolTraceLines(state.liveTraceLines.filter((line) => typeof line === "string"), 1)[0]
       : undefined,
   };
+}
+
+function readPiShellPanel(value: unknown): PiShellPanel | undefined {
+  if (!isRecord(value) || typeof value.title !== "string" || value.title === RESTING_PANEL_TITLE) return undefined;
+  const lines = Array.isArray(value.lines) ? value.lines.filter((line) => typeof line === "string") : [];
+  return { title: value.title, lines };
 }
 
 /**
@@ -271,9 +290,34 @@ export async function renderPiWorkShell(engine: PiShellEngine): Promise<void> {
     ].join("  │  ")));
     tui.requestRender();
   };
+  // A command's panel floats above the editor without taking focus; Esc with an
+  // empty draft dismisses it until the engine opens a different one.
+  let panelOverlay: OverlayHandle | undefined;
+  let shownPanelKey: string | undefined;
+  let dismissedPanelKey: string | undefined;
+  const syncPanel = () => {
+    const key = state.panel ? `${state.panel.title}\n${state.panel.lines.join("\n")}` : undefined;
+    const visibleKey = key === dismissedPanelKey ? undefined : key;
+    if (visibleKey === shownPanelKey) return;
+    panelOverlay?.hide();
+    panelOverlay = undefined;
+    shownPanelKey = visibleKey;
+    if (!visibleKey || !state.panel) return;
+    const box = new Box(1, 0, panelBg);
+    box.addChild(new Text(`${bold(state.panel.title)}  ${dim("Esc close")}`, 0, 0));
+    box.addChild(new Text(state.panel.lines.join("\n"), 0, 0));
+    panelOverlay = tui.showOverlay(box, {
+      anchor: "bottom-center",
+      width: "90%",
+      maxHeight: "60%",
+      offsetY: -4,
+      nonCapturing: true,
+    });
+  };
   const show = (next: unknown) => {
     state = readPiShellState(next);
     sync.apply(state);
+    syncPanel();
     showStatus();
   };
   // Owner state only changes on events; the elapsed time of a busy turn also moves between them.
@@ -307,6 +351,12 @@ export async function renderPiWorkShell(engine: PiShellEngine): Promise<void> {
       // move in the editor, so it jumps back to the live end the indicator points at.
       if (matchesKey(data, "end") && editor.getText().length === 0) {
         scroll.scrollToEnd();
+        tui.requestRender();
+        return { consume: true };
+      }
+      if (matchesKey(data, "escape") && shownPanelKey !== undefined && editor.getText().length === 0) {
+        dismissedPanelKey = shownPanelKey;
+        syncPanel();
         tui.requestRender();
         return { consume: true };
       }

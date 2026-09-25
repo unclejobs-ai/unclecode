@@ -68,3 +68,10 @@ test("busy status shows the newest live tool row and the turn's elapsed time", (
   const thinking = readPiShellState({ entries: [], isBusy: true, busyStatus: "✦ reasoning· planning", liveTraceLines: ["Turn started"] });
   assert.equal(formatPiShellStatus(thinking), "◆ ✦ reasoning· planning");
 });
+
+test("a command's panel is read; the resting context panel is not", () => {
+  const help = readPiShellState({ entries: [], panel: { title: "Help", lines: ["/model  pick a model", 7] } });
+  assert.deepEqual(help.panel, { title: "Help", lines: ["/model  pick a model"] });
+  assert.equal(readPiShellState({ entries: [], panel: { title: "Context", lines: ["guidance"] } }).panel, undefined);
+  assert.equal(readPiShellState({ entries: [] }).panel, undefined);
+});
