@@ -15,13 +15,25 @@ import {
   resolveProviderCredentialsPath,
   UncleCodeCredentialStore,
 } from "@unclecode/pi-bridge";
-import { config as loadEnv } from "dotenv";
+import { parse as parseDotenv } from "dotenv";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
 import { z } from "zod";
 
 import { loadExtensionConfigOverlays } from "./extension-registry.js";
 import { runRustCommand, runRustCommandSync } from "./rust-command.js";
 
-loadEnv({ quiet: true });
+/**
+ * A workspace `.env` supplies keys for configs resolved in that workspace only.
+ * It never enters process.env: the process (and the runtime owner it starts)
+ * outlives the directory, and its env reached every later session elsewhere.
+ * Real environment variables win, as with dotenv.
+ */
+function withWorkspaceDotenv(cwd: string, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const file = path.join(cwd, ".env");
+  if (!existsSync(file)) return env;
+  return { ...parseDotenv(readFileSync(file)), ...env };
+}
 
 const providerSchema = z.enum(["anthropic", "gemini", "openai", "deepseek", "xai"]);
 
@@ -267,7 +279,7 @@ export async function loadConfig(
     env?: NodeJS.ProcessEnv;
   },
 ): Promise<AppConfig> {
-  const env = overrides?.env ?? process.env;
+  const env = overrides?.env ?? withWorkspaceDotenv(overrides?.cwd ?? process.cwd(), process.env);
   const parsed = envSchema.safeParse(env);
   if (!parsed.success) {
     const message = parsed.error.issues.map((issue) => issue.message).join(", ");
