@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  formatPiShellKeysHint,
   formatPiShellQueue,
   formatPiShellStatus,
   nextPiShellMode,
@@ -111,4 +112,12 @@ test("a digit in the /sessions panel picks that session's id", () => {
   assert.equal(resolvePiSessionChoice(panel, "7"), undefined);
   assert.equal(resolvePiSessionChoice({ ...panel, title: "Help" }, "1"), undefined);
   assert.equal(resolvePiSessionChoice(undefined, "1"), undefined);
+});
+
+test("Korean sessions get Korean status chrome and panel titles", () => {
+  const idle = readPiShellState({ entries: [], uiLocale: "ko", lastTurnDurationMs: 1500, panel: { title: "Help", lines: ["/model"] } });
+  assert.equal(formatPiShellStatus(idle), "◇ 준비 완료 · 최근 1.5s");
+  assert.equal(idle.panel.title, "도움말");
+  assert.equal(formatPiShellKeysHint(idle), "PgUp/PgDn · 휠 스크롤 · Ctrl+C 종료");
+  assert.equal(formatPiShellStatus(readPiShellState({ entries: [], uiLocale: "ko", isBusy: true })), "◆ 작업 중");
 });

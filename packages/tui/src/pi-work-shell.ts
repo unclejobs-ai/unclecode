@@ -33,7 +33,7 @@ import {
   CONTEXT_DESK_PANES,
   type ContextDeskPane,
 } from "@unclecode/contracts";
-import { captureClipboardImage } from "@unclecode/orchestrator";
+import { captureClipboardImage, getWorkShellMessages } from "@unclecode/orchestrator";
 
 import {
   applyPiContextDeskAction,
@@ -47,6 +47,7 @@ import { formatPiDecisionRows, piDecisionOptionCount, type PiShellDecision, read
 import type { ProviderAuthCatalogPort } from "./work-shell-auth-provider-picker-model.js";
 import { formatAttachmentBadgeLine } from "./work-shell-attachments.js";
 import { WORK_SHELL_MODE_CYCLE } from "./work-shell-input.js";
+import { localizeWorkShellPanelChrome } from "./work-shell-view.js";
 import { selectWorkShellLiveToolTraceLines } from "./work-shell-live-activity.js";
 
 export type PiShellState = {
@@ -56,6 +57,7 @@ export type PiShellState = {
   readonly busyStatus: string;
   readonly model: string;
   readonly mode: string;
+  readonly uiLocale: "en" | "ko";
   readonly queuedCount: number;
   readonly queuePaused: boolean;
   readonly lastTurnDurationMs: number | undefined;
@@ -130,11 +132,12 @@ export function readPiShellState(value: unknown): PiShellState {
     busyStatus: typeof state.busyStatus === "string" ? state.busyStatus : "",
     model: typeof state.model === "string" ? state.model : "",
     mode: typeof state.mode === "string" ? state.mode : "default",
+    uiLocale: state.uiLocale === "ko" ? "ko" : "en",
     queuedCount: typeof state.queuedCount === "number" ? state.queuedCount : 0,
     queuePaused: state.queuePaused === true,
     lastTurnDurationMs: typeof state.lastTurnDurationMs === "number" ? state.lastTurnDurationMs : undefined,
     currentTurnStartedAt: typeof state.currentTurnStartedAt === "number" ? state.currentTurnStartedAt : undefined,
-    panel: readPiShellPanel(state.panel),
+    panel: readPiShellPanel(state.panel, state.uiLocale === "ko" ? "ko" : "en"),
     decision: readPiShellDecision(state.agentConsole),
     desk: readPiContextDesk(state),
     liveToolLine: Array.isArray(state.liveTraceLines)
@@ -143,10 +146,10 @@ export function readPiShellState(value: unknown): PiShellState {
   };
 }
 
-function readPiShellPanel(value: unknown): PiShellPanel | undefined {
+function readPiShellPanel(value: unknown, uiLocale: "en" | "ko"): PiShellPanel | undefined {
   if (!isRecord(value) || typeof value.title !== "string" || value.title === RESTING_PANEL_TITLE) return undefined;
   const lines = Array.isArray(value.lines) ? value.lines.filter((line) => typeof line === "string") : [];
-  return { title: value.title, lines };
+  return localizeWorkShellPanelChrome({ title: value.title, lines }, uiLocale);
 }
 
 /**
@@ -169,6 +172,11 @@ export function resolvePiSessionChoice(panel: PiShellPanel | undefined, digit: s
   return line?.match(/^\s*\d+\. (\S+)/u)?.[1];
 }
 
+export function formatPiShellKeysHint(state: PiShellState): string {
+  if (state.uiLocale === "ko") return `PgUp/PgDn · 휠 스크롤 · Ctrl+C ${state.isBusy ? "중단" : "종료"}`;
+  return `PgUp/PgDn · wheel scroll · Ctrl+C ${state.isBusy ? "interrupt" : "quit"}`;
+}
+
 /** Shift+Tab's next mode, in the Ink shell's cycle order. */
 export function nextPiShellMode(current: string): string {
   const index = WORK_SHELL_MODE_CYCLE.findIndex((mode) => mode === current);
@@ -181,14 +189,17 @@ export function formatPiShellQueue(state: PiShellState): string | undefined {
 }
 
 export function formatPiShellStatus(state: PiShellState, now: number = Date.now()): string {
+  const messages = getWorkShellMessages(state.uiLocale);
   if (state.isBusy) {
     const elapsed = state.currentTurnStartedAt === undefined
       ? ""
       : ` · ${(Math.max(0, now - state.currentTurnStartedAt) / 1000).toFixed(1)}s`;
-    return `◆ ${state.liveToolLine ?? (state.busyStatus || "Working")}${elapsed}`;
+    return `◆ ${state.liveToolLine ?? (state.busyStatus || messages.working)}${elapsed}`;
   }
-  const last = state.lastTurnDurationMs === undefined ? "" : ` · last ${(state.lastTurnDurationMs / 1000).toFixed(1)}s`;
-  return `◇ Ready${last}`;
+  const last = state.lastTurnDurationMs === undefined
+    ? ""
+    : ` · ${messages.last} ${(state.lastTurnDurationMs / 1000).toFixed(1)}s`;
+  return `◇ ${messages.ready}${last}`;
 }
 
 /** Lays the desk out at whatever width the overlay gives it. */
@@ -269,7 +280,7 @@ export async function renderPiWorkShell(
       `${state.model} · ${state.mode}`,
       ...(formatPiShellQueue(state) ? [formatPiShellQueue(state)] : []),
       ...(pendingImages.length > 0 ? [formatAttachmentBadgeLine(pendingImages)] : []),
-      `PgUp/PgDn · wheel scroll · Ctrl+C ${state.isBusy ? "interrupt" : "quit"}`,
+      formatPiShellKeysHint(state),
     ].join("  │  ")));
     tui.requestRender();
   };
