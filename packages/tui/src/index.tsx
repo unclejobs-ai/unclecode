@@ -28,4 +28,5 @@ export * from "./terminal-theme.js";
 export * from "./mouse-wheel.js";
 export * from "./work-shell-view.js";
 export * from "./pi-work-shell.js";
+export * from "./pi-auth-picker.js";
 export type { TuiShellHomeState } from "./shell-state.js";

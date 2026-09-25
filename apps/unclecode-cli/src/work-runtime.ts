@@ -500,7 +500,9 @@ export async function startRepl(
   }
   try {
     if (process.env.UNCLECODE_TUI_SHELL === "pi") {
-      await renderPiWorkShell(controller.initialEngine as PiShellEngine);
+      await renderPiWorkShell(controller.initialEngine as PiShellEngine, {
+        providerAuthCatalog: options.providerAuthCatalog,
+      });
       return;
     }
     await (dependencies.renderDashboard ?? renderEmbeddedWorkShellPaneDashboard)({

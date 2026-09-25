@@ -27,6 +27,8 @@ import {
   VStack,
 } from "@earendil-works/pi-tui";
 
+import { PiAuthPicker } from "./pi-auth-picker.js";
+import type { ProviderAuthCatalogPort } from "./work-shell-auth-provider-picker-model.js";
 import { selectWorkShellLiveToolTraceLines } from "./work-shell-live-activity.js";
 
 export type PiShellEntry = {
@@ -261,7 +263,10 @@ class TranscriptSync {
   }
 }
 
-export async function renderPiWorkShell(engine: PiShellEngine): Promise<void> {
+export async function renderPiWorkShell(
+  engine: PiShellEngine,
+  options: { readonly providerAuthCatalog?: ProviderAuthCatalogPort | undefined } = {},
+): Promise<void> {
   const terminal = new ProcessTerminal();
   const tui = new TuiAltScreen(terminal, undefined, undefined, { scrollToEndIndicator: () => " ↓ new output · End " });
   const transcript = new Container();
@@ -332,16 +337,27 @@ export async function renderPiWorkShell(engine: PiShellEngine): Promise<void> {
       tui.stop();
       resolve();
     };
+    const authPicker = options.providerAuthCatalog
+      ? new PiAuthPicker(tui, options.providerAuthCatalog, { bold, dim, background: panelBg })
+      : undefined;
+    editor.onChange = (text) => authPicker?.update(text);
     editor.onSubmit = (text) => {
       const line = text.trim();
       if (line.length === 0) return;
       editor.addToHistory(line);
+      if (authPicker?.submit(line)) return;
       void engine.handleSubmit(line).catch((error: unknown) => {
         status.setText(yellow(`✗ ${error instanceof Error ? error.message : String(error)}`));
         tui.requestRender();
       });
     };
     tui.addInputListener((data) => {
+      if (authPicker?.handleKey(data)) return { consume: true };
+      if (matchesKey(data, "escape") && authPicker?.isOpen) {
+        authPicker.close();
+        tui.requestRender();
+        return { consume: true };
+      }
       if (matchesKey(data, "ctrl+c")) {
         if (state.isBusy && engine.interruptTurn) engine.interruptTurn();
         else quit();
