@@ -30,4 +30,5 @@ export * from "./work-shell-view.js";
 export * from "./pi-work-shell.js";
 export * from "./pi-auth-picker.js";
 export * from "./pi-decision.js";
+export * from "./pi-context-desk.js";
 export type { TuiShellHomeState } from "./shell-state.js";

@@ -28,6 +28,16 @@ import {
 } from "@earendil-works/pi-tui";
 
 import { PiAuthPicker } from "./pi-auth-picker.js";
+import { CONTEXT_DESK_PANES, type ContextDeskPane } from "@unclecode/contracts";
+
+import {
+  applyPiContextDeskAction,
+  formatPiContextDeskLines,
+  type PiContextDesk,
+  type PiContextDeskEngine,
+  readPiContextDesk,
+  resolvePiContextDeskAction,
+} from "./pi-context-desk.js";
 import { formatPiDecisionRows, piDecisionOptionCount, type PiShellDecision, readPiShellDecision } from "./pi-decision.js";
 import type { ProviderAuthCatalogPort } from "./work-shell-auth-provider-picker-model.js";
 import { selectWorkShellLiveToolTraceLines } from "./work-shell-live-activity.js";
@@ -51,6 +61,8 @@ export type PiShellState = {
   readonly panel: PiShellPanel | undefined;
   /** A pending approval or question; ordinary submits are ignored until it is answered. */
   readonly decision: PiShellDecision | undefined;
+  /** The Context Desk (`/context`) while the engine has it open. */
+  readonly desk: PiContextDesk | undefined;
 };
 
 export type PiShellPanel = {
@@ -59,7 +71,7 @@ export type PiShellPanel = {
 };
 
 /** The slice of the work-shell engine this shell drives (local or owner-remote). */
-export type PiShellEngine = {
+export type PiShellEngine = PiContextDeskEngine & {
   getState(): unknown;
   subscribe(listener: (state: unknown) => void): () => void;
   initialize?(): unknown;
@@ -143,6 +155,7 @@ export function readPiShellState(value: unknown): PiShellState {
     currentTurnStartedAt: typeof state.currentTurnStartedAt === "number" ? state.currentTurnStartedAt : undefined,
     panel: readPiShellPanel(state.panel),
     decision: readPiShellDecision(state.agentConsole),
+    desk: readPiContextDesk(state),
     liveToolLine: Array.isArray(state.liveTraceLines)
       ? selectWorkShellLiveToolTraceLines(state.liveTraceLines.filter((line) => typeof line === "string"), 1)[0]
       : undefined,
@@ -181,6 +194,19 @@ export function formatPiShellStatus(state: PiShellState, now: number = Date.now(
   }
   const last = state.lastTurnDurationMs === undefined ? "" : ` · last ${(state.lastTurnDurationMs / 1000).toFixed(1)}s`;
   return `◇ Ready${last}`;
+}
+
+/** Lays the desk out at whatever width the overlay gives it. */
+class PiContextDeskView implements Component {
+  desk: PiContextDesk | undefined;
+
+  constructor(private readonly rows: () => number) {}
+
+  invalidate(): void {}
+
+  render(width: number): string[] {
+    return this.desk ? [...formatPiContextDeskLines(this.desk, width, Math.floor(this.rows() * 0.8))] : [];
+  }
 }
 
 /**
@@ -315,6 +341,23 @@ export async function renderPiWorkShell(
   let panelOverlay: OverlayHandle | undefined;
   let shownPanelKey: string | undefined;
   let dismissedPanelKey: string | undefined;
+  const deskView = new PiContextDeskView(() => terminal.rows);
+  // Pane moves are predicted here until the engine's state confirms them: a key
+  // typed right after ←/→ would otherwise resolve against the pane before the move.
+  let predictedPane: ContextDeskPane | undefined;
+  let deskOverlay: OverlayHandle | undefined;
+  const syncDesk = () => {
+    deskView.desk = state.desk;
+    if (state.desk && !deskOverlay) {
+      const box = new Box(1, 0, panelBg);
+      box.addChild(new Text(`${bold("Context Desk")}  ${dim("what reaches the next answer")}`, 0, 0));
+      box.addChild(deskView);
+      deskOverlay = tui.showOverlay(box, { anchor: "center", width: "96%", maxHeight: "85%", nonCapturing: true });
+    } else if (!state.desk && deskOverlay) {
+      deskOverlay.hide();
+      deskOverlay = undefined;
+    }
+  };
   // A pending decision takes the same place and cannot be dismissed, only answered or cancelled.
   const syncPanel = () => {
     const shown = state.decision
@@ -324,7 +367,7 @@ export async function renderPiWorkShell(
           hint: "",
           lines: formatPiDecisionRows(state.decision),
         }
-      : state.panel
+      : state.panel && !state.desk
         ? { key: `${state.panel.title}\n${state.panel.lines.join("\n")}`, title: state.panel.title, hint: "Esc close", lines: state.panel.lines }
         : undefined;
     const visibleKey = shown === undefined || shown.key === dismissedPanelKey ? undefined : shown.key;
@@ -346,7 +389,9 @@ export async function renderPiWorkShell(
   };
   const show = (next: unknown) => {
     state = readPiShellState(next);
+    if (!state.desk || state.desk.pane === predictedPane) predictedPane = undefined;
     sync.apply(state);
+    syncDesk();
     syncPanel();
     showStatus();
   };
@@ -414,6 +459,32 @@ export async function renderPiWorkShell(
         scroll.scrollToEnd();
         tui.requestRender();
         return { consume: true };
+      }
+      const desk = state.desk && predictedPane ? { ...state.desk, pane: predictedPane } : state.desk;
+      if (desk && !decision) {
+        if (matchesKey(data, "escape")) {
+          engine.closeOverlay?.();
+          return { consume: true };
+        }
+        const action = resolvePiContextDeskAction({
+          desk,
+          value: data.length === 1 ? data : "",
+          key: {
+            upArrow: matchesKey(data, "up"),
+            downArrow: matchesKey(data, "down"),
+            leftArrow: matchesKey(data, "left"),
+            rightArrow: matchesKey(data, "right"),
+            pageUp: matchesKey(data, "pageUp"),
+            pageDown: matchesKey(data, "pageDown"),
+            return: matchesKey(data, "enter"),
+          },
+          composerEmpty: editor.getText().length === 0,
+        });
+        if (action.type === "move-pane") {
+          const index = CONTEXT_DESK_PANES.indexOf(desk.pane) + (action.direction >= 0 ? 1 : -1);
+          predictedPane = CONTEXT_DESK_PANES[Math.min(CONTEXT_DESK_PANES.length - 1, Math.max(0, index))];
+        }
+        if (applyPiContextDeskAction(engine, desk, action)) return { consume: true };
       }
       if (matchesKey(data, "escape") && shownPanelKey !== undefined && editor.getText().length === 0) {
         dismissedPanelKey = shownPanelKey;
